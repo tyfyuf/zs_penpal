@@ -11,6 +11,7 @@ import type {
   ProjectMeta,
   ProjectTree,
   ResourceMeta,
+  ResourceSummary,
   UploadResult,
   WorkspaceSnapshot
 } from '@shared/types'
@@ -77,6 +78,9 @@ function docSummaryPath(projectId: string, docId: string): string {
 }
 function chatSummaryPath(projectId: string, chatId: string): string {
   return join(summariesDir(projectId), 'chats', `${chatId}.json`)
+}
+function resourceSummaryPath(projectId: string, resourceId: string): string {
+  return join(summariesDir(projectId), 'resources', `${resourceId}.json`)
 }
 
 function resourcesDir(projectId: string): string {
@@ -458,6 +462,8 @@ export async function readResource(projectId: string, resourceId: string): Promi
 
 export async function deleteResource(projectId: string, resourceId: string): Promise<void> {
   await rm(resourceDir(projectId, resourceId), { recursive: true, force: true })
+  // 资源删除 → 其摘要一并移除（资源摘要生命周期）
+  await rm(resourceSummaryPath(projectId, resourceId), { force: true })
 }
 
 /**
@@ -569,6 +575,18 @@ export async function readChatSummary(projectId: string, chatId: string): Promis
 
 export async function writeChatSummary(projectId: string, chatId: string, summary: ChatSummary): Promise<void> {
   await atomicWriteJson(chatSummaryPath(projectId, chatId), summary)
+}
+
+export async function readResourceSummary(projectId: string, resourceId: string): Promise<ResourceSummary | null> {
+  return readJson<ResourceSummary>(resourceSummaryPath(projectId, resourceId))
+}
+
+export async function writeResourceSummary(projectId: string, resourceId: string, summary: ResourceSummary): Promise<void> {
+  await atomicWriteJson(resourceSummaryPath(projectId, resourceId), summary)
+}
+
+export async function removeResourceSummary(projectId: string, resourceId: string): Promise<void> {
+  await rm(resourceSummaryPath(projectId, resourceId), { force: true })
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,12 @@
-import { AppConfig } from '@shared/types'
+import { AppConfig, SummaryInjectionConfig } from '@shared/types'
 import { configPath } from '../paths'
 import { atomicWriteJson, readJson } from '../util'
+
+const DEFAULT_INJECTION: SummaryInjectionConfig = {
+  project: { docSummaries: true, chatSummaries: true, resourceSummaries: true },
+  doc: { fullText: true, docChatSummaries: true, otherDocSummaries: true, resourceSummaries: true },
+  context: { docSummaries: true, docChatSummaries: true, resourceSummaries: true }
+}
 
 const DEFAULT_CONFIG: Omit<AppConfig, 'workspaceDir'> = {
   autosaveIntervalMs: 5000,
@@ -8,10 +14,19 @@ const DEFAULT_CONFIG: Omit<AppConfig, 'workspaceDir'> = {
   gitEnabled: false,
   model: 'gpt-4o',
   apiBaseUrl: 'https://api.openai.com/v1',
-  contextLimit: 256000
+  contextLimit: 256000,
+  summaryInjection: DEFAULT_INJECTION
 }
 
 let cache: AppConfig | null = null
+
+function mergeInjection(stored?: Partial<SummaryInjectionConfig>): SummaryInjectionConfig {
+  return {
+    project: { ...DEFAULT_INJECTION.project, ...(stored?.project ?? {}) },
+    doc: { ...DEFAULT_INJECTION.doc, ...(stored?.doc ?? {}) },
+    context: { ...DEFAULT_INJECTION.context, ...(stored?.context ?? {}) }
+  }
+}
 
 export async function loadConfig(): Promise<AppConfig> {
   if (cache) return cache
@@ -19,7 +34,8 @@ export async function loadConfig(): Promise<AppConfig> {
   cache = {
     ...DEFAULT_CONFIG,
     workspaceDir: '',
-    ...(stored ?? {})
+    ...(stored ?? {}),
+    summaryInjection: mergeInjection(stored?.summaryInjection)
   }
   return cache
 }
@@ -31,7 +47,11 @@ export function getConfigCached(): AppConfig {
 
 export async function setConfig(patch: Partial<AppConfig>): Promise<AppConfig> {
   const current = await loadConfig()
-  cache = { ...current, ...patch }
+  cache = {
+    ...current,
+    ...patch,
+    summaryInjection: patch.summaryInjection ? mergeInjection(patch.summaryInjection) : current.summaryInjection
+  }
   await persist()
   return cache
 }

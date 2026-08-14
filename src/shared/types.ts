@@ -72,21 +72,128 @@ export interface ChatMessage {
   attachments?: ChatAttachment[]
 }
 
-export interface DocSummary {
-  coreConflict: string
-  characterMotivation: string
-  chapterFunction: string
-  /** 上次摘要时的文档快照长度（用于 PRD 7.2 触发条件分母） */
+// ---------------------------------------------------------------------------
+// 摘要系统
+// ---------------------------------------------------------------------------
+
+export interface StoryCharacter {
+  name: string
+  aliases: string[]
+  role: string
+  goal: string
+}
+
+export interface StoryPlotPoint {
+  id: string
+  function: string
+  summary: string
+}
+
+export interface StoryForeshadow {
+  planted: string
+  status: 'resolved' | 'unresolved'
+}
+
+/** 故事拆解摘要（面向故事创作者，简化的结构化故事摘要） */
+export interface StorySummary {
+  type: 'story'
+  /** 总览 */
+  overview: string
+  characters: StoryCharacter[]
+  /** 场景/情节链 */
+  plot: StoryPlotPoint[]
+  foreshadowing: StoryForeshadow[]
+  keySettings: string[]
+  keyQuotes: string[]
+}
+
+/** 写作文档摘要 = 故事拆解 + 快照（用于 PRD 7.2 触发条件） */
+export interface DocSummary extends StorySummary {
+  /** 上次摘要时的文档快照长度（触发条件分母） */
   snapshotLength: number
-  /** 上次摘要时的文档全文快照（用于计算“增删改字符总量”） */
+  /** 上次摘要时的文档全文快照（计算“增删改字符总量”） */
   snapshot: string
   updatedAt: string
 }
 
+export interface ChatSummaryItem {
+  messageId: string
+  role: 'user' | 'assistant'
+  summary: string
+}
+
+/** 对话摘要：按顺序逐条生成的简短摘要 */
 export interface ChatSummary {
-  label: string
+  items: ChatSummaryItem[]
   updatedAt: string
+  /** 用于变化检测：最后一条消息 id */
+  lastMessageId: string
   messageCount: number
+}
+
+/** “其他”类型资源摘要（通用文本文件拆解） */
+export interface GenericResourceSummary {
+  type: 'other'
+  docType: string
+  overview: string
+  keyPoints: string[]
+  keyTerms: string[]
+  structure: string
+}
+
+/** 资源摘要：故事拆解 或 通用拆解 */
+export type ResourceSummary = { updatedAt: string } & (StorySummary | GenericResourceSummary)
+
+export interface DistillResult {
+  ok: boolean
+  /** 分类结果与用户所选类型不符 */
+  mismatch?: boolean
+  detectedType?: 'story' | 'other'
+  summary?: ResourceSummary
+  error?: string
+}
+
+/** 摘要注入配置（按对话类型分别勾选，PRD 改进） */
+export interface SummaryInjectionConfig {
+  project: {
+    /** 项目内所有文档摘要 */
+    docSummaries: boolean
+    /** 项目内所有对话摘要 */
+    chatSummaries: boolean
+    /** 项目内所有资源摘要 */
+    resourceSummaries: boolean
+  }
+  doc: {
+    /** 关联文档全文 */
+    fullText: boolean
+    /** 该文档其他对话摘要（不含当前对话） */
+    docChatSummaries: boolean
+    /** 项目内其他文档摘要 */
+    otherDocSummaries: boolean
+    /** 资源摘要 */
+    resourceSummaries: boolean
+  }
+  context: {
+    /** 项目内所有文档摘要（含该文档） */
+    docSummaries: boolean
+    /** 该文档其他对话摘要（不含当前对话） */
+    docChatSummaries: boolean
+    /** 资源摘要 */
+    resourceSummaries: boolean
+  }
+}
+
+/** 摘要区（左侧栏）展示的项目摘要概览 */
+export interface ProjectSummariesOverview {
+  docs: { docId: string; title: string; hasSummary: boolean; updatedAt?: string }[]
+  chats: { chatId: string; title: string; hasSummary: boolean; updatedAt?: string }[]
+  resources: {
+    resourceId: string
+    name: string
+    distilled: boolean
+    type?: 'story' | 'other'
+    updatedAt?: string
+  }[]
 }
 
 export interface UsageBucket {
@@ -134,6 +241,8 @@ export interface AppConfig {
   apiBaseUrl: string
   contextLimit: number
   gitBinaryPath?: string
+  /** 摘要注入配置（按对话类型勾选） */
+  summaryInjection: SummaryInjectionConfig
 }
 
 export interface ProjectTree {

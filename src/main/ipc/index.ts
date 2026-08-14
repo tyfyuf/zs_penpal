@@ -29,6 +29,7 @@ import {
   readDoc,
   readDocSummary,
   readResource,
+  readResourceSummary,
   renameChat,
   renameDoc,
   renameProject,
@@ -40,8 +41,15 @@ import {
   uploadResource
 } from '../services/file.service'
 import { hasApiKey, setApiKey } from '../services/crypto.service'
-import { cancelStream, streamChat, testConnection } from '../services/api.service'
-import { queueChatSummary, retryPendingSummaries } from '../services/summary.service'
+import { cancelStream, generateChatTitle, streamChat, testConnection } from '../services/api.service'
+import {
+  distillResource,
+  listProjectSummaries,
+  queueChatSummary,
+  regenerateDocSummary,
+  retryPendingSummaries,
+  undistillResource
+} from '../services/summary.service'
 import { getSnapshot } from '../services/usage.service'
 import { commitProject, gitLog, rollback } from '../services/git.service'
 import { ensureGit } from '../install/git-installer'
@@ -109,12 +117,15 @@ export function registerIpcHandlers(): void {
   handle(IPC.chatRestore, (id) => restoreChat(id))
   handle(IPC.chatPurge, (id) => purgeChat(id))
   handle(IPC.chatSetContext, (req) => updateChatContext(req.chatId, req.contextRange))
+  handle(IPC.chatGenerateTitle, (chatId) => generateChatTitle(chatId))
 
   // 资源
   handle(IPC.resourceList, (projectId) => listResources(projectId))
   handle(IPC.resourceUpload, (req) => uploadResource(req.projectId, req.name, req.content))
   handle(IPC.resourceRead, (req) => readResource(req.projectId, req.resourceId))
   handle(IPC.resourceDelete, (req) => deleteResource(req.projectId, req.resourceId))
+  handle(IPC.resourceDistill, (req) => distillResource(req.projectId, req.resourceId, req.type))
+  handle(IPC.resourceUndistill, (req) => undistillResource(req.projectId, req.resourceId))
   handle(IPC.fileOpenExternal, (path) => importExternalFile(path))
 
   // AI
@@ -139,6 +150,9 @@ export function registerIpcHandlers(): void {
     const { chat } = await getChat(chatId)
     return readChatSummary(chat.projectId, chatId)
   })
+  handle(IPC.summaryGetResource, (req) => readResourceSummary(req.projectId, req.resourceId))
+  handle(IPC.summaryListProject, (projectId) => listProjectSummaries(projectId))
+  handle(IPC.summaryRegenerateDoc, (docId) => regenerateDocSummary(docId))
   handle(IPC.summaryQueueChat, (chatId) => {
     void queueChatSummary(chatId)
   })

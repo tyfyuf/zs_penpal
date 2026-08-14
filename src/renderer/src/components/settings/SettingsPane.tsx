@@ -121,6 +121,17 @@ export default function SettingsPane(): JSX.Element {
 
   if (!config) return <div />
 
+  const inj = config.summaryInjection
+
+  function patchInj(group: 'project' | 'doc' | 'context', key: string, value: boolean): void {
+    void updateConfig({
+      summaryInjection: {
+        ...inj,
+        [group]: { ...inj[group], [key]: value }
+      }
+    })
+  }
+
   return (
     <div className="h-full overflow-y-auto p-6">
       <h2 className="mb-4 text-lg font-semibold">设置</h2>
@@ -187,8 +198,31 @@ export default function SettingsPane(): JSX.Element {
               checked={config.summaryEnabled}
               onChange={(e) => void updateConfig({ summaryEnabled: e.target.checked })}
             />
-            启用自动摘要（文档摘要 + 聊天摘要）
+            启用自动摘要（文档摘要 + 对话摘要 + 资源摘要）
           </label>
+
+          {config.summaryEnabled && (
+            <div className="mt-4 space-y-4">
+              <InjGroup title="项目级对话">
+                <InjCheck label="项目内所有文档摘要" checked={inj.project.docSummaries} onChange={(v) => patchInj('project', 'docSummaries', v)} />
+                <InjCheck label="项目内所有对话摘要" checked={inj.project.chatSummaries} onChange={(v) => patchInj('project', 'chatSummaries', v)} />
+                <InjCheck label="项目内所有资源摘要" checked={inj.project.resourceSummaries} onChange={(v) => patchInj('project', 'resourceSummaries', v)} />
+              </InjGroup>
+
+              <InjGroup title="文档级对话（无滑块）">
+                <InjCheck label="关联文档全文" checked={inj.doc.fullText} onChange={(v) => patchInj('doc', 'fullText', v)} />
+                <InjCheck label="该文档其他对话摘要" checked={inj.doc.docChatSummaries} onChange={(v) => patchInj('doc', 'docChatSummaries', v)} />
+                <InjCheck label="项目内其他文档摘要" checked={inj.doc.otherDocSummaries} onChange={(v) => patchInj('doc', 'otherDocSummaries', v)} />
+                <InjCheck label="资源摘要" checked={inj.doc.resourceSummaries} onChange={(v) => patchInj('doc', 'resourceSummaries', v)} />
+              </InjGroup>
+
+              <InjGroup title="文档级对话（有滑块）">
+                <InjCheck label="项目内所有文档摘要（含该文档）" checked={inj.context.docSummaries} onChange={(v) => patchInj('context', 'docSummaries', v)} />
+                <InjCheck label="该文档其他对话摘要" checked={inj.context.docChatSummaries} onChange={(v) => patchInj('context', 'docChatSummaries', v)} />
+                <InjCheck label="资源摘要" checked={inj.context.resourceSummaries} onChange={(v) => patchInj('context', 'resourceSummaries', v)} />
+              </InjGroup>
+            </div>
+          )}
         </Section>
 
         <Section title="版本管理">
@@ -277,5 +311,25 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       </div>
       {children}
     </div>
+  )
+}
+
+function InjGroup({ title, children }: { title: string; children: React.ReactNode }): JSX.Element {
+  return (
+    <div>
+      <div className="mb-1 text-xs font-semibold" style={{ color: 'var(--muted)' }}>
+        {title}
+      </div>
+      <div className="space-y-1">{children}</div>
+    </div>
+  )
+}
+
+function InjCheck({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }): JSX.Element {
+  return (
+    <label className="flex items-center gap-2 text-sm">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      {label}
+    </label>
   )
 }

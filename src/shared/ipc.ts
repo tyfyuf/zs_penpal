@@ -8,14 +8,17 @@ import type {
   ChatSummary,
   ConnectionTestResult,
   ContextRange,
+  DistillResult,
   DocMeta,
   DocSummary,
   ExportProjectOptions,
   ExternalFileResult,
   GitCommitInfo,
   ProjectMeta,
+  ProjectSummariesOverview,
   RecoveryState,
   ResourceMeta,
+  ResourceSummary,
   StreamDonePayload,
   StreamRequest,
   UploadResult,
@@ -96,10 +99,13 @@ export const IPC = {
   chatRestore: 'chat:restore',
   chatPurge: 'chat:purge',
   chatSetContext: 'chat:setContext',
+  chatGenerateTitle: 'chat:generateTitle',
   resourceList: 'resource:list',
   resourceUpload: 'resource:upload',
   resourceRead: 'resource:read',
   resourceDelete: 'resource:delete',
+  resourceDistill: 'resource:distill',
+  resourceUndistill: 'resource:undistill',
   fileOpenExternal: 'file:openExternal',
   apiStreamChat: 'api:streamChat',
   apiCancelStream: 'api:cancelStream',
@@ -108,6 +114,9 @@ export const IPC = {
   cryptoTestConnection: 'crypto:testConnection',
   summaryGetDoc: 'summary:getDoc',
   summaryGetChat: 'summary:getChat',
+  summaryGetResource: 'summary:getResource',
+  summaryListProject: 'summary:listProject',
+  summaryRegenerateDoc: 'summary:regenerateDoc',
   summaryQueueChat: 'summary:queueChat',
   usageGet: 'usage:get',
   gitEnsure: 'git:ensure',
@@ -156,10 +165,13 @@ export interface IpcApi {
   [IPC.chatRestore]: { req: string; res: ChatMeta }
   [IPC.chatPurge]: { req: string; res: void }
   [IPC.chatSetContext]: { req: { chatId: string; contextRange: ContextRange }; res: ChatMeta }
+  [IPC.chatGenerateTitle]: { req: string; res: { ok: boolean; title?: string; error?: string } }
   [IPC.resourceList]: { req: string; res: ResourceMeta[] }
   [IPC.resourceUpload]: { req: ResourceUploadInput; res: ResourceMeta }
   [IPC.resourceRead]: { req: { resourceId: string; projectId: string }; res: { content: string; name: string } }
   [IPC.resourceDelete]: { req: { resourceId: string; projectId: string }; res: void }
+  [IPC.resourceDistill]: { req: { projectId: string; resourceId: string; type: 'story' | 'other' }; res: DistillResult }
+  [IPC.resourceUndistill]: { req: { projectId: string; resourceId: string }; res: void }
   [IPC.fileOpenExternal]: { req: string; res: ExternalFileResult }
   [IPC.apiStreamChat]: { req: StreamChatInput; res: void }
   [IPC.apiCancelStream]: { req: string; res: void }
@@ -168,6 +180,9 @@ export interface IpcApi {
   [IPC.cryptoTestConnection]: { req: void; res: ConnectionTestResult }
   [IPC.summaryGetDoc]: { req: string; res: DocSummary | null }
   [IPC.summaryGetChat]: { req: string; res: ChatSummary | null }
+  [IPC.summaryGetResource]: { req: { projectId: string; resourceId: string }; res: ResourceSummary | null }
+  [IPC.summaryListProject]: { req: string; res: ProjectSummariesOverview }
+  [IPC.summaryRegenerateDoc]: { req: string; res: { ok: boolean; error?: string } }
   [IPC.summaryQueueChat]: { req: string; res: void }
   [IPC.usageGet]: { req: void; res: UsageSnapshot }
   [IPC.gitEnsure]: { req: { consent: boolean }; res: { ok: boolean; reason?: string; path?: string } }

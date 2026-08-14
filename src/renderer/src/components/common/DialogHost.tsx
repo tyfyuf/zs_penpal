@@ -14,23 +14,37 @@ export default function DialogHost(): JSX.Element | null {
   if (!state.open) return null
 
   const isPrompt = state.kind === 'prompt'
+  const isChoice = state.kind === 'choice'
 
   return (
     <Modal
-      title={isPrompt ? '输入' : '确认'}
+      title={isPrompt ? '输入' : isChoice ? '选择' : '确认'}
       onClose={() => resolve(null)}
       footer={
-        <>
-          <button className="btn" onClick={() => resolve(null)}>
-            取消
-          </button>
-          <button
-            className="btn btn-primary"
-            onClick={() => resolve(isPrompt ? value.trim() || null : 'ok')}
-          >
-            确定
-          </button>
-        </>
+        isChoice ? (
+          <>
+            <button className="btn" onClick={() => resolve(null)}>
+              取消
+            </button>
+            {state.options.map((o) => (
+              <button key={o.value} className="btn btn-primary" onClick={() => resolve(o.value)}>
+                {o.label}
+              </button>
+            ))}
+          </>
+        ) : (
+          <>
+            <button className="btn" onClick={() => resolve(null)}>
+              取消
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={() => resolve(isPrompt ? value.trim() || null : 'ok')}
+            >
+              确定
+            </button>
+          </>
+        )
       }
     >
       {isPrompt ? (

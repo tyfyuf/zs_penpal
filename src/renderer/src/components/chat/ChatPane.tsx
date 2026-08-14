@@ -40,6 +40,8 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const setTabContextRange = useAppStore((s) => s.setContextRange)
+  const setStreamingChat = useAppStore((s) => s.setStreamingChat)
+  const titleGenerating = useAppStore((s) => s.titleGenerating[chatId])
 
   useEffect(() => {
     void api.invoke('chat:get', chatId).then(({ chat, messages }) => {
@@ -94,6 +96,11 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
   }, [messages, streaming?.acc])
+
+  // 同步流式状态到全局（供侧栏标题按钮等判断）
+  useEffect(() => {
+    setStreamingChat(chatId, !!streaming)
+  }, [streaming, chatId, setStreamingChat])
 
   function updateRange(r: ContextRange): void {
     setRange(r)
@@ -261,8 +268,9 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
           <textarea
             className="input min-h-[40px] flex-1 resize-none"
             rows={1}
-            placeholder="输入消息…"
+            placeholder={titleGenerating ? '正在生成标题，暂不可发送…' : '输入消息…'}
             value={input}
+            disabled={!!titleGenerating}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
@@ -280,7 +288,11 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
               取消
             </button>
           ) : (
-            <button className="btn btn-primary !px-3 !py-2" onClick={() => void send()} disabled={!input.trim() && attachments.length === 0}>
+            <button
+              className="btn btn-primary !px-3 !py-2"
+              onClick={() => void send()}
+              disabled={!!titleGenerating || (!input.trim() && attachments.length === 0)}
+            >
               <Send size={15} />
               发送
             </button>

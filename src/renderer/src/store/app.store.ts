@@ -22,6 +22,12 @@ interface AppStore {
   dirty: Record<string, boolean>
   theme: 'dark' | 'light'
   initialized: boolean
+  /** 正在流式输出的对话 */
+  streamingChats: Record<string, boolean>
+  /** 正在自动生成标题的对话 */
+  titleGenerating: Record<string, boolean>
+  /** 摘要系统版本号：任何摘要变更 +1，供摘要区刷新 */
+  summaryRevision: number
 
   init(): Promise<void>
   setTheme(t: 'dark' | 'light'): void
@@ -36,6 +42,9 @@ interface AppStore {
   setDirty(docId: string, v: boolean): void
   renameTab(tabId: string, title: string): void
   setContextRange(tabId: string, range: ContextRange): void
+  setStreamingChat(chatId: string, v: boolean): void
+  setTitleGenerating(chatId: string, v: boolean): void
+  bumpSummary(): void
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -46,6 +55,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
   dirty: {},
   theme: (localStorage.getItem('theme') as 'dark' | 'light') ?? 'dark',
   initialized: false,
+  streamingChats: {},
+  titleGenerating: {},
+  summaryRevision: 0,
 
   async init() {
     const config = await api.invoke('config:get', undefined)
@@ -176,5 +188,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   setContextRange(tabId, range) {
     set({ tabs: get().tabs.map((t) => (t.id === tabId ? { ...t, contextRange: range } : t)) })
+  },
+
+  setStreamingChat(chatId, v) {
+    set({ streamingChats: { ...get().streamingChats, [chatId]: v } })
+  },
+
+  setTitleGenerating(chatId, v) {
+    set({ titleGenerating: { ...get().titleGenerating, [chatId]: v } })
+  },
+
+  bumpSummary() {
+    set({ summaryRevision: get().summaryRevision + 1 })
   }
 }))

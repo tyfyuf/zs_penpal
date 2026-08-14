@@ -4,12 +4,14 @@ import {
   ChevronDown,
   ChevronRight,
   FileText,
+  FlaskConical,
   Folder,
   FolderOpen,
   MessageSquare,
   MoreHorizontal,
   Plus,
   Settings,
+  Sparkles,
   Trash2,
   Upload
 } from 'lucide-react'
@@ -18,6 +20,8 @@ import { useAppStore } from '../../store/app.store'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
 import { confirmDialog, promptText } from '../../store/dialog.store'
+import { runDistill, runGenerateTitle } from '../../lib/summaryActions'
+import SummaryArea from './SummaryArea'
 
 const ALLOWED_EXT = ['.txt', '.md', '.csv']
 
@@ -31,7 +35,6 @@ export default function Sidebar(): JSX.Element {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const fileInput = useRef<HTMLInputElement>(null)
   const [uploadProject, setUploadProject] = useState<string | null>(null)
-
   const toggle = (key: string): void => setExpanded((e) => ({ ...e, [key]: !e[key] }))
   const isOpen = (key: string): boolean => !!expanded[key]
 
@@ -165,7 +168,10 @@ export default function Sidebar(): JSX.Element {
         <span className="min-w-0 flex-1 cursor-pointer truncate" onClick={() => openChat(c)} title={c.title}>
           {c.title}
         </span>
-        <IconButton icon={<Trash2 size={12} />} title="删除" onClick={() => void deleteChat(c)} />
+        <div className="hidden gap-0.5 group-hover:flex">
+          <TitleButton chatId={c.id} />
+          <IconButton icon={<Trash2 size={12} />} title="删除" onClick={() => void deleteChat(c)} />
+        </div>
       </div>
     ))
   }
@@ -271,6 +277,7 @@ export default function Sidebar(): JSX.Element {
                             {c.title}
                           </span>
                           <div className="hidden gap-0.5 group-hover:flex">
+                            <TitleButton chatId={c.id} />
                             <IconButton icon={<Trash2 size={12} />} title="删除" onClick={() => void deleteChat(c)} />
                           </div>
                         </div>
@@ -286,10 +293,15 @@ export default function Sidebar(): JSX.Element {
                             {r.name}
                           </span>
                           <div className="hidden gap-0.5 group-hover:flex">
+                            <IconButton icon={<FlaskConical size={12} />} title="蒸馏" onClick={() => void runDistill(p.project.id, r.id)} />
                             <IconButton icon={<Trash2 size={12} />} title="删除" onClick={() => void deleteResource(p.project.id, r.id)} />
                           </div>
                         </div>
                       ))}
+                  </Section>
+
+                  <Section label="摘要区" open={isOpen(`${projectKey}:summary`)} onToggle={() => toggle(`${projectKey}:summary`)}>
+                    {isOpen(`${projectKey}:summary`) && <SummaryArea projectId={p.project.id} />}
                   </Section>
 
                   <Section label="归档区" open={isOpen(`${projectKey}:archive`)} onToggle={() => toggle(`${projectKey}:archive`)}>
@@ -366,12 +378,13 @@ export default function Sidebar(): JSX.Element {
   )
 }
 
-function IconButton({ icon, title, onClick }: { icon: JSX.Element; title: string; onClick: () => void }): JSX.Element {
+function IconButton({ icon, title, onClick, disabled }: { icon: JSX.Element; title: string; onClick: () => void; disabled?: boolean }): JSX.Element {
   return (
     <button
-      className="rounded p-0.5 hover:opacity-70"
+      className="rounded p-0.5 hover:opacity-70 disabled:opacity-40 disabled:hover:opacity-40"
       style={{ color: 'var(--muted)' }}
       title={title}
+      disabled={disabled}
       onClick={(e) => {
         e.stopPropagation()
         onClick()
@@ -411,5 +424,18 @@ function Section({
       </div>
       {children}
     </div>
+  )
+}
+
+function TitleButton({ chatId }: { chatId: string }): JSX.Element {
+  const streaming = useAppStore((s) => s.streamingChats[chatId])
+  const generating = useAppStore((s) => s.titleGenerating[chatId])
+  return (
+    <IconButton
+      icon={<Sparkles size={12} />}
+      title={generating ? '生成标题中…' : '自动生成标题'}
+      disabled={!!streaming || !!generating}
+      onClick={() => void runGenerateTitle(chatId)}
+    />
   )
 }
