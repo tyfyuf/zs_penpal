@@ -38,6 +38,7 @@ import { broadcast } from '../window'
 // ---------------------------------------------------------------------------
 // OpenAI 兼容流式对话（PRD 6.5 / 8.3 / tech-stack 6.6）
 // 摘要注入：按对话类型 + 用户配置注入 文档摘要 / 对话摘要 / 资源摘要
+// 思维链：捕获推理模型的 reasoning_content 并推送给渲染层展示
 // ---------------------------------------------------------------------------
 
 const SYSTEM_PROMPT = `你是写作专精辅助 Agent，职责是辅助创作者决策，不替代创作者完成写作成果。
@@ -57,6 +58,10 @@ const controllers = new Map<string, AbortController>()
 
 export function cancelStream(requestId: string): void {
   controllers.get(requestId)?.abort()
+}
+
+function makeClient(baseURL: string, apiKey: string): OpenAI {
+  return new OpenAI({ baseURL, apiKey, timeout: 180000, maxRetries: 0 })
 }
 
 // ---------------------------------------------------------------------------
@@ -175,15 +180,22 @@ function applyBudget(
 
 async function injectSummaries(
   chat: ChatMeta,
-  docContent: string | null,
-  auxMsgs: ChatCompletionMessageParam[]
-): Promise<void> {
+  docContent: string | null
+): Promise<{
+  docMsgs: ChatCompletionMessageParam[]
+  chatMsgs: ChatCompletionMessageParam[]
+  resourceMsgs: ChatCompletionMessageParam[]
+}> {
+  const docMsgs: ChatCompletionMessageParam[] = []
+  const chatMsgs: ChatCompletionMessageParam[] = []
+  const resourceMsgs: ChatCompletionMessageParam[] = []
+
   const cfg = await loadConfig()
-  if (!cfg.summaryEnabled) return
+  if (!cfg.summaryEnabled) return { docMsgs, chatMsgs, resourceMsgs }
   const inj = cfg.summaryInjection
   const projectId = chat.projectId
   const tree = (await buildSnapshot()).projects.find((p) => p.project.id === projectId)
-  if (!tree) return
+  if (!tree) return { docMsgs, chatMsgs, resourceMsgs }
 
   const kind = chat.kind
 
@@ -203,7 +215,7 @@ async function injectSummaries(
     } else {
       summary = await readDocSummary(projectId, docId)
     }
-    if (summary) auxMsgs.push({ role: 'system', content: buildDocSummaryBlock(summary) })
+    if (summary) docMsgs.push({ role: 'system', content: buildDocSummaryBlock(summary) })
   }
 
   // 对话摘要
@@ -217,7 +229,7 @@ async function injectSummaries(
   }
   for (const chatId of chatIds) {
     const s = await readChatSummary(projectId, chatId)
-    if (s && s.items.length > 0) auxMsgs.push({ role: 'system', content: buildChatSummaryBlock(s) })
+    if (s && s.items.length > 0) chatMsgs.push({ role: 'system', content: buildChatSummaryBlock(s) })
   }
 
   // 资源摘要
@@ -226,9 +238,11 @@ async function injectSummaries(
   if (includeResources) {
     for (const r of tree.resources) {
       const s = await readResourceSummary(projectId, r.id)
-      if (s) auxMsgs.push({ role: 'system', content: buildResourceSummaryBlock(s, r.name) })
+      if (s) resourceMsgs.push({ role: 'system', content: buildResourceSummaryBlock(s, r.name) })
     }
   }
+
+  return { docMsgs, chatMsgs, resourceMsgs }
 }
 
 // ---------------------------------------------------------------------------
@@ -257,18 +271,19 @@ async function buildMessages(
     systemMsgs.push({ role: 'system', content: `【关联文档全文】\n${docContent}` })
   }
 
-  // 摘要注入（文档摘要 / 对话摘要 / 资源摘要，按优先级顺序）
-  const auxMsgs: ChatCompletionMessageParam[] = []
-  await injectSummaries(chat, docContent, auxMsgs)
+  // 摘要注入：文档摘要 > 资源快照 > 对话摘要 > 资源摘要（按优先级排列）
+  const { docMsgs, chatMsgs, resourceMsgs } = await injectSummaries(chat, docContent)
 
-  // 资源快照（本次上传的文件）
+  const snapshotMsgs: ChatCompletionMessageParam[] = []
   const snapshotIds = req.snapshotIds ?? lastUserAttachments(history)
   for (const sid of snapshotIds) {
     const snap = await readSnapshot(chat.projectId, chat.id, sid)
     if (snap) {
-      auxMsgs.push({ role: 'system', content: `【用户上传文件：${snap.name}】\n${snap.content}` })
+      snapshotMsgs.push({ role: 'system', content: `【用户上传文件：${snap.name}】\n${snap.content}` })
     }
   }
+
+  const auxMsgs: ChatCompletionMessageParam[] = [...docMsgs, ...snapshotMsgs, ...chatMsgs, ...resourceMsgs]
 
   // 历史
   const historyMsgs: ChatCompletionMessageParam[] = history
@@ -286,13 +301,29 @@ async function buildMessages(
 // 流式请求
 // ---------------------------------------------------------------------------
 
+/**
+ * 任何异常都必须广播 stream:done（带 error），保证渲染层不会卡在“输入中”。
+ */
 export async function streamChat(req: StreamRequest): Promise<void> {
+  try {
+    await streamChatInner(req)
+  } catch (err) {
+    const done: StreamDonePayload = {
+      chatId: req.chatId,
+      requestId: req.requestId,
+      content: '',
+      error: (err as Error).message
+    }
+    broadcast(EVENTS.streamDone, done)
+  }
+}
+
+async function streamChatInner(req: StreamRequest): Promise<void> {
   const settings = await loadApiSettings()
   const { chat, messages } = await getChat(req.chatId)
 
   // 组装本次请求的历史与用户消息
   let historyForPrompt: ChatMessage[]
-  let userMessage: ChatMessage | null = null
 
   if (req.regenerate) {
     // 去掉最后一条 assistant 回答，保留用户输入
@@ -304,21 +335,19 @@ export async function streamChat(req: StreamRequest): Promise<void> {
       }
     }
     historyForPrompt = lastAssistantIdx >= 0 ? messages.filter((_, i) => i !== lastAssistantIdx) : messages
-    void userMessage
   } else {
     const attachments = []
     for (const sid of req.snapshotIds ?? []) {
       const snap = await readSnapshot(chat.projectId, chat.id, sid)
       if (snap) attachments.push({ snapshotId: sid, name: snap.name })
     }
-    userMessage = {
+    await appendMessage(req.chatId, {
       id: req.userMessageId,
       role: 'user',
       content: req.userText,
       createdAt: nowIso(),
       attachments
-    }
-    await appendMessage(req.chatId, userMessage)
+    })
     historyForPrompt = (await getChat(req.chatId)).messages
   }
 
@@ -330,11 +359,12 @@ export async function streamChat(req: StreamRequest): Promise<void> {
     return
   }
 
-  const client = new OpenAI({ baseURL: settings.baseURL, apiKey: settings.apiKey })
+  const client = makeClient(settings.baseURL, settings.apiKey)
   const controller = new AbortController()
   controllers.set(req.requestId, controller)
 
   let acc = ''
+  let reasoning = ''
   let usage: UsageLike | undefined
   let failed = false
 
@@ -350,10 +380,18 @@ export async function streamChat(req: StreamRequest): Promise<void> {
     )
 
     for await (const chunk of stream) {
-      const delta = chunk.choices?.[0]?.delta?.content
-      if (delta) {
-        acc += delta
-        broadcast(EVENTS.streamChunk, { chatId: req.chatId, requestId: req.requestId, delta })
+      const choice = chunk.choices?.[0] as
+        | { delta?: { content?: string; reasoning_content?: string; reasoning?: string } }
+        | undefined
+      const deltaText = choice?.delta?.content
+      if (deltaText) {
+        acc += deltaText
+        broadcast(EVENTS.streamChunk, { chatId: req.chatId, requestId: req.requestId, delta: deltaText })
+      }
+      const rDelta = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning
+      if (rDelta) {
+        reasoning += rDelta
+        broadcast(EVENTS.streamChunk, { chatId: req.chatId, requestId: req.requestId, delta: '', reasoningDelta: rDelta })
       }
       const u = chunk.usage as UsageLike | undefined
       if (u) usage = u
@@ -383,22 +421,24 @@ export async function streamChat(req: StreamRequest): Promise<void> {
       chatId: req.chatId,
       requestId: req.requestId,
       content: acc,
+      reasoning: reasoning || undefined,
       error: (err as Error).message
     })
   } finally {
     controllers.delete(req.requestId)
   }
 
-  // 成功：持久化回答 + 记录用量
+  // 成功：持久化回答（含思维链）+ 记录用量
   if (!failed && acc.length > 0) {
     if (req.regenerate) {
-      await replaceLastAssistantMessage(req.chatId, acc)
+      await replaceLastAssistantMessage(req.chatId, acc, reasoning || undefined)
     } else {
       await appendMessage(req.chatId, {
         id: newId(),
         role: 'assistant',
         content: acc,
-        createdAt: nowIso()
+        createdAt: nowIso(),
+        reasoning: reasoning || undefined
       })
     }
   }
@@ -413,6 +453,7 @@ export async function streamChat(req: StreamRequest): Promise<void> {
       chatId: req.chatId,
       requestId: req.requestId,
       content: acc,
+      reasoning: reasoning || undefined,
       usage: usage ? { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, total_tokens: usage.total_tokens } : undefined
     })
   }
@@ -430,7 +471,7 @@ export async function generateChatTitle(chatId: string): Promise<{ ok: boolean; 
     const turns = messages.filter((m) => m.role === 'user' || m.role === 'assistant')
     if (turns.length === 0) return { ok: false, error: '对话为空，无法生成标题' }
 
-    const client = new OpenAI({ baseURL: settings.baseURL, apiKey: settings.apiKey })
+    const client = makeClient(settings.baseURL, settings.apiKey)
     const dialogue = turns
       .map((m) => `${m.role === 'user' ? '用户' : 'AI'}：${m.content}`)
       .join('\n')
@@ -458,7 +499,7 @@ export async function testConnection(): Promise<ConnectionTestResult> {
   const settings = await loadApiSettings()
   if (!settings.apiKey) return { ok: false, message: '未配置 API Key' }
   try {
-    const client = new OpenAI({ baseURL: settings.baseURL, apiKey: settings.apiKey })
+    const client = makeClient(settings.baseURL, settings.apiKey)
     await client.models.list()
     return { ok: true, message: `连接成功（模型：${settings.model}）` }
   } catch (err) {

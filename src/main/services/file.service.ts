@@ -362,17 +362,16 @@ export async function appendMessage(chatId: string, message: ChatMessage): Promi
   await atomicWriteJson(chatMetaPath(chat.projectId, chatId), { ...chat, updatedAt: nowIso() })
 }
 
-/** 替换最近一条 assistant 回答（重新生成场景，PRD 6.6） */
-export async function replaceLastAssistantMessage(chatId: string, content: string): Promise<void> {
+/** 替换最近一条 assistant 回答（重新生成场景，PRD 6.6）；reasoning 为思维链（可空） */
+export async function replaceLastAssistantMessage(chatId: string, content: string, reasoning?: string): Promise<void> {
   const { chat, messages } = await getChat(chatId)
-  const idx = -1
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === 'assistant') {
       messages[i] = { ...messages[i], content, regenerated: true }
+      if (reasoning) messages[i].reasoning = reasoning
       break
     }
   }
-  void idx
   await atomicWrite(chatJsonlPath(chat.projectId, chatId), messages.map((m) => JSON.stringify(m)).join('\n') + (messages.length ? '\n' : ''))
   await atomicWriteJson(chatMetaPath(chat.projectId, chatId), { ...chat, updatedAt: nowIso() })
 }
@@ -561,16 +560,22 @@ export async function readSnapshot(projectId: string, chatId: string, snapshotId
 // 摘要读写
 // ---------------------------------------------------------------------------
 
+/** 读取文档摘要；旧格式（三字段版）视为无摘要，触发重新生成 */
 export async function readDocSummary(projectId: string, docId: string): Promise<DocSummary | null> {
-  return readJson<DocSummary>(docSummaryPath(projectId, docId))
+  const s = await readJson<DocSummary>(docSummaryPath(projectId, docId))
+  if (!s || !Array.isArray(s.characters)) return null
+  return s
 }
 
 export async function writeDocSummary(projectId: string, docId: string, summary: DocSummary): Promise<void> {
   await atomicWriteJson(docSummaryPath(projectId, docId), summary)
 }
 
+/** 读取对话摘要；旧格式（单标签版）视为无摘要，触发重新生成 */
 export async function readChatSummary(projectId: string, chatId: string): Promise<ChatSummary | null> {
-  return readJson<ChatSummary>(chatSummaryPath(projectId, chatId))
+  const s = await readJson<ChatSummary>(chatSummaryPath(projectId, chatId))
+  if (!s || !Array.isArray(s.items)) return null
+  return s
 }
 
 export async function writeChatSummary(projectId: string, chatId: string, summary: ChatSummary): Promise<void> {

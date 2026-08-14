@@ -201,7 +201,7 @@ export type IpcChannel = keyof IpcApi
 /** 事件载荷类型 */
 export interface EventPayloads {
   [EVENTS.openExternalFile]: string
-  [EVENTS.streamChunk]: { chatId: string; requestId: string; delta: string }
+  [EVENTS.streamChunk]: { chatId: string; requestId: string; delta: string; reasoningDelta?: string }
   [EVENTS.streamDone]: StreamDonePayload
   [EVENTS.migrateProgress]: { phase: string; message: string; percent: number }
   [EVENTS.gitInstallProgress]: { level: number; message: string }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, Copy, FileText, Paperclip, Send, Square } from 'lucide-react'
+import { Brain, Check, ChevronDown, ChevronRight, Copy, FileText, Paperclip, Send, Square } from 'lucide-react'
 import type { ChatAttachment, ChatMessage, ChatMeta, ContextRange, StreamContextRange } from '@shared/types'
 import type { Tab } from '../../store/app.store'
 import { useAppStore } from '../../store/app.store'
@@ -28,7 +28,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
   const [range, setRange] = useState<ContextRange | null>(tab.contextRange ?? null)
-  const [streaming, setStreaming] = useState<{ requestId: string; acc: string } | null>(null)
+  const [streaming, setStreaming] = useState<{ requestId: string; acc: string; reasoning: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showUpload, setShowUpload] = useState(false)
   const [regeneratePrompt, setRegeneratePrompt] = useState(false)
@@ -55,7 +55,11 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   useEffect(() => {
     const offChunk = api.on('stream:chunk', (p) => {
       if (p.chatId !== chatId) return
-      setStreaming((s) => (s && s.requestId === p.requestId ? { ...s, acc: s.acc + p.delta } : s))
+      setStreaming((s) =>
+        s && s.requestId === p.requestId
+          ? { ...s, acc: s.acc + p.delta, reasoning: s.reasoning + (p.reasoningDelta ?? '') }
+          : s
+      )
     })
     const offDone = api.on('stream:done', (p) => {
       if (p.chatId !== chatId) return
@@ -72,7 +76,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       if (p.content) {
         setMessages((m) => [
           ...m,
-          { id: `a-${p.requestId}`, role: 'assistant', content: p.content, createdAt: new Date().toISOString() }
+          { id: `a-${p.requestId}`, role: 'assistant', content: p.content, createdAt: new Date().toISOString(), reasoning: p.reasoning }
         ])
         if (sentRangeRef.current) {
           setLockedRange(sentRangeRef.current)
@@ -86,12 +90,13 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     }
   }, [chatId])
 
-  // 关闭对话窗口 → 后台生成/更新聊天摘要（PRD 7.5）
+  // 关闭对话窗口 → 后台生成/更新聊天摘要（PRD 7.5）+ 清理全局流式状态
   useEffect(() => {
     return () => {
       void api.invoke('summary:queueChat', chatId)
+      setStreamingChat(chatId, false)
     }
-  }, [chatId])
+  }, [chatId, setStreamingChat])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
@@ -125,7 +130,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
         { id: userMessageId, role: 'user', content: input, createdAt: new Date().toISOString(), attachments }
       ])
     }
-    setStreaming({ requestId, acc: '' })
+    setStreaming({ requestId, acc: '', reasoning: '' })
     setError(null)
     setRegeneratePrompt(false)
     const streamRange = chat?.kind === 'context' && chat.docId && range ? toStreamRange(range, chat.docId, chat.projectId) : undefined
@@ -210,6 +215,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
                   ))}
                 </div>
               )}
+              {m.role === 'assistant' && m.reasoning && <ReasoningBlock reasoning={m.reasoning} />}
               {m.content}
               {m.role === 'assistant' && (
                 <button
@@ -224,6 +230,29 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
             </div>
           </div>
         ))}
+
+        {streaming && streaming.reasoning && !streaming.acc && (
+          <div className="flex justify-start">
+            <div
+              className="max-w-[80%] rounded-xl border px-3 py-2 text-xs"
+              style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}
+            >
+              <div className="flex items-center gap-1" style={{ color: 'var(--muted)' }}>
+                <Brain size={12} />
+                思考过程
+              </div>
+              <div className="mt-1 whitespace-pre-wrap leading-relaxed" style={{ color: 'var(--muted)' }}>
+                {streaming.reasoning}
+                <span className="animate-pulse">▍</span>
+              </div>
+            </div>
+          </div>
+        )}
+        {streaming && streaming.reasoning && streaming.acc && (
+          <div className="flex justify-start">
+            <ReasoningBlock reasoning={streaming.reasoning} />
+          </div>
+        )}
 
         {streaming && (
           <div className="flex justify-start">
@@ -307,6 +336,28 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
           onAttached={(r) => setAttachments((a) => [...a, { snapshotId: r.snapshotId, name: r.resource.name }])}
           onClose={() => setShowUpload(false)}
         />
+      )}
+    </div>
+  )
+}
+
+function ReasoningBlock({ reasoning }: { reasoning: string }): JSX.Element {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="mb-1.5 rounded-lg border px-2.5 py-1.5 text-xs" style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}>
+      <button
+        className="flex w-full items-center gap-1"
+        style={{ color: 'var(--muted)' }}
+        onClick={() => setOpen((o) => !o)}
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <Brain size={12} />
+        思考过程
+      </button>
+      {open && (
+        <div className="mt-1 whitespace-pre-wrap leading-relaxed" style={{ color: 'var(--muted)' }}>
+          {reasoning}
+        </div>
       )}
     </div>
   )

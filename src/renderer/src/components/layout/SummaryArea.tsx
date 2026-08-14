@@ -15,21 +15,25 @@ function storyText(s: {
   keySettings: string[]
   keyQuotes: string[]
 }): string {
-  const chars = s.characters
-    .map((c) => `- ${c.name}${c.aliases.length ? `（${c.aliases.join('、')}）` : ''}：${c.role}${c.goal ? ` · 目标：${c.goal}` : ''}`)
+  const chars = (Array.isArray(s.characters) ? s.characters : [])
+    .map((c) => `- ${c.name}${c.aliases?.length ? `（${c.aliases.join('、')}）` : ''}：${c.role}${c.goal ? ` · 目标：${c.goal}` : ''}`)
     .join('\n')
-  const plot = s.plot.map((p) => `- ${p.id}｜${p.function}：${p.summary}`).join('\n')
-  const fs = s.foreshadowing.map((f) => `- ${f.planted}（${f.status === 'resolved' ? '已回收' : '未回收'}）`).join('\n')
-  return `总览：${s.overview || '（无）'}\n\n人物：\n${chars || '（无）'}\n\n情节链：\n${plot || '（无）'}\n\n伏笔：\n${fs || '（无）'}\n\n关键设定：${s.keySettings.join('、') || '（无）'}\n关键台词：${s.keyQuotes.join(' / ') || '（无）'}`
+  const plot = (Array.isArray(s.plot) ? s.plot : []).map((p) => `- ${p.id}｜${p.function}：${p.summary}`).join('\n')
+  const fs = (Array.isArray(s.foreshadowing) ? s.foreshadowing : []).map((f) => `- ${f.planted}（${f.status === 'resolved' ? '已回收' : '未回收'}）`).join('\n')
+  const settings = Array.isArray(s.keySettings) ? s.keySettings : []
+  const quotes = Array.isArray(s.keyQuotes) ? s.keyQuotes : []
+  return `总览：${s.overview || '（无）'}\n\n人物：\n${chars || '（无）'}\n\n情节链：\n${plot || '（无）'}\n\n伏笔：\n${fs || '（无）'}\n\n关键设定：${settings.join('、') || '（无）'}\n关键台词：${quotes.join(' / ') || '（无）'}`
 }
 
 function chatText(s: ChatSummary): string {
-  return s.items.map((i) => `${i.role === 'user' ? '用户' : 'AI'}：${i.summary}`).join('\n') || '（无）'
+  return (Array.isArray(s.items) ? s.items : []).map((i) => `${i.role === 'user' ? '用户' : 'AI'}：${i.summary}`).join('\n') || '（无）'
 }
 
 function resourceText(s: ResourceSummary): string {
   if (s.type === 'story') return storyText(s)
-  return `类型：${s.docType || '未知'}\n概述：${s.overview || '（无）'}\n要点：\n${s.keyPoints.map((p) => `- ${p}`).join('\n') || '（无）'}\n术语：${s.keyTerms.join('、') || '（无）'}\n结构：${s.structure || '（无）'}`
+  const keyPoints = Array.isArray(s.keyPoints) ? s.keyPoints : []
+  const keyTerms = Array.isArray(s.keyTerms) ? s.keyTerms : []
+  return `类型：${s.docType || '未知'}\n概述：${s.overview || '（无）'}\n要点：\n${keyPoints.map((p) => `- ${p}`).join('\n') || '（无）'}\n术语：${keyTerms.join('、') || '（无）'}\n结构：${s.structure || '（无）'}`
 }
 
 export default function SummaryArea({ projectId }: { projectId: string }): JSX.Element {
@@ -47,21 +51,33 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
   }, [load, summaryRevision])
 
   async function previewDoc(docId: string): Promise<void> {
-    const s = await api.invoke('summary:getDoc', docId)
-    if (s) setPreview({ title: '文档摘要', text: storyText(s as DocSummary) })
-    else toast.info('该文档暂无摘要')
+    try {
+      const s = await api.invoke('summary:getDoc', docId)
+      if (s) setPreview({ title: '文档摘要', text: storyText(s) })
+      else toast.info('该文档暂无摘要')
+    } catch (err) {
+      toast.error((err as Error).message)
+    }
   }
 
   async function previewChat(chatId: string): Promise<void> {
-    const s = await api.invoke('summary:getChat', chatId)
-    if (s) setPreview({ title: '对话摘要', text: chatText(s) })
-    else toast.info('该对话暂无摘要')
+    try {
+      const s = await api.invoke('summary:getChat', chatId)
+      if (s) setPreview({ title: '对话摘要', text: chatText(s) })
+      else toast.info('该对话暂无摘要')
+    } catch (err) {
+      toast.error((err as Error).message)
+    }
   }
 
   async function previewResource(resourceId: string): Promise<void> {
-    const s = await api.invoke('summary:getResource', { projectId, resourceId })
-    if (s) setPreview({ title: '资源摘要', text: resourceText(s) })
-    else toast.info('该资源未蒸馏')
+    try {
+      const s = await api.invoke('summary:getResource', { projectId, resourceId })
+      if (s) setPreview({ title: '资源摘要', text: resourceText(s) })
+      else toast.info('该资源未蒸馏')
+    } catch (err) {
+      toast.error((err as Error).message)
+    }
   }
 
   async function regenDoc(docId: string): Promise<void> {

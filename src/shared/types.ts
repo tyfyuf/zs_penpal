@@ -70,6 +70,8 @@ export interface ChatMessage {
   regenerated?: boolean
   /** 用户消息携带的资源快照附件（PRD 5.5 / 9.16） */
   attachments?: ChatAttachment[]
+  /** 思维链（推理模型的 reasoning_content），仅展示用，不进入后续提示词 */
+  reasoning?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +309,8 @@ export interface StreamDonePayload {
   content: string
   error?: string
   aborted?: boolean
+  /** 思维链（推理模型的 reasoning_content） */
+  reasoning?: string
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
 }
 
@@ -314,6 +318,8 @@ export interface StreamChunkPayload {
   chatId: string
   requestId: string
   delta: string
+  /** 思维链增量 */
+  reasoningDelta?: string
 }
 
 export interface RecoveryState {
