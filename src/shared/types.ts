@@ -150,7 +150,11 @@ export interface DistillResult {
   ok: boolean
   /** 分类结果与用户所选类型不符 */
   mismatch?: boolean
+  /** 分类置信度不足（<0.8），需用户确认是否仍按所选类型生成 */
+  uncertain?: boolean
   detectedType?: 'story' | 'other'
+  /** 判定理由（用于提示用户） */
+  reasons?: string[]
   summary?: ResourceSummary
   error?: string
 }

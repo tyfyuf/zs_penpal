@@ -170,7 +170,10 @@ export interface IpcApi {
   [IPC.resourceUpload]: { req: ResourceUploadInput; res: ResourceMeta }
   [IPC.resourceRead]: { req: { resourceId: string; projectId: string }; res: { content: string; name: string } }
   [IPC.resourceDelete]: { req: { resourceId: string; projectId: string }; res: void }
-  [IPC.resourceDistill]: { req: { projectId: string; resourceId: string; type: 'story' | 'other' }; res: DistillResult }
+  [IPC.resourceDistill]: {
+    req: { projectId: string; resourceId: string; type: 'story' | 'other'; force?: boolean }
+    res: DistillResult
+  }
   [IPC.resourceUndistill]: { req: { projectId: string; resourceId: string }; res: void }
   [IPC.fileOpenExternal]: { req: string; res: ExternalFileResult }
   [IPC.apiStreamChat]: { req: StreamChatInput; res: void }

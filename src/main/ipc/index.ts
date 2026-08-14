@@ -124,7 +124,7 @@ export function registerIpcHandlers(): void {
   handle(IPC.resourceUpload, (req) => uploadResource(req.projectId, req.name, req.content))
   handle(IPC.resourceRead, (req) => readResource(req.projectId, req.resourceId))
   handle(IPC.resourceDelete, (req) => deleteResource(req.projectId, req.resourceId))
-  handle(IPC.resourceDistill, (req) => distillResource(req.projectId, req.resourceId, req.type))
+  handle(IPC.resourceDistill, (req) => distillResource(req.projectId, req.resourceId, req.type, req.force))
   handle(IPC.resourceUndistill, (req) => undistillResource(req.projectId, req.resourceId))
   handle(IPC.fileOpenExternal, (path) => importExternalFile(path))
 

@@ -58,10 +58,12 @@ const GENERIC_PROMPT = `你是通用文本文件的拆解助手。请阅读下�
 }
 只依据原文，不要编造。输出必须是合法 JSON。`
 
-const CLASSIFY_PROMPT = `请判断下面文本的内容类型，只输出一个词：
-- 如果它是小说、剧本、故事类叙事作品（有人物、情节、叙事），输出 "story"
-- 否则输出 "other"
-只输出 story 或 other。`
+const CLASSIFY_PROMPT = `请判断下面文本的内容类型，输出 JSON（不要输出其他任何内容）：
+{ "type": "story" 或 "other", "confidence": 0到1之间的数字, "reasons": ["理由1", "理由2"] }
+判定标准：
+- "story"：小说、剧本、故事类叙事作品（有人物、情节、叙事推进）。
+- "other"：信息性/结构化文本（代码、列表、报告、邮件、法律条款、百科、表格等）。
+只依据文本内容判断，输出必须是合法 JSON。`
 
 const CHAT_PROMPT = `请为下面这段写作讨论对话，按顺序为每条消息生成简短摘要（每条不超过 30 字），输出 JSON 数组，每个元素形如：
 [ { "role": "user" 或 "assistant", "summary": "..." } ]
@@ -171,20 +173,87 @@ async function callGenericDecomposition(content: string, cfg: ApiSettings): Prom
   return normalizeGeneric(parseJson(res.choices[0]?.message?.content ?? ''))
 }
 
-async function classifyContentType(content: string, cfg: ApiSettings): Promise<'story' | 'other'> {
+/** 三段采样：头部/中部/尾部各取一段，避免只看开头导致误判 */
+function sampleSections(content: string, per = 2000): string {
+  if (content.length <= per * 3) return content
+  const head = content.slice(0, per)
+  const midStart = Math.floor((content.length - per) / 2)
+  const mid = content.slice(midStart, midStart + per)
+  const tail = content.slice(-per)
+  return `【开头】\n${head}\n\n【中部】\n${mid}\n\n【结尾】\n${tail}`
+}
+
+interface ClassifyDecision {
+  type: 'story' | 'other'
+  confidence: number
+  reasons: string[]
+}
+
+/**
+ * 确定性启发式预筛（零成本）：仅在强信号时直接判定，弱信号返回 null 交给模型。
+ */
+function heuristicClassify(content: string): ClassifyDecision | null {
+  const n = Math.max(content.length, 1)
+  const per1k = (count: number): number => (count / n) * 1000
+
+  const quoteChars = (content.match(/[“”「」"']/g) ?? []).length
+  const chapter = (content.match(/第[0-9一二三四五六七八九十百千零]+[章回节卷]|序章|楔子|尾声|番外|chapter\s*\d+/gi) ?? []).length
+  const pronouns = (content.match(/[他她它]/g) ?? []).length
+  const dialogue = (content.match(/[：:]\s*["“「]/g) ?? []).length
+
+  const code = (content.match(/\b(function|class|import|export|const|let|var|def|return|typedef|struct|public|private|interface|namespace)\b/g) ?? []).length
+  const headings = (content.match(/^#{1,6}\s/gm) ?? []).length
+  const tableRows = (content.match(/^\|/gm) ?? []).length
+  const urls = (content.match(/https?:\/\/|www\.|\b[\w.+-]+@[\w-]+\.[\w.]+\b/g) ?? []).length
+  const digits = content.replace(/\D/g, '').length
+
+  const storyScore = per1k(quoteChars) * 2 + chapter * 5 + per1k(pronouns) * 1.5 + dialogue * 3
+  const otherScore = code * 6 + headings * 4 + tableRows * 2 + urls * 4 + per1k(digits) * 1.5
+
+  const storySignals: string[] = []
+  if (per1k(quoteChars) >= 6) storySignals.push('对话引号密度高')
+  if (chapter > 0) storySignals.push('存在章节标题')
+  if (per1k(pronouns) >= 10) storySignals.push('人物指代密度高')
+  if (dialogue > 0) storySignals.push('存在对话段落')
+
+  const otherSignals: string[] = []
+  if (code > 0) otherSignals.push('存在代码特征')
+  if (headings > 0) otherSignals.push('存在标题层级')
+  if (tableRows > 0) otherSignals.push('存在表格')
+  if (urls > 0) otherSignals.push('存在链接/邮箱')
+  if (per1k(digits) >= 30) otherSignals.push('数字密度高')
+
+  // 强信号才直接判定（保守阈值，避免误判）
+  if (storyScore > otherScore * 2 && storyScore >= 6) {
+    return { type: 'story', confidence: 0.95, reasons: storySignals.length ? storySignals : ['叙事文本特征明显'] }
+  }
+  if (otherScore > storyScore * 2 && otherScore >= 6) {
+    return { type: 'other', confidence: 0.95, reasons: otherSignals.length ? otherSignals : ['结构化文本特征明显'] }
+  }
+  return null
+}
+
+/** 模型结构化判定：三段采样 + JSON 输出（含置信度与理由） */
+async function classifyByLlm(content: string, cfg: ApiSettings): Promise<ClassifyDecision | null> {
   const client = makeClient(cfg)
   const res = await client.chat.completions.create({
     model: cfg.model,
     messages: [
       { role: 'system', content: CLASSIFY_PROMPT },
-      { role: 'user', content: content.slice(0, 8000) }
+      { role: 'user', content: sampleSections(content) }
     ],
     temperature: 0,
-    max_tokens: 16
+    max_tokens: 256
   })
   if (res.usage) await recordUsage(res.usage, 'summary')
-  const raw = (res.choices[0]?.message?.content ?? '').trim().toLowerCase()
-  return raw.includes('story') ? 'story' : 'other'
+  const parsed = parseJson<{ type?: string; confidence?: number; reasons?: unknown[] }>(
+    res.choices[0]?.message?.content ?? ''
+  )
+  if (!parsed) return null
+  const type: 'story' | 'other' = String(parsed.type ?? '').toLowerCase().includes('story') ? 'story' : 'other'
+  const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0
+  const reasons = Array.isArray(parsed.reasons) ? (parsed.reasons as unknown[]).map(String) : []
+  return { type, confidence, reasons }
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +431,8 @@ export async function waitForSummaryQueue(timeoutMs: number): Promise<boolean> {
 export async function distillResource(
   projectId: string,
   resourceId: string,
-  type: 'story' | 'other'
+  type: 'story' | 'other',
+  force = false
 ): Promise<DistillResult> {
   const cfg = await loadConfig()
   if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未开启' }
@@ -377,27 +447,42 @@ export async function distillResource(
   }
   if (!content.trim()) return { ok: false, error: '资源内容为空' }
 
-  // 1. 廉价分类
-  let detected: 'story' | 'other'
-  try {
-    detected = await classifyContentType(content, settings)
-  } catch (err) {
-    return { ok: false, error: (err as Error).message }
+  // 类型判定（force 时跳过，直接按用户所选类型生成）
+  if (!force) {
+    // 1. 启发式预筛（零成本，强信号直接判定）
+    let decision: ClassifyDecision | null = heuristicClassify(content)
+
+    // 2. 弱信号 → 模型结构化判定（三段采样）
+    if (!decision) {
+      try {
+        decision = await classifyByLlm(content, settings)
+      } catch {
+        return { ok: false, error: '类型判定失败，请重试' }
+      }
+      if (!decision) {
+        return { ok: false, error: '类型判定失败，请重试' }
+      }
+    }
+
+    // 3. 置信度兜底：< 0.8 → 让用户确认
+    if (decision.confidence < 0.8) {
+      return { ok: false, uncertain: true, detectedType: decision.type, reasons: decision.reasons }
+    }
+
+    // 4. 与所选不符 → 提示重新选择
+    if (decision.type !== type) {
+      return { ok: false, mismatch: true, detectedType: decision.type, reasons: decision.reasons }
+    }
   }
 
-  // 2. 类型校验
-  if (detected !== type) {
-    return { ok: false, mismatch: true, detectedType: detected }
-  }
-
-  // 3. 生成对应摘要
+  // 生成对应摘要
   try {
     const summary: ResourceSummary =
       type === 'story'
         ? { ...(await callStoryDecomposition(content, settings)), updatedAt: nowIso() }
         : { ...(await callGenericDecomposition(content, settings)), updatedAt: nowIso() }
     await writeResourceSummary(projectId, resourceId, summary)
-    return { ok: true, summary, detectedType: detected }
+    return { ok: true, summary, detectedType: type }
   } catch (err) {
     return { ok: false, error: (err as Error).message }
   }
