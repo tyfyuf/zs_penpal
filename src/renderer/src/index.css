@@ -77,6 +77,15 @@ body {
 .cm-editor.cm-focused {
   outline: none;
 }
+.cm-editor .cm-gutters {
+  background: var(--panel);
+  color: var(--muted);
+  border-right: 1px solid var(--border);
+}
+.cm-editor .cm-activeLineGutter {
+  background: var(--panel3);
+  color: var(--text);
+}
 
 /* 上下文高亮装饰 */
 .cm-context-before {

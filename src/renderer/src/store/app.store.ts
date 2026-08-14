@@ -65,7 +65,31 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   async refreshWorkspace() {
     const workspace = await api.invoke('workspace:get', undefined)
-    set({ workspace })
+
+    // 关闭已被删除/归档/彻底删除的对象对应的标签页（PRD 改进：删除时关闭已打开标签）
+    const normalDocIds = new Set(workspace.projects.flatMap((p) => p.docs.map((d) => d.id)))
+    const normalChatIds = new Set(workspace.projects.flatMap((p) => p.chats.map((c) => c.id)))
+    const normalResourceIds = new Set(workspace.projects.flatMap((p) => p.resources.map((r) => r.id)))
+
+    const tabs = get().tabs.filter((t) => {
+      if (t.kind === 'doc' && t.refId) return normalDocIds.has(t.refId)
+      if (t.kind === 'chat' && t.refId) return normalChatIds.has(t.refId)
+      if (t.kind === 'resource' && t.refId) return normalResourceIds.has(t.refId)
+      return true // settings 标签保留
+    })
+
+    let activeTabId = get().activeTabId
+    if (activeTabId && !tabs.some((t) => t.id === activeTabId)) {
+      activeTabId = tabs[tabs.length - 1]?.id ?? null
+    }
+
+    // 清理已删除文档的脏标记
+    const dirty = { ...get().dirty }
+    for (const id of Object.keys(dirty)) {
+      if (!normalDocIds.has(id)) delete dirty[id]
+    }
+
+    set({ workspace, tabs, activeTabId, dirty })
   },
 
   async updateConfig(patch) {

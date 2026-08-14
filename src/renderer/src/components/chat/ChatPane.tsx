@@ -33,8 +33,10 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   const [showUpload, setShowUpload] = useState(false)
   const [regeneratePrompt, setRegeneratePrompt] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
-  const outputRangeRef = useRef<ContextRange | null>(null)
-  const hasOutputRef = useRef(false)
+  /** 本次发送实际使用的上下文范围（用于锁定“只能扩大”） */
+  const sentRangeRef = useRef<{ before: number; after: number } | null>(null)
+  /** 对话已进行后锁定的最小范围（PRD 改进：此后上下文只能扩大不能缩小） */
+  const [lockedRange, setLockedRange] = useState<{ before: number; after: number } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const setTabContextRange = useAppStore((s) => s.setContextRange)
@@ -57,10 +59,12 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       if (p.chatId !== chatId) return
       setStreaming((s) => (s && s.requestId === p.requestId ? null : s))
       if (p.aborted) {
+        sentRangeRef.current = null
         return
       }
       if (p.error) {
         setError(p.error)
+        sentRangeRef.current = null
         return
       }
       if (p.content) {
@@ -68,15 +72,17 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
           ...m,
           { id: `a-${p.requestId}`, role: 'assistant', content: p.content, createdAt: new Date().toISOString() }
         ])
-        hasOutputRef.current = true
-        outputRangeRef.current = range
+        if (sentRangeRef.current) {
+          setLockedRange(sentRangeRef.current)
+          sentRangeRef.current = null
+        }
       }
     })
     return () => {
       offChunk()
       offDone()
     }
-  }, [chatId, range])
+  }, [chatId])
 
   // 关闭对话窗口 → 后台生成/更新聊天摘要（PRD 7.5）
   useEffect(() => {
@@ -96,11 +102,8 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       useContextStore.getState().setHighlight({ docId: chat.docId, ...r })
     }
     void api.invoke('chat:setContext', { chatId, contextRange: r })
-    if (hasOutputRef.current && outputRangeRef.current) {
-      const prev = outputRangeRef.current
-      if (prev.before !== r.before || prev.after !== r.after) {
-        setRegeneratePrompt(true)
-      }
+    if (lockedRange && (r.before !== lockedRange.before || r.after !== lockedRange.after)) {
+      setRegeneratePrompt(true)
     }
   }
 
@@ -119,6 +122,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     setError(null)
     setRegeneratePrompt(false)
     const streamRange = chat?.kind === 'context' && chat.docId && range ? toStreamRange(range, chat.docId, chat.projectId) : undefined
+    sentRangeRef.current = streamRange ? { before: streamRange.before, after: streamRange.after } : null
     await api.invoke('api:streamChat', {
       chatId,
       requestId,
@@ -152,23 +156,32 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
         {chat && chat.kind === 'context' && <span className="text-xs" style={{ color: 'var(--accent)' }}>上下文对话</span>}
       </div>
 
+      {/* 上下文调控面板固定在窗口顶部，始终可见 */}
+      {isContext && chat && chat.docId && range && (
+        <div className="space-y-2 border-b px-3 py-2" style={{ borderColor: 'var(--border)' }}>
+          <ContextPanel
+            docId={chat.docId}
+            range={range}
+            disabled={!!streaming}
+            onChange={updateRange}
+            minBefore={lockedRange?.before}
+            minAfter={lockedRange?.after}
+          />
+          {regeneratePrompt && (
+            <div className="flex items-center gap-3 rounded-lg border px-3 py-2" style={{ background: 'var(--accent-soft)', borderColor: 'var(--accent)' }}>
+              <span className="text-sm">检测到上下文范围调整，是否自动重新生成最近的 AI 回答？</span>
+              <button className="btn btn-primary !px-2 !py-1" onClick={() => void send(true)}>
+                重新生成
+              </button>
+              <button className="btn !px-2 !py-1" onClick={() => setRegeneratePrompt(false)}>
+                取消
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
-        {isContext && chat?.docId && range && (
-          <ContextPanel docId={chat.docId} range={range} disabled={!!streaming} onChange={updateRange} />
-        )}
-
-        {regeneratePrompt && (
-          <div className="flex items-center gap-3 rounded-lg border px-3 py-2" style={{ background: 'var(--accent-soft)', borderColor: 'var(--accent)' }}>
-            <span className="text-sm">检测到上下文范围调整，是否自动重新生成最近的 AI 回答？</span>
-            <button className="btn btn-primary !px-2 !py-1" onClick={() => void send(true)}>
-              重新生成
-            </button>
-            <button className="btn !px-2 !py-1" onClick={() => setRegeneratePrompt(false)}>
-              取消
-            </button>
-          </div>
-        )}
-
         {messages.map((m) => (
           <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div
