@@ -1,0 +1,203 @@
+// IPC 契约：channel 名称与 request/response 类型。
+// main 进程通过 ipcMain.handle 注册，renderer 通过 preload 暴露的类型化 API 调用。
+
+import type {
+  AppConfig,
+  ChatMessage,
+  ChatMeta,
+  ChatSummary,
+  ConnectionTestResult,
+  ContextRange,
+  DocMeta,
+  DocSummary,
+  ExportProjectOptions,
+  ExternalFileResult,
+  GitCommitInfo,
+  ProjectMeta,
+  RecoveryState,
+  ResourceMeta,
+  StreamDonePayload,
+  StreamRequest,
+  UploadResult,
+  UsageSnapshot,
+  WorkspaceSnapshot
+} from './types'
+
+export interface ProjectCreateInput {
+  name: string
+}
+
+export interface DocCreateInput {
+  projectId: string
+  title: string
+}
+
+export interface ChatCreateInput {
+  projectId: string
+  kind: 'project' | 'doc' | 'context'
+  title: string
+  docId?: string
+  contextRange?: ContextRange
+}
+
+export interface ChatGetResult {
+  chat: ChatMeta
+  messages: ChatMessage[]
+}
+
+export interface ResourceUploadInput {
+  projectId: string
+  name: string
+  content: string
+}
+
+export interface StreamChatInput extends StreamRequest {}
+
+export interface UsageResult {
+  snapshot: UsageSnapshot
+}
+
+/** 主进程 → 渲染进程的事件通道 */
+export const EVENTS = {
+  openExternalFile: 'open-external-file',
+  streamChunk: 'stream:chunk',
+  streamDone: 'stream:done',
+  migrateProgress: 'migrate:progress',
+  gitInstallProgress: 'git:install-progress',
+  configChanged: 'config:changed',
+  appFlush: 'app:flush'
+} as const
+
+/** 渲染进程 → 主进程的 invoke 通道 */
+export const IPC = {
+  configGet: 'config:get',
+  configSet: 'config:set',
+  configChooseWorkspace: 'config:choose-workspace',
+  workspaceGet: 'workspace:get',
+  workspaceMigrate: 'workspace:migrate',
+  projectCreate: 'project:create',
+  projectRename: 'project:rename',
+  projectDelete: 'project:delete',
+  projectRestore: 'project:restore',
+  projectPurge: 'project:purge',
+  docCreate: 'doc:create',
+  docRead: 'doc:read',
+  docSave: 'doc:save',
+  docRename: 'doc:rename',
+  docDelete: 'doc:delete',
+  docRestore: 'doc:restore',
+  docPurge: 'doc:purge',
+  chatCreate: 'chat:create',
+  chatGet: 'chat:get',
+  chatRename: 'chat:rename',
+  chatAppend: 'chat:append',
+  chatAttachResource: 'chat:attachResource',
+  chatDelete: 'chat:delete',
+  chatRestore: 'chat:restore',
+  chatPurge: 'chat:purge',
+  chatSetContext: 'chat:setContext',
+  resourceList: 'resource:list',
+  resourceUpload: 'resource:upload',
+  resourceRead: 'resource:read',
+  resourceDelete: 'resource:delete',
+  fileOpenExternal: 'file:openExternal',
+  apiStreamChat: 'api:streamChat',
+  apiCancelStream: 'api:cancelStream',
+  cryptoSetApiKey: 'crypto:setApiKey',
+  cryptoHasApiKey: 'crypto:hasApiKey',
+  cryptoTestConnection: 'crypto:testConnection',
+  summaryGetDoc: 'summary:getDoc',
+  summaryGetChat: 'summary:getChat',
+  summaryQueueChat: 'summary:queueChat',
+  usageGet: 'usage:get',
+  gitEnsure: 'git:ensure',
+  gitCommit: 'git:commit',
+  gitLog: 'git:log',
+  gitRollback: 'git:rollback',
+  exportDoc: 'export:doc',
+  exportProject: 'export:project',
+  recoveryCheck: 'recovery:check',
+  recoveryClear: 'recovery:clear',
+  recoveryUpdate: 'recovery:update'
+} as const
+
+/** 所有 invoke 通道对应的请求/响应类型映射 */
+export interface IpcApi {
+  [IPC.configGet]: { req: void; res: AppConfig }
+  [IPC.configSet]: { req: Partial<AppConfig>; res: AppConfig }
+  [IPC.configChooseWorkspace]: { req: void; res: string | null }
+  [IPC.workspaceGet]: { req: void; res: WorkspaceSnapshot }
+  [IPC.workspaceMigrate]: { req: string; res: { ok: boolean; error?: string } }
+  [IPC.projectCreate]: { req: ProjectCreateInput; res: ProjectMeta }
+  [IPC.projectRename]: { req: { projectId: string; name: string }; res: ProjectMeta }
+  [IPC.projectDelete]: { req: string; res: void }
+  [IPC.projectRestore]: { req: string; res: ProjectMeta }
+  [IPC.projectPurge]: { req: string; res: void }
+  [IPC.docCreate]: { req: DocCreateInput; res: DocMeta }
+  [IPC.docRead]: { req: string; res: { doc: DocMeta; content: string } }
+  [IPC.docSave]: { req: { docId: string; content: string }; res: void }
+  [IPC.docRename]: { req: { docId: string; title: string }; res: DocMeta }
+  [IPC.docDelete]: { req: string; res: void }
+  [IPC.docRestore]: { req: string; res: DocMeta }
+  [IPC.docPurge]: { req: string; res: void }
+  [IPC.chatCreate]: { req: ChatCreateInput; res: ChatMeta }
+  [IPC.chatGet]: { req: string; res: ChatGetResult }
+  [IPC.chatRename]: { req: { chatId: string; title: string }; res: ChatMeta }
+  [IPC.chatAppend]: { req: { chatId: string; message: ChatMessage }; res: void }
+  [IPC.chatAttachResource]: {
+    req: {
+      chatId: string
+      projectId: string
+      source: { mode: 'resource'; resourceId: string } | { mode: 'local'; name: string; content: string }
+    }
+    res: UploadResult
+  }
+  [IPC.chatDelete]: { req: string; res: void }
+  [IPC.chatRestore]: { req: string; res: ChatMeta }
+  [IPC.chatPurge]: { req: string; res: void }
+  [IPC.chatSetContext]: { req: { chatId: string; contextRange: ContextRange }; res: ChatMeta }
+  [IPC.resourceList]: { req: string; res: ResourceMeta[] }
+  [IPC.resourceUpload]: { req: ResourceUploadInput; res: ResourceMeta }
+  [IPC.resourceRead]: { req: { resourceId: string; projectId: string }; res: { content: string; name: string } }
+  [IPC.resourceDelete]: { req: { resourceId: string; projectId: string }; res: void }
+  [IPC.fileOpenExternal]: { req: string; res: ExternalFileResult }
+  [IPC.apiStreamChat]: { req: StreamChatInput; res: void }
+  [IPC.apiCancelStream]: { req: string; res: void }
+  [IPC.cryptoSetApiKey]: { req: string; res: void }
+  [IPC.cryptoHasApiKey]: { req: void; res: boolean }
+  [IPC.cryptoTestConnection]: { req: void; res: ConnectionTestResult }
+  [IPC.summaryGetDoc]: { req: string; res: DocSummary | null }
+  [IPC.summaryGetChat]: { req: string; res: ChatSummary | null }
+  [IPC.summaryQueueChat]: { req: string; res: void }
+  [IPC.usageGet]: { req: void; res: UsageSnapshot }
+  [IPC.gitEnsure]: { req: { consent: boolean }; res: { ok: boolean; reason?: string; path?: string } }
+  [IPC.gitCommit]: { req: string; res: { ok: boolean; error?: string } }
+  [IPC.gitLog]: { req: string; res: GitCommitInfo[] }
+  [IPC.gitRollback]: { req: { projectId: string; hash: string }; res: { ok: boolean; error?: string } }
+  [IPC.exportDoc]: { req: { docId: string; format: 'md' | 'txt' }; res: { ok: boolean; path?: string; error?: string } }
+  [IPC.exportProject]: { req: { projectId: string; options: ExportProjectOptions }; res: { ok: boolean; path?: string; error?: string } }
+  [IPC.recoveryCheck]: { req: void; res: RecoveryState | null }
+  [IPC.recoveryClear]: { req: void; res: void }
+  [IPC.recoveryUpdate]: { req: RecoveryState; res: void }
+}
+
+export type IpcChannel = keyof IpcApi
+
+/** 事件载荷类型 */
+export interface EventPayloads {
+  [EVENTS.openExternalFile]: string
+  [EVENTS.streamChunk]: { chatId: string; requestId: string; delta: string }
+  [EVENTS.streamDone]: StreamDonePayload
+  [EVENTS.migrateProgress]: { phase: string; message: string; percent: number }
+  [EVENTS.gitInstallProgress]: { level: number; message: string }
+  [EVENTS.configChanged]: AppConfig
+  [EVENTS.appFlush]: void
+}
+
+export type EventChannel = keyof EventPayloads
+
+/** preload 暴露给 renderer 的类型化 API */
+export interface RendererApi {
+  invoke<K extends IpcChannel>(channel: K, req: IpcApi[K]['req']): Promise<IpcApi[K]['res']>
+  on<E extends EventChannel>(channel: E, listener: (payload: EventPayloads[E]) => void): () => void
+}

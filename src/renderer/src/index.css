@@ -1,0 +1,145 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --bg: #0d1117;
+  --panel: #151b23;
+  --panel2: #1b232d;
+  --panel3: #212b37;
+  --border: #2a333f;
+  --text: #e2e8f0;
+  --muted: #8b98a9;
+  --accent: #4493f8;
+  --accent-soft: rgba(68, 147, 248, 0.14);
+  --danger: #f85149;
+  --danger-soft: rgba(248, 81, 73, 0.14);
+  --ok: #3fb950;
+  --warn: #d29922;
+}
+
+html.light {
+  --bg: #ffffff;
+  --panel: #f6f8fa;
+  --panel2: #ffffff;
+  --panel3: #eef1f4;
+  --border: #d0d7de;
+  --text: #1f2328;
+  --muted: #57606a;
+  --accent: #0969da;
+  --accent-soft: rgba(9, 105, 218, 0.1);
+  --danger: #cf222e;
+  --danger-soft: rgba(207, 34, 46, 0.1);
+  --ok: #1a7f37;
+  --warn: #9a6700;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', 'Microsoft YaHei', -apple-system, system-ui, sans-serif;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* CodeMirror 主题适配 */
+.cm-editor {
+  height: 100%;
+  font-size: var(--cm-font-size, 15px);
+}
+.cm-editor .cm-scroller {
+  font-family: 'Segoe UI', 'Microsoft YaHei', Consolas, monospace;
+  line-height: 1.7;
+}
+.cm-editor.cm-focused {
+  outline: none;
+}
+
+/* 上下文高亮装饰 */
+.cm-context-before {
+  background: rgba(68, 147, 248, 0.10);
+}
+.cm-context-core {
+  background: rgba(68, 147, 248, 0.22);
+  border-bottom: 1px solid rgba(68, 147, 248, 0.6);
+}
+.cm-context-after {
+  background: rgba(68, 147, 248, 0.10);
+}
+
+/* 通用 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.12s, border-color 0.12s;
+}
+.btn:hover {
+  background: var(--panel3);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.btn-primary:hover {
+  background: var(--accent);
+  filter: brightness(1.08);
+}
+.btn-danger {
+  background: var(--danger-soft);
+  border-color: transparent;
+  color: var(--danger);
+}
+
+.input {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+}
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+select.input {
+  appearance: auto;
+}

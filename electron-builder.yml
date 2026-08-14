@@ -1,0 +1,33 @@
+appId: com.writingagent.app
+productName: WritingAgent
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**/*
+  - package.json
+asarUnpack:
+  - resources/**
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # 无签名证书：跳过 exe 资源编辑与签名，避免下载含 darwin 符号链接的 winCodeSign（Windows 无符号链接权限时解压失败）
+  signAndEditExecutable: false
+  fileAssociations:
+    - ext: md
+      name: Markdown Document
+      description: Markdown 文本文档
+    - ext: txt
+      name: Text Document
+      description: 纯文本文档
+    - ext: csv
+      name: CSV Document
+      description: CSV 文本文档
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true

@@ -1,0 +1,12 @@
+node_modules/
+out/
+dist/
+*.log
+.DS_Store
+.env
+.env.*
+
+# 本地构建/下载缓存（沙箱环境下重定向到工作区）
+.npm-cache/
+.electron-cache/
+.electron-builder-cache/
