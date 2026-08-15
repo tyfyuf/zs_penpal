@@ -284,6 +284,10 @@ export interface AppConfig {
   summaryInjection: SummaryInjectionConfig
   /** 界面语言（暂只影响界面文案） */
   language: 'zh' | 'en'
+  /** Git 提交者姓名（可选，未设置时提交时写入默认值） */
+  gitAuthorName?: string
+  /** Git 提交者邮箱（可选） */
+  gitAuthorEmail?: string
 }
 
 export interface ProjectTree {

@@ -31,6 +31,8 @@ export default function SettingsPane(): JSX.Element {
   const [models, setModels] = useState<string[]>([])
   const [manualModel, setManualModel] = useState(true)
   const [fetchingModels, setFetchingModels] = useState(false)
+  const [gitAuthorName, setGitAuthorName] = useState(config?.gitAuthorName ?? '')
+  const [gitAuthorEmail, setGitAuthorEmail] = useState(config?.gitAuthorEmail ?? '')
 
   useEffect(() => {
     void api.invoke('crypto:hasApiKey', undefined).then(setHasKey)
@@ -318,13 +320,41 @@ export default function SettingsPane(): JSX.Element {
             {t('settings.versionToggle')}
           </label>
           {config.gitEnabled && (
-            <div className="mt-2 flex items-center gap-2">
-              <button className="btn" onClick={() => void openHistory()}>
-                <History size={14} />
-                {t('settings.openHistory')}
-              </button>
-              <button className="btn" onClick={() => void commitNow()}>
-                {t('settings.commitNow')}
+            <div className="mt-3 space-y-3">
+              <div className="flex items-center gap-2">
+                <button className="btn" onClick={() => void openHistory()}>
+                  <History size={14} />
+                  {t('settings.openHistory')}
+                </button>
+                <button className="btn" onClick={() => void commitNow()}>
+                  {t('settings.commitNow')}
+                </button>
+              </div>
+              <Field label={t('settings.gitAuthorName')}>
+                <input
+                  className="input"
+                  value={gitAuthorName}
+                  onChange={(e) => setGitAuthorName(e.target.value)}
+                  placeholder="WritingAgent"
+                />
+              </Field>
+              <Field label={t('settings.gitAuthorEmail')}>
+                <input
+                  className="input"
+                  value={gitAuthorEmail}
+                  onChange={(e) => setGitAuthorEmail(e.target.value)}
+                  placeholder="writing-agent@localhost"
+                />
+              </Field>
+              <button
+                className="btn"
+                onClick={() =>
+                  void updateConfig({ gitAuthorName: gitAuthorName.trim(), gitAuthorEmail: gitAuthorEmail.trim() }).then(() =>
+                    toast.success(t('settings.saved'))
+                  )
+                }
+              >
+                {t('settings.save')}
               </button>
             </div>
           )}

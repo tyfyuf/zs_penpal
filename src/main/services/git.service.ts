@@ -27,6 +27,35 @@ export async function ensureProjectRepo(projectId: string): Promise<void> {
   }
 }
 
+async function getConfigValue(git: SimpleGit, key: string): Promise<string | null> {
+  try {
+    return (await git.getConfig(key)).value
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 确保提交身份（修复 "Author identity unknown"）：
+ * - 应用设置中配置了提交者姓名/邮箱 → 以此为准写入仓库级配置；
+ * - 未配置 → 检测现有身份（仓库+全局），缺失的部分写入默认值。
+ * 写入的是项目 .git/config（仓库级），不修改全局 Git 配置。
+ */
+async function ensureCommitIdentity(git: SimpleGit): Promise<void> {
+  const cfg = getConfigCached()
+  const name = (cfg.gitAuthorName ?? '').trim()
+  const email = (cfg.gitAuthorEmail ?? '').trim()
+
+  if (name) await git.addConfig('user.name', name, false, 'local')
+  if (email) await git.addConfig('user.email', email, false, 'local')
+  if (name && email) return
+
+  const existingName = name ? null : await getConfigValue(git, 'user.name')
+  const existingEmail = email ? null : await getConfigValue(git, 'user.email')
+  if (!name && !existingName) await git.addConfig('user.name', 'WritingAgent', false, 'local')
+  if (!email && !existingEmail) await git.addConfig('user.email', 'writing-agent@localhost', false, 'local')
+}
+
 /** 自动提交（PRD 2.5）：正常关闭时按项目检测变更并提交 */
 export async function commitProject(projectId: string): Promise<{ ok: boolean; committed?: boolean; error?: string }> {
   try {
@@ -36,6 +65,7 @@ export async function commitProject(projectId: string): Promise<{ ok: boolean; c
     await git.add(['-A'])
     const status = await git.status()
     if (status.files.length === 0) return { ok: true, committed: false }
+    await ensureCommitIdentity(git)
     await git.commit(`auto: ${new Date().toISOString()}`)
     return { ok: true, committed: true }
   } catch (err) {
