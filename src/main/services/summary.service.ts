@@ -60,7 +60,19 @@ function markDone(key: string): void {
 // - 全部复用主模型，独立低温度参数，用量打标 source: 'summary'
 // ---------------------------------------------------------------------------
 
-const STORY_PROMPT = `你是故事拆解助手。请阅读下面的故事全文，输出一个 JSON 对象（不要输出其他内容），字段如下：
+type Lang = 'zh' | 'en'
+
+function storyPrompt(lang: Lang): string {
+  return lang === 'en'
+    ? `You are a story decomposition assistant. Read the full story below and output a JSON object (nothing else) with these fields:
+- "overview": a summary of the main plot (one paragraph, as complete as possible)
+- "characters": array of characters, each with "name", "aliases" (array), "role", "goal"
+- "plot": array of plot points in story order, each with "id" (e.g. "s1"), "function" (advance/reveal/turn/foreshadow/resolve), "summary" (what happens at this point, as specific as possible)
+- "foreshadowing": array, each with "planted" (what was set up) and "status" ("resolved" or "unresolved")
+- "keySettings": array of key settings
+- "keyQuotes": array of key quotes
+Cover the entire text and do not omit important plot points. All content must be written in English. Output valid JSON only.`
+    : `你是故事拆解助手。请阅读下面的故事全文，输出一个 JSON 对象（不要输出其他内容），字段如下：
 - "overview"：主线剧情总览（一段话，尽量完整）
 - "characters"：人物数组，每项含 "name"（名字）、"aliases"（别名数组）、"role"（身份）、"goal"（目标）
 - "plot"：按故事顺序的情节点数组，每项含 "id"（如 s1）、"function"（推进/揭示/转折/铺垫/收束）、"summary"（这个情节点发生了什么，尽量具体）
@@ -68,25 +80,51 @@ const STORY_PROMPT = `你是故事拆解助手。请阅读下面的故事全文�
 - "keySettings"：关键设定（字符串数组）
 - "keyQuotes"：关键台词（字符串数组）
 要求覆盖全文，不要遗漏重要情节。只输出合法 JSON。`
+}
 
-const GENERIC_PROMPT = `你是文本拆解助手。请阅读下面的文本全文，输出一个 JSON 对象（不要输出其他内容），字段如下：
+function genericPrompt(lang: Lang): string {
+  return lang === 'en'
+    ? `You are a text decomposition assistant. Read the full text below and output a JSON object (nothing else) with these fields:
+- "docType": the content type (e.g. code/transcript/legal/table/narrative/email/encyclopedia)
+- "overview": a summary of the content (one paragraph)
+- "keyPoints": key points (array of strings, ordered by importance)
+- "keyTerms": key terms/entities (array of strings)
+- "structure": an overview of the structure/sections
+All content must be written in English. Output valid JSON only.`
+    : `你是文本拆解助手。请阅读下面的文本全文，输出一个 JSON 对象（不要输出其他内容），字段如下：
 - "docType"：内容类型（如 代码/对话记录/法律条款/表格/叙事/邮件/百科）
 - "overview"：内容概述（一段话）
 - "keyPoints"：核心要点（字符串数组，按重要性排列）
 - "keyTerms"：关键术语/实体（字符串数组）
 - "structure"：结构/章节概览
 只输出合法 JSON。`
+}
 
-const CLASSIFY_PROMPT = `请判断下面文本的内容类型，输出 JSON（不要输出其他任何内容）：
+function classifyPrompt(lang: Lang): string {
+  return lang === 'en'
+    ? `Classify the content type of the text below and output JSON (nothing else):
+{ "type": "story" or "other", "confidence": a number from 0 to 1, "reasons": ["reason1", "reason2"] }
+Criteria (judge by the nature of the content, not formatting):
+- "story": novels, scripts, narrative works with characters, plot progression. Dialogue-driven stories/scripts also count as story. Headings, lists, bold text are not evidence for "other".
+- "other": informational/structured text — code, data lists, reports, emails, legal text, encyclopedia entries, tables, and non-narrative chat logs/meeting transcripts.
+Write the reasons in English. Output valid JSON only.`
+    : `请判断下面文本的内容类型，输出 JSON（不要输出其他任何内容）：
 { "type": "story" 或 "other", "confidence": 0到1之间的数字, "reasons": ["理由1", "理由2"] }
 判定标准（以内容本质为准，排版格式不是依据）：
 - "story"：小说、剧本、故事类叙事作品——有人物、有情节推进、有叙事。注意：主要由人物对话构成的对话体故事/剧本也属于 story；标题层级、列表、加粗等格式特征不能作为"other"的理由。
 - "other"：信息性/结构化文本——代码、数据列表、报告、邮件、法律条款、百科条目、表格，以及非叙事的聊天记录/会议转写等。
 只依据文本内容本质判断，输出必须是合法 JSON。`
+}
 
-const CHAT_PROMPT = `请为下面这段写作讨论对话，按顺序为每条消息生成简短摘要（每条不超过 30 字），输出 JSON 数组，每个元素形如：
+function chatPrompt(lang: Lang): string {
+  return lang === 'en'
+    ? `For each message in the conversation below, write a short summary (max 30 words per message) in order. Output a JSON array where each element looks like:
+[ { "role": "user" or "assistant", "summary": "..." } ]
+Write all summaries in English. Output only the JSON array.`
+    : `请为下面这段写作讨论对话，按顺序为每条消息生成简短摘要（每条不超过 30 字），输出 JSON 数组，每个元素形如：
 [ { "role": "user" 或 "assistant", "summary": "..." } ]
 只输出 JSON 数组，不要输出其他内容。`
+}
 
 // ---------------------------------------------------------------------------
 // 工具
@@ -252,8 +290,8 @@ async function callStoryDecomposition(content: string, cfg: ApiSettings): Promis
       const res = await client.chat.completions.create({
         model: cfg.model,
         messages: [
-          { role: 'system', content: STORY_PROMPT },
-          { role: 'user', content: content || '（空文档）' }
+          { role: 'system', content: storyPrompt(cfg.language) },
+          { role: 'user', content: content || (cfg.language === 'en' ? '(empty document)' : '（空文档）') }
         ],
         temperature: 0.3,
         max_tokens: large ? 8192 : 4096
@@ -280,8 +318,8 @@ async function callGenericDecomposition(content: string, cfg: ApiSettings): Prom
       const res = await client.chat.completions.create({
         model: cfg.model,
         messages: [
-          { role: 'system', content: GENERIC_PROMPT },
-          { role: 'user', content: content || '（空内容）' }
+          { role: 'system', content: genericPrompt(cfg.language) },
+          { role: 'user', content: content || (cfg.language === 'en' ? '(empty content)' : '（空内容）') }
         ],
         temperature: 0.3,
         max_tokens: large ? 4096 : 2048
@@ -363,7 +401,7 @@ async function classifyByLlm(content: string, cfg: ApiSettings): Promise<Classif
     const res = await client.chat.completions.create({
       model: cfg.model,
       messages: [
-        { role: 'system', content: CLASSIFY_PROMPT },
+        { role: 'system', content: classifyPrompt(cfg.language) },
         { role: 'user', content: sampleSections(content) }
       ],
       temperature: 0,
@@ -519,7 +557,7 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
     const res = await client.chat.completions.create({
       model: cfg.model,
       messages: [
-        { role: 'system', content: CHAT_PROMPT },
+        { role: 'system', content: chatPrompt(cfg.language) },
         { role: 'user', content: dialogue }
       ],
       temperature: 0.3,
@@ -710,33 +748,50 @@ export async function listProjectSummaries(projectId: string): Promise<ProjectSu
 // 摘要 → prompt 格式化
 // ---------------------------------------------------------------------------
 
-function storyBlock(s: StorySummary): string {
+function storyBlock(s: StorySummary, lang: Lang): string {
+  const en = lang === 'en'
+  const none = en ? '(none)' : '（无）'
   const chars = (Array.isArray(s.characters) ? s.characters : [])
-    .map((c) => `- ${c.name}${c.aliases.length ? `（${c.aliases.join('、')}）` : ''}：${c.role}${c.goal ? ` · 目标：${c.goal}` : ''}`)
+    .map((c) =>
+      en
+        ? `- ${c.name}${c.aliases.length ? ` (${c.aliases.join(', ')})` : ''}: ${c.role}${c.goal ? ` · Goal: ${c.goal}` : ''}`
+        : `- ${c.name}${c.aliases.length ? `（${c.aliases.join('、')}）` : ''}：${c.role}${c.goal ? ` · 目标：${c.goal}` : ''}`
+    )
     .join('\n')
   const plot = (Array.isArray(s.plot) ? s.plot : []).map((p) => `- ${p.id}｜${p.function}：${p.summary}`).join('\n')
-  const fs = (Array.isArray(s.foreshadowing) ? s.foreshadowing : []).map((f) => `- ${f.planted}（${f.status === 'resolved' ? '已回收' : '未回收'}）`).join('\n')
+  const fs = (Array.isArray(s.foreshadowing) ? s.foreshadowing : [])
+    .map((f) => (en ? `- ${f.planted} (${f.status === 'resolved' ? 'resolved' : 'unresolved'})` : `- ${f.planted}（${f.status === 'resolved' ? '已回收' : '未回收'}）`))
+    .join('\n')
   const settings = Array.isArray(s.keySettings) ? s.keySettings : []
   const quotes = Array.isArray(s.keyQuotes) ? s.keyQuotes : []
-  return `总览：${s.overview || '（无）'}\n\n人物：\n${chars || '（无）'}\n\n情节链：\n${plot || '（无）'}\n\n伏笔：\n${fs || '（无）'}\n\n关键设定：${settings.join('、') || '（无）'}\n关键台词：${quotes.join(' / ') || '（无）'}`
+  if (en) {
+    return `Overview: ${s.overview || none}\n\nCharacters:\n${chars || none}\n\nPlot:\n${plot || none}\n\nForeshadowing:\n${fs || none}\n\nKey settings: ${settings.join(', ') || none}\nKey quotes: ${quotes.join(' / ') || none}`
+  }
+  return `总览：${s.overview || none}\n\n人物：\n${chars || none}\n\n情节链：\n${plot || none}\n\n伏笔：\n${fs || none}\n\n关键设定：${settings.join('、') || none}\n关键台词：${quotes.join(' / ') || none}`
 }
 
-export function buildDocSummaryBlock(s: DocSummary): string {
-  return `【文档摘要】\n${storyBlock(s)}`
+export function buildDocSummaryBlock(s: DocSummary, lang: Lang = 'zh'): string {
+  return lang === 'en' ? `【Document summary】\n${storyBlock(s, lang)}` : `【文档摘要】\n${storyBlock(s, lang)}`
 }
 
-export function buildChatSummaryBlock(s: ChatSummary): string {
+export function buildChatSummaryBlock(s: ChatSummary, lang: Lang = 'zh'): string {
+  const en = lang === 'en'
   const lines = (Array.isArray(s.items) ? s.items : [])
-    .map((i) => `${i.role === 'user' ? '用户' : 'AI'}：${i.summary}`)
+    .map((i) => `${i.role === 'user' ? (en ? 'User' : '用户') : 'AI'}：${i.summary}`)
     .join('\n')
-  return `【对话摘要】\n${lines || '（无）'}`
+  return en ? `【Chat summary】\n${lines || '(none)'}` : `【对话摘要】\n${lines || '（无）'}`
 }
 
-export function buildResourceSummaryBlock(s: ResourceSummary, name: string): string {
+export function buildResourceSummaryBlock(s: ResourceSummary, name: string, lang: Lang = 'zh'): string {
+  const en = lang === 'en'
   if (s.type === 'story') {
-    return `【资源摘要：${name}】\n${storyBlock(s)}`
+    return en ? `【Resource summary: ${name}】\n${storyBlock(s, lang)}` : `【资源摘要：${name}】\n${storyBlock(s, lang)}`
   }
   const keyPoints = Array.isArray(s.keyPoints) ? s.keyPoints : []
   const keyTerms = Array.isArray(s.keyTerms) ? s.keyTerms : []
-  return `【资源摘要：${name}】\n类型：${s.docType || '未知'}\n概述：${s.overview || '（无）'}\n要点：\n${keyPoints.map((p) => `- ${p}`).join('\n') || '（无）'}\n术语：${keyTerms.join('、') || '（无）'}\n结构：${s.structure || '（无）'}`
+  const none = en ? '(none)' : '（无）'
+  if (en) {
+    return `【Resource summary: ${name}】\nType: ${s.docType || 'unknown'}\nOverview: ${s.overview || none}\nKey points:\n${keyPoints.map((p) => `- ${p}`).join('\n') || none}\nTerms: ${keyTerms.join(', ') || none}\nStructure: ${s.structure || none}`
+  }
+  return `【资源摘要：${name}】\n类型：${s.docType || '未知'}\n概述：${s.overview || none}\n要点：\n${keyPoints.map((p) => `- ${p}`).join('\n') || none}\n术语：${keyTerms.join('、') || none}\n结构：${s.structure || none}`
 }

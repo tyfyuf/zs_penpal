@@ -43,12 +43,31 @@ import { broadcast } from '../window'
 // 思维链：捕获推理模型的 reasoning_content 并推送给渲染层展示
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `你是写作专精辅助 Agent，职责是辅助创作者决策，不替代创作者完成写作成果。
+/** 系统提示词：理性务实的回答风格 + 跟随界面语言输出 */
+function buildSystemPrompt(lang: 'zh' | 'en'): string {
+  if (lang === 'en') {
+    return `You are a writing assistant agent. Your job is to help the writer make decisions, not to replace their writing.
+Rules:
+1. Never modify the user's documents automatically, and never generate, replace or export finished files automatically.
+2. You may provide diagnosis, rewritten text, examples and plot suggestions in the chat, in any form.
+3. Your output appears only in the chat; the user decides and copies manually.
+Style:
+- Rational and pragmatic: lead with conclusions, give concrete and verifiable reasons, avoid fluff and pleasantries.
+- Point out problems and actionable improvements directly; no empty praise.
+- Stay accurate when quoting or rewriting the original text; state clearly when uncertain.
+Always respond in English.`
+  }
+  return `你是写作专精辅助 Agent，职责是辅助创作者决策，不替代创作者完成写作成果。
 规则：
 1. 你不得自动修改用户的写作文档，也不得自动生成、替换或导出成品文件。
 2. 你可以在对话中给出诊断、优化文本、改写示例和后续走向建议，表达形式不限。
 3. 你的输出只显示在对话区，由用户自行判断并手动复制粘贴。
+风格要求：
+- 理性务实：结论先行，理由具体、可验证，少用修辞与客套；
+- 直接指出问题与可操作的改进点，不空泛鼓励；
+- 涉及原文引用或改写时保持准确，不确定之处明确说明。
 请用中文回答。`
+}
 
 interface UsageLike {
   prompt_tokens: number
@@ -93,13 +112,14 @@ export function sliceContext(content: string, range: StreamContextRange): Contex
   }
 }
 
-function buildContextBlock(slice: ContextSlice): string {
+function buildContextBlock(slice: ContextSlice, lang: 'zh' | 'en'): string {
+  const en = lang === 'en'
   const parts: string[] = []
-  if (slice.beforeText) parts.push(`[前文]\n${slice.beforeText}`)
-  if (slice.coreText) parts.push(`[核心内容/选区]\n${slice.coreText}`)
-  else parts.push(`[光标位置]`)
-  if (slice.afterText) parts.push(`[后文]\n${slice.afterText}`)
-  return `【文档上下文】\n${parts.join('\n\n')}`
+  if (slice.beforeText) parts.push(`${en ? '[Before]' : '[前文]'}\n${slice.beforeText}`)
+  if (slice.coreText) parts.push(`${en ? '[Core/Selection]' : '[核心内容/选区]'}\n${slice.coreText}`)
+  else parts.push(en ? '[Cursor position]' : '[光标位置]')
+  if (slice.afterText) parts.push(`${en ? '[After]' : '[后文]'}\n${slice.afterText}`)
+  return `${en ? '【Document context】' : '【文档上下文】'}\n${parts.join('\n\n')}`
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +267,7 @@ async function injectSummaries(
 
   const cfg = await loadConfig()
   if (!cfg.summaryEnabled) return { docMsgs, chatMsgs, resourceMsgs }
+  const lang = cfg.language ?? 'zh'
   const inj = cfg.summaryInjection
   const projectId = chat.projectId
   if (!tree) return { docMsgs, chatMsgs, resourceMsgs }
@@ -270,7 +291,7 @@ async function injectSummaries(
     } else {
       summary = await readDocSummary(projectId, docId)
     }
-    if (summary) docMsgs.push({ role: 'system', content: buildDocSummaryBlock(summary) })
+    if (summary) docMsgs.push({ role: 'system', content: buildDocSummaryBlock(summary, lang) })
   }
 
   // 对话摘要
@@ -285,7 +306,7 @@ async function injectSummaries(
   for (const chatId of chatIds) {
     if (!activeKeys.has(`chat:${chatId}`)) continue
     const s = await readChatSummary(projectId, chatId)
-    if (s && s.items.length > 0) chatMsgs.push({ role: 'system', content: buildChatSummaryBlock(s) })
+    if (s && s.items.length > 0) chatMsgs.push({ role: 'system', content: buildChatSummaryBlock(s, lang) })
   }
 
   // 资源摘要
@@ -295,7 +316,7 @@ async function injectSummaries(
     for (const r of tree.resources) {
       if (!activeKeys.has(`res:${r.id}`)) continue
       const s = await readResourceSummary(projectId, r.id)
-      if (s) resourceMsgs.push({ role: 'system', content: buildResourceSummaryBlock(s, r.name) })
+      if (s) resourceMsgs.push({ role: 'system', content: buildResourceSummaryBlock(s, r.name, lang) })
     }
   }
 
@@ -310,10 +331,12 @@ async function injectSummaries(
 async function buildRegenerateGuidance(
   req: StreamRequest,
   chat: ChatMeta,
-  docContent: string | null
+  docContent: string | null,
+  lang: 'zh' | 'en'
 ): Promise<string | null> {
   const reason = req.regenerateReason
   if (!reason) return null
+  const en = lang === 'en'
   const blocks: string[] = []
 
   // 新增上下文片段（与锁定的旧范围对比）
@@ -334,12 +357,12 @@ async function buildRegenerateGuidance(
     if (range.before > old.before) {
       const from = Math.max(0, coreStart - range.before)
       const to = Math.max(0, Math.min(coreStart - old.before, n))
-      if (to > from) blocks.push(`【新增上下文·前文】\n${docContent.slice(from, to).slice(0, 4000)}`)
+      if (to > from) blocks.push(`${en ? '【New context · before】' : '【新增上下文·前文】'}\n${docContent.slice(from, to).slice(0, 4000)}`)
     }
     if (range.after > old.after) {
       const from = Math.min(coreEnd + old.after, n)
       const to = Math.min(coreEnd + range.after, n)
-      if (to > from) blocks.push(`【新增上下文·后文】\n${docContent.slice(from, to).slice(0, 4000)}`)
+      if (to > from) blocks.push(`${en ? '【New context · after】' : '【新增上下文·后文】'}\n${docContent.slice(from, to).slice(0, 4000)}`)
     }
   }
 
@@ -348,17 +371,17 @@ async function buildRegenerateGuidance(
     for (const key of req.newlyEnabledSummaries) {
       if (key.startsWith('doc:')) {
         const s = await readDocSummary(chat.projectId, key.slice(4))
-        if (s) blocks.push(buildDocSummaryBlock(s))
+        if (s) blocks.push(buildDocSummaryBlock(s, lang))
       } else if (key.startsWith('chat:')) {
         const s = await readChatSummary(chat.projectId, key.slice(5))
-        if (s && s.items.length > 0) blocks.push(buildChatSummaryBlock(s))
+        if (s && s.items.length > 0) blocks.push(buildChatSummaryBlock(s, lang))
       } else if (key.startsWith('res:')) {
         const resId = key.slice(4)
         const s = await readResourceSummary(chat.projectId, resId)
         if (s) {
           const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
-          const name = tree?.resources.find((r) => r.id === resId)?.name ?? '资源'
-          blocks.push(buildResourceSummaryBlock(s, name))
+          const name = tree?.resources.find((r) => r.id === resId)?.name ?? (en ? 'resource' : '资源')
+          blocks.push(buildResourceSummaryBlock(s, name, lang))
         }
       }
     }
@@ -366,8 +389,13 @@ async function buildRegenerateGuidance(
 
   if (blocks.length === 0) return null
 
-  const intro =
-    reason === 'context'
+  const intro = en
+    ? reason === 'context'
+      ? '[Important] The user is not satisfied with the previous answer and has expanded the context range. Read the following new context excerpts carefully and adjust your new answer accordingly:'
+      : reason === 'summary'
+        ? '[Important] The user is not satisfied with the previous answer and has added the following summary context. Incorporate this new information into your new answer:'
+        : '[Important] The user is not satisfied with the previous answer, has expanded the context range and added summary context. Read the following new content carefully and adjust your new answer accordingly:'
+    : reason === 'context'
       ? '【重要】用户对上一个回答不满意，并扩大了上下文读取范围。请着重阅读以下【新增上下文】片段，并据此调整你的新回答：'
       : reason === 'summary'
         ? '【重要】用户对上一个回答不满意，并补充了以下摘要上下文。请结合这些新信息调整你的新回答：'
@@ -387,15 +415,17 @@ async function buildMessages(
   const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
   const applicable = collectApplicableKeys(chat, cfg, tree)
   const activeKeys = computeActiveKeys(chat, applicable)
+  const lang = cfg.language ?? 'zh'
+  const en = lang === 'en'
 
-  const systemMsgs: ChatCompletionMessageParam[] = [{ role: 'system', content: SYSTEM_PROMPT }]
+  const systemMsgs: ChatCompletionMessageParam[] = [{ role: 'system', content: buildSystemPrompt(lang) }]
 
   // 关联文档上下文（切片 或 全文）
   let docContent: string | null = null
   if (chat.kind === 'context' && chat.docId && req.contextRange) {
     docContent = (await readDoc(req.contextRange.docId)).content
     const slice = sliceContext(docContent, req.contextRange)
-    systemMsgs.push({ role: 'system', content: buildContextBlock(slice) })
+    systemMsgs.push({ role: 'system', content: buildContextBlock(slice, lang) })
   } else if (chat.kind === 'doc' && chat.docId) {
     // 文档级对话：读取全文用于触发摘要检测（PRD 7.2），并按配置注入全文
     docContent = (await readDoc(chat.docId)).content
@@ -403,13 +433,13 @@ async function buildMessages(
       await ensureDocSummary(chat.projectId, chat.docId, docContent)
     }
     if (cfg.summaryInjection.doc.fullText && activeKeys.has('fulltext')) {
-      systemMsgs.push({ role: 'system', content: `【关联文档全文】\n${docContent}` })
+      systemMsgs.push({ role: 'system', content: `${en ? '【Full text of linked document】' : '【关联文档全文】'}\n${docContent}` })
     }
   }
 
   // 重新生成引导（扩大范围/补充摘要）
   if (req.regenerate && req.regenerateReason) {
-    const guidance = await buildRegenerateGuidance(req, chat, docContent)
+    const guidance = await buildRegenerateGuidance(req, chat, docContent, lang)
     if (guidance) systemMsgs.push({ role: 'system', content: guidance })
   }
 
@@ -421,7 +451,7 @@ async function buildMessages(
   for (const sid of snapshotIds) {
     const snap = await readSnapshot(chat.projectId, chat.id, sid)
     if (snap) {
-      snapshotMsgs.push({ role: 'system', content: `【用户上传文件：${snap.name}】\n${snap.content}` })
+      snapshotMsgs.push({ role: 'system', content: `${en ? '【Uploaded file: ' : '【用户上传文件：'}${snap.name}】\n${snap.content}` })
     }
   }
 
@@ -614,14 +644,20 @@ export async function generateChatTitle(chatId: string): Promise<{ ok: boolean; 
     if (turns.length === 0) return { ok: false, error: '对话为空，无法生成标题' }
 
     const client = makeClient(settings.baseURL, settings.apiKey)
+    const en = settings.language === 'en'
     const dialogue = turns
-      .map((m) => `${m.role === 'user' ? '用户' : 'AI'}：${m.content}`)
+      .map((m) => `${m.role === 'user' ? (en ? 'User' : '用户') : 'AI'}：${m.content}`)
       .join('\n')
       .slice(0, 8000)
     const res = await client.chat.completions.create({
       model: settings.model,
       messages: [
-        { role: 'system', content: '请为下面这段写作讨论对话生成一个简短标题（不超过 20 字），只输出标题文本本身。' },
+        {
+          role: 'system',
+          content: en
+            ? 'Generate a short title (max 20 words) for the following writing discussion. Output only the title text, written in English.'
+            : '请为下面这段写作讨论对话生成一个简短标题（不超过 20 字），只输出标题文本本身。'
+        },
         { role: 'user', content: dialogue }
       ],
       temperature: 0.3,
