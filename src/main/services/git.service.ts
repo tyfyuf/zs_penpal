@@ -4,6 +4,7 @@ import type { GitCommitInfo } from '@shared/types'
 import { getConfigCached } from './config.service'
 import { resolveGitBinary } from '../install/git-resolver'
 import { listProjects } from './file.service'
+import { logError } from './log.service'
 
 function projectDir(projectId: string): string {
   return join(getConfigCached().workspaceDir, projectId)
@@ -52,16 +53,25 @@ export async function commitAllProjects(): Promise<void> {
 }
 
 export async function gitLog(projectId: string): Promise<GitCommitInfo[]> {
-  const git = await getGit(projectId)
-  const isRepo = await git.checkIsRepo()
-  if (!isRepo) return []
-  const log = await git.log({ maxCount: 100 })
-  return log.all.map((c) => ({
-    hash: c.hash,
-    date: c.date,
-    message: c.message,
-    author: c.author_name
-  }))
+  try {
+    const git = await getGit(projectId)
+    const isRepo = await git.checkIsRepo()
+    if (!isRepo) return []
+    const log = await git.log({ maxCount: 100 })
+    return log.all.map((c) => ({
+      hash: c.hash,
+      date: c.date,
+      message: c.message,
+      author: c.author_name
+    }))
+  } catch (err) {
+    // 仓库已初始化但尚无提交时 git log 会报错：视为空历史
+    if (/does not have any commits/i.test((err as Error).message ?? '')) {
+      return []
+    }
+    logError('git:log', (err as Error).message, (err as Error).stack)
+    throw err
+  }
 }
 
 /**

@@ -11,6 +11,8 @@ export type ChatAction = 'diagnose' | 'plot' | 'optimize'
 export interface ChatInjectionOverrides {
   /** 关闭的注入键：'fulltext' | 'doc:<docId>' | 'chat:<chatId>' | 'res:<resourceId>' */
   disabled: string[]
+  /** 对话开始（首条消息发出）时冻结的激活注入键；此后新加入摘要系统的摘要默认关闭 */
+  active?: string[]
 }
 
 export interface ProjectMeta {

@@ -25,6 +25,7 @@ import type { Tab } from '../../store/app.store'
 import { useAppStore } from '../../store/app.store'
 import { useContextStore } from '../../store/context.store'
 import { api } from '../../lib/api'
+import { toast } from '../../store/toast.store'
 import { useT } from '../../i18n'
 import ContextPanel from './ContextPanel'
 import UploadPicker from './UploadPicker'
@@ -68,6 +69,9 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   const [lockedRange, setLockedRange] = useState<{ before: number; after: number } | null>(null)
   /** 该对话关闭的注入键（持久化到对话 meta） */
   const [disabledInjections, setDisabledInjections] = useState<string[]>([])
+  /** 对话开始（首条消息）时冻结的激活注入键；此后新摘要默认关闭 */
+  const [activeInjections, setActiveInjections] = useState<string[] | null>(null)
+  const newSummaryNotifiedRef = useRef(false)
   const pendingReasonRef = useRef<'context' | 'summary' | 'both' | null>(null)
   const pendingNewlyEnabledRef = useRef<string[]>([])
   const rangeSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -92,6 +96,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       if (chat.contextRange) setRange(chat.contextRange)
       if (chat.lockedRange) setLockedRange(chat.lockedRange)
       setDisabledInjections(chat.injectionOverrides?.disabled ?? [])
+      setActiveInjections(chat.injectionOverrides?.active ?? null)
     })
   }, [chatId])
 
@@ -234,21 +239,40 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     return items
   }, [chat, overview, config, t])
 
+  // 打开对话窗口时检测新加入摘要系统的摘要（进行中对话默认关闭），一次性提示
+  useEffect(() => {
+    if (!chat || !overview || !started || newSummaryNotifiedRef.current) return
+    if (!activeInjections) return
+    const newKeys = injectionItems
+      .map((i) => i.key)
+      .filter((k) => !activeInjections.includes(k) && !disabledInjections.includes(k))
+    if (newKeys.length > 0) {
+      newSummaryNotifiedRef.current = true
+      toast.info(t('chat.newSummaryDetected', { n: newKeys.length }))
+    }
+  }, [chat, overview, started, activeInjections, disabledInjections, injectionItems, t])
+
   function toggleInjection(key: string): void {
     if (streaming || titleGenerating) return
-    const enabled = !disabledInjections.includes(key)
-    // 对话开始后：不能关闭仍激活的摘要，只能重新开启
-    if (started && enabled) return
-    const next = enabled ? [...disabledInjections, key] : disabledInjections.filter((k) => k !== key)
-    setDisabledInjections(next)
-    void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: next } } })
-    // 重新激活（对话开始后）→ 提示重新生成
-    if (started && !enabled) {
+    const enabled = started
+      ? (activeInjections?.includes(key) ?? false)
+      : !disabledInjections.includes(key)
+    if (started) {
+      // 对话开始后：不能关闭仍激活的摘要，只能开启（新摘要或此前关闭的摘要）
+      if (enabled) return
+      const nextActive = [...(activeInjections ?? []), key]
+      setActiveInjections(nextActive)
+      void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: disabledInjections, active: nextActive } } })
       pendingNewlyEnabledRef.current = [...pendingNewlyEnabledRef.current, key]
       if (hasOutput) {
         pendingReasonRef.current = pendingReasonRef.current === 'context' ? 'both' : 'summary'
         setRegeneratePrompt(true)
       }
+    } else {
+      // 对话开始前：自由开关（记录到 disabled）
+      const next = enabled ? [...disabledInjections, key] : disabledInjections.filter((k) => k !== key)
+      setDisabledInjections(next)
+      void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: next } } })
     }
   }
 
@@ -258,6 +282,12 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     const requestId = crypto.randomUUID()
     const userMessageId = crypto.randomUUID()
     if (!regenerate) {
+      // 首条消息发出时：冻结当前激活的注入键（此后新摘要默认关闭）
+      if (messages.length === 0) {
+        const onKeys = injectionItems.filter((i) => !disabledInjections.includes(i.key)).map((i) => i.key)
+        setActiveInjections(onKeys)
+        void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: disabledInjections, active: onKeys } } })
+      }
       setMessages((m) => [
         ...m,
         { id: userMessageId, role: 'user', content: input, createdAt: new Date().toISOString(), attachments }
@@ -472,7 +502,9 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
           {injectionsOpen && (
             <div className="mt-1 max-h-40 space-y-0.5 overflow-y-auto">
               {injectionItems.map((item) => {
-                const enabled = !disabledInjections.includes(item.key)
+                const enabled = started
+                  ? (activeInjections?.includes(item.key) ?? false)
+                  : !disabledInjections.includes(item.key)
                 const locked = started && enabled
                 return (
                   <label

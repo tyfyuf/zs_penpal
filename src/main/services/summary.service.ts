@@ -12,6 +12,7 @@ import type {
 import { loadApiSettings, type ApiSettings } from './api-settings'
 import { loadConfig } from './config.service'
 import { recordUsage } from './usage.service'
+import { estimateTokens } from './tokenizer'
 import {
   buildSnapshot,
   getChat,
@@ -59,26 +60,22 @@ function markDone(key: string): void {
 // - 全部复用主模型，独立低温度参数，用量打标 source: 'summary'
 // ---------------------------------------------------------------------------
 
-const STORY_PROMPT = `你是小说/剧本的结构化拆解助手。请阅读下面的故事正文，输出一个 JSON 对象（不要输出其他任何内容），字段如下：
-{
-  "overview": "一段话总览（覆盖主线剧情）",
-  "characters": [ { "name": "人物 canonical 名", "aliases": ["别名"], "role": "身份", "goal": "当前目标" } ],
-  "plot": [ { "id": "s1", "function": "推进/揭示/转折/铺垫/收束", "summary": "这一情节发生了什么" } ],
-  "foreshadowing": [ { "planted": "埋下的伏笔", "status": "resolved 或 unresolved" } ],
-  "keySettings": ["关键设定"],
-  "keyQuotes": ["关键台词"]
-}
-只依据原文提炼，不要编造，不要省略。输出必须是合法 JSON。`
+const STORY_PROMPT = `你是故事拆解助手。请阅读下面的故事全文，输出一个 JSON 对象（不要输出其他内容），字段如下：
+- "overview"：主线剧情总览（一段话，尽量完整）
+- "characters"：人物数组，每项含 "name"（名字）、"aliases"（别名数组）、"role"（身份）、"goal"（目标）
+- "plot"：按故事顺序的情节点数组，每项含 "id"（如 s1）、"function"（推进/揭示/转折/铺垫/收束）、"summary"（这个情节点发生了什么，尽量具体）
+- "foreshadowing"：伏笔数组，每项含 "planted"（埋了什么）、"status"（resolved 或 unresolved）
+- "keySettings"：关键设定（字符串数组）
+- "keyQuotes"：关键台词（字符串数组）
+要求覆盖全文，不要遗漏重要情节。只输出合法 JSON。`
 
-const GENERIC_PROMPT = `你是通用文本文件的拆解助手。请阅读下面的文本内容，输出一个 JSON 对象（不要输出其他任何内容），字段如下：
-{
-  "docType": "内容类型（代码/对话记录/法律条款/表格/叙事/邮件/百科等）",
-  "overview": "一句话概述",
-  "keyPoints": ["核心要点"],
-  "keyTerms": ["关键术语/实体"],
-  "structure": "结构/章节概览"
-}
-只依据原文，不要编造。输出必须是合法 JSON。`
+const GENERIC_PROMPT = `你是文本拆解助手。请阅读下面的文本全文，输出一个 JSON 对象（不要输出其他内容），字段如下：
+- "docType"：内容类型（如 代码/对话记录/法律条款/表格/叙事/邮件/百科）
+- "overview"：内容概述（一段话）
+- "keyPoints"：核心要点（字符串数组，按重要性排列）
+- "keyTerms"：关键术语/实体（字符串数组）
+- "structure"：结构/章节概览
+只输出合法 JSON。`
 
 const CLASSIFY_PROMPT = `请判断下面文本的内容类型，输出 JSON（不要输出其他任何内容）：
 { "type": "story" 或 "other", "confidence": 0到1之间的数字, "reasons": ["理由1", "理由2"] }
@@ -166,115 +163,61 @@ function makeClient(cfg: ApiSettings): OpenAI {
 }
 
 // ---------------------------------------------------------------------------
-// 超长文档：分段摘要 + 合并（map-reduce），避免截断导致内容不完整
+// 字数档位 + Token 预算：优先全文一次调用（与对话上传同等的“看到全文”效果），
+// 超出预算直接拒绝并提示调整模型上下文，不再分段合并。
 // ---------------------------------------------------------------------------
 
-const LONG_THRESHOLD = 30000
-const CHUNK_SIZE = 25000
-const CHUNK_OVERLAP = 1000
-
-function splitLongContent(content: string): string[] {
-  if (content.length <= LONG_THRESHOLD) return [content]
-  const chunks: string[] = []
-  let start = 0
-  while (start < content.length) {
-    const end = Math.min(start + CHUNK_SIZE, content.length)
-    chunks.push(content.slice(start, end))
-    if (end >= content.length) break
-    start = end - CHUNK_OVERLAP
-  }
-  return chunks
+/** 输入预算：用户配置的模型上下文上限的 60%（其余留给输出与开销） */
+function inputBudget(cfg: ApiSettings): number {
+  return Math.max(4000, Math.floor(cfg.contextLimit * 0.6))
 }
 
-const STORY_MERGE_PROMPT = `请把下面多段“故事拆解摘要”（JSON 数组）合并为一份全局一致的结构化摘要，输出 JSON（不要输出其他任何内容），字段与各段相同：
-{ "overview": "...", "characters": [...], "plot": [...], "foreshadowing": [...], "keySettings": [...], "keyQuotes": [...] }
-要求：
-- overview 覆盖全文主线剧情；
-- characters 合并去重：同一人物的不同称呼统一为 canonical 名，别名合并，保留身份与目标；
-- plot 按原文顺序串接（相邻小节可合并，id 重新编号为 s1、s2…）；
-- foreshadowing 合并相同伏笔；
-- keySettings / keyQuotes 保留最重要的即可。
-输出必须是合法 JSON。`
+/** 估算输入 token：中文为主模型按 ~1.1 token/字，其余走 tiktoken 映射 */
+function estimateInputTokens(content: string, model: string): number {
+  const m = model.toLowerCase()
+  if (/(deepseek|glm|qwen|kimi|moonshot|yi-|ernie|spark)/.test(m)) {
+    return Math.ceil([...content].length * 1.1)
+  }
+  return estimateTokens(content, model)
+}
 
-const GENERIC_MERGE_PROMPT = `请把下面多段“通用文本拆解摘要”（JSON 数组）合并为一份全局一致的摘要，输出 JSON（不要输出其他任何内容），字段与各段相同：
-{ "docType": "...", "overview": "...", "keyPoints": [...], "keyTerms": [...], "structure": "..." }
-要求：overview 覆盖全文；keyPoints 合并去重并按重要性排列；keyTerms 合并去重；structure 概括全文结构。
-输出必须是合法 JSON。`
-
-async function callStoryOnce(content: string, cfg: ApiSettings, note?: string): Promise<StorySummary> {
+async function callStoryDecomposition(content: string, cfg: ApiSettings): Promise<StorySummary> {
+  const tokens = estimateInputTokens(content, cfg.model)
+  const budget = inputBudget(cfg)
+  if (tokens > budget) {
+    throw new Error('文档超出模型上下文预算（60%），请在设置中调大“模型上下文上限”或更换模型后重试')
+  }
   const client = makeClient(cfg)
-  const userContent = note ? `${note}\n\n${content}` : content
+  const large = content.length > 20000
   const res = await client.chat.completions.create({
     model: cfg.model,
     messages: [
       { role: 'system', content: STORY_PROMPT },
-      { role: 'user', content: userContent || '（空文档）' }
+      { role: 'user', content: content || '（空文档）' }
     ],
     temperature: 0.3,
-    max_tokens: 4096
+    max_tokens: large ? 8192 : 4096
   })
   if (res.usage) await recordUsage(res.usage, 'summary')
   return normalizeStory(parseJson(res.choices[0]?.message?.content ?? ''))
 }
 
-async function callStoryDecomposition(content: string, cfg: ApiSettings): Promise<StorySummary> {
-  const chunks = splitLongContent(content)
-  if (chunks.length === 1) {
-    return callStoryOnce(chunks[0], cfg)
-  }
-  // 逐段摘要（串行），再合并
-  const partSummaries: StorySummary[] = []
-  for (let i = 0; i < chunks.length; i++) {
-    partSummaries.push(await callStoryOnce(chunks[i], cfg, `（本文档较长，已分段处理。这是第 ${i + 1}/${chunks.length} 段）`))
+async function callGenericDecomposition(content: string, cfg: ApiSettings): Promise<GenericResourceSummary> {
+  const tokens = estimateInputTokens(content, cfg.model)
+  const budget = inputBudget(cfg)
+  if (tokens > budget) {
+    throw new Error('文档超出模型上下文预算（60%），请在设置中调大“模型上下文上限”或更换模型后重试')
   }
   const client = makeClient(cfg)
-  const res = await client.chat.completions.create({
-    model: cfg.model,
-    messages: [
-      { role: 'system', content: STORY_MERGE_PROMPT },
-      { role: 'user', content: JSON.stringify(partSummaries).slice(0, 30000) }
-    ],
-    temperature: 0.3,
-    max_tokens: 4096
-  })
-  if (res.usage) await recordUsage(res.usage, 'summary')
-  return normalizeStory(parseJson(res.choices[0]?.message?.content ?? ''))
-}
-
-async function callGenericOnce(content: string, cfg: ApiSettings, note?: string): Promise<GenericResourceSummary> {
-  const client = makeClient(cfg)
-  const userContent = note ? `${note}\n\n${content}` : content
+  const large = content.length > 20000
   const res = await client.chat.completions.create({
     model: cfg.model,
     messages: [
       { role: 'system', content: GENERIC_PROMPT },
-      { role: 'user', content: userContent || '（空内容）' }
+      { role: 'user', content: content || '（空内容）' }
     ],
     temperature: 0.3,
-    max_tokens: 2048
-  })
-  if (res.usage) await recordUsage(res.usage, 'summary')
-  return normalizeGeneric(parseJson(res.choices[0]?.message?.content ?? ''))
-}
-
-async function callGenericDecomposition(content: string, cfg: ApiSettings): Promise<GenericResourceSummary> {
-  const chunks = splitLongContent(content)
-  if (chunks.length === 1) {
-    return callGenericOnce(chunks[0], cfg)
-  }
-  const partSummaries: GenericResourceSummary[] = []
-  for (let i = 0; i < chunks.length; i++) {
-    partSummaries.push(await callGenericOnce(chunks[i], cfg, `（本文档较长，已分段处理。这是第 ${i + 1}/${chunks.length} 段）`))
-  }
-  const client = makeClient(cfg)
-  const res = await client.chat.completions.create({
-    model: cfg.model,
-    messages: [
-      { role: 'system', content: GENERIC_MERGE_PROMPT },
-      { role: 'user', content: JSON.stringify(partSummaries).slice(0, 30000) }
-    ],
-    temperature: 0.3,
-    max_tokens: 2048
+    max_tokens: large ? 4096 : 2048
   })
   if (res.usage) await recordUsage(res.usage, 'summary')
   return normalizeGeneric(parseJson(res.choices[0]?.message?.content ?? ''))

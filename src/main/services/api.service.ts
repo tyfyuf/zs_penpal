@@ -1,10 +1,12 @@
 import OpenAI from 'openai'
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
 import type {
+  AppConfig,
   ChatMessage,
   ChatMeta,
   ConnectionTestResult,
   DocSummary,
+  ProjectTree,
   StreamContextRange,
   StreamDonePayload,
   StreamRequest
@@ -178,9 +180,54 @@ function applyBudget(
 // 摘要注入
 // ---------------------------------------------------------------------------
 
+/** 收集该对话当前可注入的候选键（按对话类型与全局注入配置） */
+function collectApplicableKeys(chat: ChatMeta, cfg: AppConfig, tree: ProjectTree | undefined): string[] {
+  if (!tree) return []
+  const kind = chat.kind
+  const inj = cfg.summaryInjection
+  const keys: string[] = []
+
+  if (kind === 'doc' && inj.doc.fullText) keys.push('fulltext')
+
+  let docIds: string[] = []
+  if (kind === 'project' && inj.project.docSummaries) docIds = tree.docs.map((d) => d.id)
+  else if (kind === 'doc' && inj.doc.otherDocSummaries) docIds = tree.docs.filter((d) => d.id !== chat.docId).map((d) => d.id)
+  else if (kind === 'context' && inj.context.docSummaries) docIds = tree.docs.map((d) => d.id)
+  for (const id of docIds) keys.push(`doc:${id}`)
+
+  let chatIds: string[] = []
+  if (kind === 'project' && inj.project.chatSummaries) {
+    chatIds = tree.chats.filter((c) => c.id !== chat.id).map((c) => c.id)
+  } else if (kind === 'doc' && inj.doc.docChatSummaries) {
+    chatIds = tree.chats.filter((c) => c.docId === chat.docId && c.id !== chat.id).map((c) => c.id)
+  } else if (kind === 'context' && inj.context.docChatSummaries) {
+    chatIds = tree.chats.filter((c) => c.docId === chat.docId && c.id !== chat.id).map((c) => c.id)
+  }
+  for (const id of chatIds) keys.push(`chat:${id}`)
+
+  const includeRes =
+    kind === 'project' ? inj.project.resourceSummaries : kind === 'doc' ? inj.doc.resourceSummaries : inj.context.resourceSummaries
+  if (includeRes) for (const r of tree.resources) keys.push(`res:${r.id}`)
+
+  return keys
+}
+
+/**
+ * 计算激活键：对话开始（首条消息）后以冻结的 active 为准——
+ * 此后新加入摘要系统的摘要默认关闭，由用户手动开启。
+ */
+function computeActiveKeys(chat: ChatMeta, applicable: string[]): Set<string> {
+  const frozen = chat.injectionOverrides?.active
+  const disabled = chat.injectionOverrides?.disabled ?? []
+  if (frozen) return new Set(applicable.filter((k) => frozen.includes(k)))
+  return new Set(applicable.filter((k) => !disabled.includes(k)))
+}
+
 async function injectSummaries(
   chat: ChatMeta,
-  docContent: string | null
+  docContent: string | null,
+  tree: ProjectTree | undefined,
+  activeKeys: Set<string>
 ): Promise<{
   docMsgs: ChatCompletionMessageParam[]
   chatMsgs: ChatCompletionMessageParam[]
@@ -194,11 +241,9 @@ async function injectSummaries(
   if (!cfg.summaryEnabled) return { docMsgs, chatMsgs, resourceMsgs }
   const inj = cfg.summaryInjection
   const projectId = chat.projectId
-  const tree = (await buildSnapshot()).projects.find((p) => p.project.id === projectId)
   if (!tree) return { docMsgs, chatMsgs, resourceMsgs }
 
   const kind = chat.kind
-  const disabled = chat.injectionOverrides?.disabled ?? []
 
   // 文档摘要
   let docIds: string[] = []
@@ -210,7 +255,7 @@ async function injectSummaries(
     docIds = tree.docs.map((d) => d.id) // 含关联文档
   }
   for (const docId of docIds) {
-    if (disabled.includes(`doc:${docId}`)) continue
+    if (!activeKeys.has(`doc:${docId}`)) continue
     let summary: DocSummary | null = null
     if (kind === 'context' && docId === chat.docId && docContent !== null) {
       summary = await ensureDocSummary(projectId, docId, docContent)
@@ -230,7 +275,7 @@ async function injectSummaries(
     chatIds = tree.chats.filter((c) => c.docId === chat.docId && c.id !== chat.id).map((c) => c.id)
   }
   for (const chatId of chatIds) {
-    if (disabled.includes(`chat:${chatId}`)) continue
+    if (!activeKeys.has(`chat:${chatId}`)) continue
     const s = await readChatSummary(projectId, chatId)
     if (s && s.items.length > 0) chatMsgs.push({ role: 'system', content: buildChatSummaryBlock(s) })
   }
@@ -240,7 +285,7 @@ async function injectSummaries(
     kind === 'project' ? inj.project.resourceSummaries : kind === 'doc' ? inj.doc.resourceSummaries : inj.context.resourceSummaries
   if (includeResources) {
     for (const r of tree.resources) {
-      if (disabled.includes(`res:${r.id}`)) continue
+      if (!activeKeys.has(`res:${r.id}`)) continue
       const s = await readResourceSummary(projectId, r.id)
       if (s) resourceMsgs.push({ role: 'system', content: buildResourceSummaryBlock(s, r.name) })
     }
@@ -331,7 +376,9 @@ async function buildMessages(
 ): Promise<ChatCompletionMessageParam[]> {
   const cfg = await loadConfig()
   const settings = await loadApiSettings()
-  const disabled = chat.injectionOverrides?.disabled ?? []
+  const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
+  const applicable = collectApplicableKeys(chat, cfg, tree)
+  const activeKeys = computeActiveKeys(chat, applicable)
 
   const systemMsgs: ChatCompletionMessageParam[] = [{ role: 'system', content: SYSTEM_PROMPT }]
 
@@ -347,7 +394,7 @@ async function buildMessages(
     if (cfg.summaryEnabled) {
       await ensureDocSummary(chat.projectId, chat.docId, docContent)
     }
-    if (cfg.summaryInjection.doc.fullText && !disabled.includes('fulltext')) {
+    if (cfg.summaryInjection.doc.fullText && activeKeys.has('fulltext')) {
       systemMsgs.push({ role: 'system', content: `【关联文档全文】\n${docContent}` })
     }
   }
@@ -359,7 +406,7 @@ async function buildMessages(
   }
 
   // 摘要注入：文档摘要 > 资源快照 > 对话摘要 > 资源摘要（按优先级排列）
-  const { docMsgs, chatMsgs, resourceMsgs } = await injectSummaries(chat, docContent)
+  const { docMsgs, chatMsgs, resourceMsgs } = await injectSummaries(chat, docContent, tree, activeKeys)
 
   const snapshotMsgs: ChatCompletionMessageParam[] = []
   const snapshotIds = req.snapshotIds ?? lastUserAttachments(history)
