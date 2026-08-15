@@ -18,6 +18,11 @@ export default function App(): JSX.Element {
   const init = useAppStore((s) => s.init)
   const [recovery, setRecovery] = useState<RecoveryState | null>(null)
 
+  // 窗口标题跟随语言
+  useEffect(() => {
+    document.title = t('app.title')
+  }, [t])
+
   useEffect(() => {
     void init()
   }, [init])

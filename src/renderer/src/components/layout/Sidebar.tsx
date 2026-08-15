@@ -201,7 +201,7 @@ export default function Sidebar(): JSX.Element {
 
       <div className="flex items-center justify-between border-b px-3 py-2" style={{ borderColor: 'var(--border)' }}>
         <div className="min-w-0">
-          <div className="truncate text-sm font-semibold">WritingAgent</div>
+          <div className="truncate text-sm font-semibold">{t('app.title')}</div>
           <div className="truncate text-[11px]" style={{ color: 'var(--muted)' }} title={workspace.workspaceDir}>
             {workspace.workspaceDir || '未设置工作目录'}
           </div>

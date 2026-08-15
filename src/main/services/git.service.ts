@@ -52,8 +52,8 @@ async function ensureCommitIdentity(git: SimpleGit): Promise<void> {
 
   const existingName = name ? null : await getConfigValue(git, 'user.name')
   const existingEmail = email ? null : await getConfigValue(git, 'user.email')
-  if (!name && !existingName) await git.addConfig('user.name', 'WritingAgent', false, 'local')
-  if (!email && !existingEmail) await git.addConfig('user.email', 'writing-agent@localhost', false, 'local')
+  if (!name && !existingName) await git.addConfig('user.name', 'VibeWrite', false, 'local')
+  if (!email && !existingEmail) await git.addConfig('user.email', 'vibewrite@localhost', false, 'local')
 }
 
 /** 自动提交（PRD 2.5）：正常关闭时按项目检测变更并提交 */

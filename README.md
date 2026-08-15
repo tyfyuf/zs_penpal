@@ -1,4 +1,4 @@
-# WritingAgent —— 写作专精辅助 Agent（桌面端）
+# 氛围写作 VibeWrite —— 桌面端写作专精辅助 Agent
 
 依据 `writing-agent-prd-v1.3.md` 与 `writing-agent-tech-stack-v1.0.md` 实现的 Windows 桌面端写作辅助 Agent。
 
@@ -64,13 +64,14 @@ npm run dist       # 打包 Windows 安装包（electron-builder + NSIS）
 
 ### 更便捷的启动方式
 
-1. **安装后从桌面 / 开始菜单启动**：运行 `dist\WritingAgent Setup 1.3.0.exe`，安装完成后自动在桌面与开始菜单创建快捷方式，双击即可启动。
+1. **安装后从桌面 / 开始菜单启动**：运行 `dist\VibeWrite Setup 1.3.0.exe`，安装完成后自动在桌面（快捷方式名“氛围写作”）与开始菜单创建快捷方式，双击即可启动。
 2. **免安装双击启动（生产构建）**：双击项目根目录的 `start.cmd`，直接运行 `out/` 已构建产物（无需终端命令）。
 3. **开发模式（热更新）**：双击 `start-dev.cmd`，启动 electron-vite dev 并保持终端窗口。
 
 ### 打包说明
 
-- 安装包产物：`dist\WritingAgent Setup 1.3.0.exe`（NSIS，含文件关联 `.md/.txt/.csv`）；解包版在 `dist\win-unpacked\WritingAgent.exe`。
+- 安装包产物：`dist\VibeWrite Setup 1.3.0.exe`（NSIS，含文件关联 `.md/.txt/.csv`）；解包版在 `dist\win-unpacked\VibeWrite.exe`。
+- 安装包只包含 `out/` 构建产物与 `package.json`，**不包含任何用户数据**（工作目录、文档、对话、摘要、资源、API Key 与设置均在应用外部，不参与打包）。
 - 因未配置代码签名证书，`win.signAndEditExecutable` 设为 `false`（跳过 exe 资源编辑与签名），并使用默认 Electron 图标；后续如需自定义图标/签名，在 `electron-builder.yml` 与 `build/` 中补充即可。
 - 打包依赖 `electron_mirror` / `electron_builder_binaries_mirror`（已写入 `.npmrc`）从国内镜像下载 Electron 发行包与 NSIS 工具链。
 

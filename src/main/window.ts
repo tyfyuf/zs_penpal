@@ -1,7 +1,16 @@
 import { BrowserWindow, shell } from 'electron'
 import { join } from 'path'
+import { getConfigCached } from './services/config.service'
 
 let mainWindow: BrowserWindow | null = null
+
+function windowTitle(): string {
+  try {
+    return getConfigCached().language === 'en' ? 'VibeWrite' : '氛围写作'
+  } catch {
+    return '氛围写作'
+  }
+}
 
 export function createMainWindow(): BrowserWindow {
   mainWindow = new BrowserWindow({
@@ -11,7 +20,7 @@ export function createMainWindow(): BrowserWindow {
     minHeight: 600,
     show: false,
     autoHideMenuBar: true,
-    title: 'WritingAgent',
+    title: windowTitle(),
     backgroundColor: '#0b0f14',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

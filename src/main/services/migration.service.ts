@@ -64,7 +64,7 @@ export async function migrateWorkspace(targetDir: string): Promise<{ ok: boolean
   }
 
   // 物理复制到暂存目录
-  const staging = resolve(dirname(targetAbs), `.writing-agent-migrate-${newId()}`)
+  const staging = resolve(dirname(targetAbs), `.vibewrite-migrate-${newId()}`)
   try {
     await mkdir(staging, { recursive: true })
     broadcast(EVENTS.migrateProgress, { phase: 'copy', message: '复制项目数据（含 Git 历史）…', percent: 40 })

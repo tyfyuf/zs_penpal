@@ -1,5 +1,5 @@
-appId: com.writingagent.app
-productName: WritingAgent
+appId: com.vibewrite.app
+productName: VibeWrite
 directories:
   buildResources: build
   output: dist
@@ -31,3 +31,4 @@ nsis:
   perMachine: false
   createDesktopShortcut: true
   createStartMenuShortcut: true
+  shortcutName: 氛围写作

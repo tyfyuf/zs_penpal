@@ -7,14 +7,15 @@ export type Locale = 'zh' | 'en'
 // ---------------------------------------------------------------------------
 
 const zh: Record<string, string> = {
+  'app.title': '氛围写作',
   'app.loading': '加载中…',
   'app.recoveryTitle': '恢复上次会话',
   'app.recoveryText': '上次应用异常退出，是否恢复上次打开的内容？',
   'app.recoveryYes': '恢复上次打开的内容',
   'app.recoveryNo': '不恢复',
 
-  'setup.title': 'WritingAgent',
-  'setup.subtitle': '写作专精辅助 Agent —— 辅助创作者决策，不替代创作者完成写作成果',
+  'setup.title': '氛围写作',
+  'setup.subtitle': '氛围写作 VibeWrite —— 辅助创作者决策，不替代创作者完成写作成果',
   'setup.choose': '选择工作目录',
   'setup.busy': '处理中…',
   'setup.hint': '首次使用需要指定一个本地文件夹作为工作目录。所有项目、文档、对话与资源都将以文件形式保存在该目录中。',
@@ -244,14 +245,15 @@ const zh: Record<string, string> = {
 }
 
 const en: Record<string, string> = {
+  'app.title': 'VibeWrite',
   'app.loading': 'Loading…',
   'app.recoveryTitle': 'Restore session',
   'app.recoveryText': 'The app exited unexpectedly last time. Restore the previously opened content?',
   'app.recoveryYes': 'Restore previous content',
   'app.recoveryNo': 'Don’t restore',
 
-  'setup.title': 'WritingAgent',
-  'setup.subtitle': 'Writing Assistant Agent — assists your decisions, never replaces your writing',
+  'setup.title': 'VibeWrite',
+  'setup.subtitle': 'VibeWrite (氛围写作) — assists your decisions, never replaces your writing',
   'setup.choose': 'Choose workspace folder',
   'setup.busy': 'Working…',
   'setup.hint': 'Choose a local folder as the workspace. All projects, documents, chats and resources are stored there as files.',
