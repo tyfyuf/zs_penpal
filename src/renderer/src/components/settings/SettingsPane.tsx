@@ -130,6 +130,17 @@ export default function SettingsPane(): JSX.Element {
     await updateConfig({ language: locale })
   }
 
+  async function commitNow(): Promise<void> {
+    const res = await api.invoke('git:commitAll', undefined)
+    if (res.errors.length > 0) {
+      toast.error(t('settings.commitErrors', { n: res.errors.length, detail: res.errors.join('；') }))
+    } else if (res.committed.length > 0) {
+      toast.success(t('settings.commitResult', { n: res.committed.length }))
+    } else {
+      toast.info(t('settings.commitNoChanges'))
+    }
+  }
+
   async function fetchModels(): Promise<void> {
     setFetchingModels(true)
     try {
@@ -307,10 +318,15 @@ export default function SettingsPane(): JSX.Element {
             {t('settings.versionToggle')}
           </label>
           {config.gitEnabled && (
-            <button className="btn mt-2" onClick={() => void openHistory()}>
-              <History size={14} />
-              {t('settings.openHistory')}
-            </button>
+            <div className="mt-2 flex items-center gap-2">
+              <button className="btn" onClick={() => void openHistory()}>
+                <History size={14} />
+                {t('settings.openHistory')}
+              </button>
+              <button className="btn" onClick={() => void commitNow()}>
+                {t('settings.commitNow')}
+              </button>
+            </div>
           )}
         </Section>
 

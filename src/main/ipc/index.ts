@@ -53,7 +53,7 @@ import {
   undistillResource
 } from '../services/summary.service'
 import { getSnapshot } from '../services/usage.service'
-import { commitProject, gitLog, rollback } from '../services/git.service'
+import { commitAllProjects, commitProject, gitLog, rollback } from '../services/git.service'
 import { ensureGit } from '../install/git-installer'
 import { exportDoc, exportProject } from '../services/export.service'
 import { clearRecovery, readRecovery, updateRecovery } from '../services/recovery.service'
@@ -187,6 +187,7 @@ export function registerIpcHandlers(): void {
   // 版本管理
   handle(IPC.gitEnsure, (req) => ensureGit(req.consent))
   handle(IPC.gitCommit, (projectId) => commitProject(projectId))
+  handle(IPC.gitCommitAll, () => commitAllProjects())
   handle(IPC.gitLog, (projectId) => gitLog(projectId))
   handle(IPC.gitRollback, (req) => rollback(req.projectId, req.hash))
 

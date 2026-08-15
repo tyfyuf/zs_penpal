@@ -13,6 +13,8 @@ export interface ChatInjectionOverrides {
   disabled: string[]
   /** 对话开始（首条消息发出）时冻结的激活注入键；此后新加入摘要系统的摘要默认关闭 */
   active?: string[]
+  /** 对话开始后用户手动开启、但尚未随新消息使用的键（此时仍可自由关闭；发送消息后并入 active） */
+  pending?: string[]
 }
 
 export interface ProjectMeta {

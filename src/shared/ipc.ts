@@ -131,6 +131,7 @@ export const IPC = {
   usageGet: 'usage:get',
   gitEnsure: 'git:ensure',
   gitCommit: 'git:commit',
+  gitCommitAll: 'git:commitAll',
   gitLog: 'git:log',
   gitRollback: 'git:rollback',
   exportDoc: 'export:doc',
@@ -214,7 +215,8 @@ export interface IpcApi {
   [IPC.summaryQueueChat]: { req: string; res: void }
   [IPC.usageGet]: { req: void; res: UsageSnapshot }
   [IPC.gitEnsure]: { req: { consent: boolean }; res: { ok: boolean; reason?: string; path?: string } }
-  [IPC.gitCommit]: { req: string; res: { ok: boolean; error?: string } }
+  [IPC.gitCommit]: { req: string; res: { ok: boolean; committed?: boolean; error?: string } }
+  [IPC.gitCommitAll]: { req: void; res: { committed: string[]; errors: string[] } }
   [IPC.gitLog]: { req: string; res: GitCommitInfo[] }
   [IPC.gitRollback]: { req: { projectId: string; hash: string }; res: { ok: boolean; error?: string } }
   [IPC.exportDoc]: { req: { docId: string; format: 'md' | 'txt' }; res: { ok: boolean; path?: string; error?: string } }

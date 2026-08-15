@@ -213,14 +213,22 @@ function collectApplicableKeys(chat: ChatMeta, cfg: AppConfig, tree: ProjectTree
 }
 
 /**
- * 计算激活键：对话开始（首条消息）后以冻结的 active 为准——
+ * 计算激活键：对话开始（首条消息）后以冻结的 active 为准（pending 为已开启但尚未随消息使用的键，同样注入）；
  * 此后新加入摘要系统的摘要默认关闭，由用户手动开启。
  */
 function computeActiveKeys(chat: ChatMeta, applicable: string[]): Set<string> {
   const frozen = chat.injectionOverrides?.active
+  const pending = chat.injectionOverrides?.pending ?? []
   const disabled = chat.injectionOverrides?.disabled ?? []
-  if (frozen) return new Set(applicable.filter((k) => frozen.includes(k)))
-  return new Set(applicable.filter((k) => !disabled.includes(k)))
+  const active = new Set<string>()
+  for (const k of applicable) {
+    if (frozen) {
+      if (frozen.includes(k) || pending.includes(k)) active.add(k)
+    } else if (!disabled.includes(k)) {
+      active.add(k)
+    }
+  }
+  return active
 }
 
 async function injectSummaries(

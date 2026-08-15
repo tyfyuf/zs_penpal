@@ -92,6 +92,7 @@ const CHAT_PROMPT = `请为下面这段写作讨论对话，按顺序为每条�
 // 工具
 // ---------------------------------------------------------------------------
 
+/** 稳健 JSON 解析：支持代码块包裹、截断抢救（取最后一个配平位置） */
 function parseJson<T>(raw: string): T | null {
   const s = raw.trim().replace(/```(?:json)?/gi, '').trim()
   try {
@@ -105,6 +106,42 @@ function parseJson<T>(raw: string): T | null {
       return JSON.parse(arr[0]) as T
     } catch {
       /* 继续 */
+    }
+  }
+  // 对象：从第一个 { 开始，找到最后一个配平的位置（截断抢救）
+  const start = s.indexOf('{')
+  if (start >= 0) {
+    let depth = 0
+    let inStr = false
+    let esc = false
+    let lastBalanced = -1
+    for (let i = start; i < s.length; i++) {
+      const ch = s[i]
+      if (inStr) {
+        if (esc) esc = false
+        else if (ch === '\\') esc = true
+        else if (ch === '"') inStr = false
+        continue
+      }
+      if (ch === '"') {
+        inStr = true
+        continue
+      }
+      if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) {
+          lastBalanced = i
+          break
+        }
+      }
+    }
+    if (lastBalanced > start) {
+      try {
+        return JSON.parse(s.slice(start, lastBalanced + 1)) as T
+      } catch {
+        /* 继续 */
+      }
     }
   }
   const obj = s.match(/\{[\s\S]*\}/)
@@ -163,6 +200,18 @@ function makeClient(cfg: ApiSettings): OpenAI {
 }
 
 // ---------------------------------------------------------------------------
+// 全局 LLM 调用串行队列：摘要/蒸馏/分类共用并发 1，避免并发请求互相堵塞
+// ---------------------------------------------------------------------------
+
+let llmQueue: Promise<unknown> = Promise.resolve()
+
+function enqueueLlm<T>(task: () => Promise<T>): Promise<T> {
+  const run = llmQueue.then(task, task)
+  llmQueue = run.catch(() => {})
+  return run
+}
+
+// ---------------------------------------------------------------------------
 // 字数档位 + Token 预算：优先全文一次调用（与对话上传同等的“看到全文”效果），
 // 超出预算直接拒绝并提示调整模型上下文，不再分段合并。
 // ---------------------------------------------------------------------------
@@ -181,25 +230,41 @@ function estimateInputTokens(content: string, model: string): number {
   return estimateTokens(content, model)
 }
 
+function isStoryEmpty(s: StorySummary): boolean {
+  return !s.overview.trim() && s.characters.length === 0 && s.plot.length === 0
+}
+
+function isGenericEmpty(g: GenericResourceSummary): boolean {
+  return !g.overview.trim() && g.keyPoints.length === 0
+}
+
 async function callStoryDecomposition(content: string, cfg: ApiSettings): Promise<StorySummary> {
   const tokens = estimateInputTokens(content, cfg.model)
   const budget = inputBudget(cfg)
   if (tokens > budget) {
     throw new Error('文档超出模型上下文预算（60%），请在设置中调大“模型上下文上限”或更换模型后重试')
   }
-  const client = makeClient(cfg)
-  const large = content.length > 20000
-  const res = await client.chat.completions.create({
-    model: cfg.model,
-    messages: [
-      { role: 'system', content: STORY_PROMPT },
-      { role: 'user', content: content || '（空文档）' }
-    ],
-    temperature: 0.3,
-    max_tokens: large ? 8192 : 4096
+  return enqueueLlm(async () => {
+    const client = makeClient(cfg)
+    const large = content.length > 20000
+    // 空结果 / 输出被截断时自动重试一次
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await client.chat.completions.create({
+        model: cfg.model,
+        messages: [
+          { role: 'system', content: STORY_PROMPT },
+          { role: 'user', content: content || '（空文档）' }
+        ],
+        temperature: 0.3,
+        max_tokens: large ? 8192 : 4096
+      })
+      if (res.usage) await recordUsage(res.usage, 'summary')
+      const summary = normalizeStory(parseJson(res.choices[0]?.message?.content ?? ''))
+      const truncated = res.choices[0]?.finish_reason === 'length'
+      if (!truncated && !isStoryEmpty(summary)) return summary
+    }
+    throw new Error('摘要生成不完整（内容为空或被截断），请重试')
   })
-  if (res.usage) await recordUsage(res.usage, 'summary')
-  return normalizeStory(parseJson(res.choices[0]?.message?.content ?? ''))
 }
 
 async function callGenericDecomposition(content: string, cfg: ApiSettings): Promise<GenericResourceSummary> {
@@ -208,19 +273,26 @@ async function callGenericDecomposition(content: string, cfg: ApiSettings): Prom
   if (tokens > budget) {
     throw new Error('文档超出模型上下文预算（60%），请在设置中调大“模型上下文上限”或更换模型后重试')
   }
-  const client = makeClient(cfg)
-  const large = content.length > 20000
-  const res = await client.chat.completions.create({
-    model: cfg.model,
-    messages: [
-      { role: 'system', content: GENERIC_PROMPT },
-      { role: 'user', content: content || '（空内容）' }
-    ],
-    temperature: 0.3,
-    max_tokens: large ? 4096 : 2048
+  return enqueueLlm(async () => {
+    const client = makeClient(cfg)
+    const large = content.length > 20000
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await client.chat.completions.create({
+        model: cfg.model,
+        messages: [
+          { role: 'system', content: GENERIC_PROMPT },
+          { role: 'user', content: content || '（空内容）' }
+        ],
+        temperature: 0.3,
+        max_tokens: large ? 4096 : 2048
+      })
+      if (res.usage) await recordUsage(res.usage, 'summary')
+      const summary = normalizeGeneric(parseJson(res.choices[0]?.message?.content ?? ''))
+      const truncated = res.choices[0]?.finish_reason === 'length'
+      if (!truncated && !isGenericEmpty(summary)) return summary
+    }
+    throw new Error('摘要生成不完整（内容为空或被截断），请重试')
   })
-  if (res.usage) await recordUsage(res.usage, 'summary')
-  return normalizeGeneric(parseJson(res.choices[0]?.message?.content ?? ''))
 }
 
 /** 三段采样：头部/中部/尾部各取一段，避免只看开头导致误判 */
@@ -286,25 +358,27 @@ function heuristicClassify(content: string): ClassifyDecision | null {
 
 /** 模型结构化判定：三段采样 + JSON 输出（含置信度与理由） */
 async function classifyByLlm(content: string, cfg: ApiSettings): Promise<ClassifyDecision | null> {
-  const client = makeClient(cfg)
-  const res = await client.chat.completions.create({
-    model: cfg.model,
-    messages: [
-      { role: 'system', content: CLASSIFY_PROMPT },
-      { role: 'user', content: sampleSections(content) }
-    ],
-    temperature: 0,
-    max_tokens: 256
+  return enqueueLlm(async () => {
+    const client = makeClient(cfg)
+    const res = await client.chat.completions.create({
+      model: cfg.model,
+      messages: [
+        { role: 'system', content: CLASSIFY_PROMPT },
+        { role: 'user', content: sampleSections(content) }
+      ],
+      temperature: 0,
+      max_tokens: 256
+    })
+    if (res.usage) await recordUsage(res.usage, 'summary')
+    const parsed = parseJson<{ type?: string; confidence?: number; reasons?: unknown[] }>(
+      res.choices[0]?.message?.content ?? ''
+    )
+    if (!parsed) return null
+    const type: 'story' | 'other' = String(parsed.type ?? '').toLowerCase().includes('story') ? 'story' : 'other'
+    const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0
+    const reasons = Array.isArray(parsed.reasons) ? (parsed.reasons as unknown[]).map(String) : []
+    return { type, confidence, reasons }
   })
-  if (res.usage) await recordUsage(res.usage, 'summary')
-  const parsed = parseJson<{ type?: string; confidence?: number; reasons?: unknown[] }>(
-    res.choices[0]?.message?.content ?? ''
-  )
-  if (!parsed) return null
-  const type: 'story' | 'other' = String(parsed.type ?? '').toLowerCase().includes('story') ? 'story' : 'other'
-  const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0
-  const reasons = Array.isArray(parsed.reasons) ? (parsed.reasons as unknown[]).map(String) : []
-  return { type, confidence, reasons }
 }
 
 // ---------------------------------------------------------------------------

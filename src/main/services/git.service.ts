@@ -28,28 +28,34 @@ export async function ensureProjectRepo(projectId: string): Promise<void> {
 }
 
 /** 自动提交（PRD 2.5）：正常关闭时按项目检测变更并提交 */
-export async function commitProject(projectId: string): Promise<{ ok: boolean; error?: string }> {
+export async function commitProject(projectId: string): Promise<{ ok: boolean; committed?: boolean; error?: string }> {
   try {
     if (!getConfigCached().gitEnabled) return { ok: false, error: '版本管理未开启' }
     await ensureProjectRepo(projectId)
     const git = await getGit(projectId)
     await git.add(['-A'])
     const status = await git.status()
-    if (status.files.length === 0) return { ok: true }
+    if (status.files.length === 0) return { ok: true, committed: false }
     await git.commit(`auto: ${new Date().toISOString()}`)
-    return { ok: true }
+    return { ok: true, committed: true }
   } catch (err) {
+    logError('git:commit', (err as Error).message, (err as Error).stack)
     return { ok: false, error: (err as Error).message }
   }
 }
 
-/** 提交所有存在变更的项目（关闭软件时，PRD 2.5） */
-export async function commitAllProjects(): Promise<void> {
-  if (!getConfigCached().gitEnabled) return
+/** 提交所有存在变更的项目（关闭软件时 / 设置页手动提交） */
+export async function commitAllProjects(): Promise<{ committed: string[]; errors: string[] }> {
+  const committed: string[] = []
+  const errors: string[] = []
+  if (!getConfigCached().gitEnabled) return { committed, errors }
   const projects = await listProjects('normal')
   for (const p of projects) {
-    await commitProject(p.id)
+    const res = await commitProject(p.id)
+    if (res.ok && res.committed) committed.push(p.name)
+    else if (!res.ok) errors.push(`${p.name}: ${res.error ?? '未知错误'}`)
   }
+  return { committed, errors }
 }
 
 export async function gitLog(projectId: string): Promise<GitCommitInfo[]> {

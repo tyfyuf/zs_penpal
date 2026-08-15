@@ -71,6 +71,8 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   const [disabledInjections, setDisabledInjections] = useState<string[]>([])
   /** 对话开始（首条消息）时冻结的激活注入键；此后新摘要默认关闭 */
   const [activeInjections, setActiveInjections] = useState<string[] | null>(null)
+  /** 对话开始后手动开启、尚未随消息使用的键（仍可自由关闭；发送消息后并入 active） */
+  const [pendingEnabled, setPendingEnabled] = useState<string[]>([])
   const newSummaryNotifiedRef = useRef(false)
   const pendingReasonRef = useRef<'context' | 'summary' | 'both' | null>(null)
   const pendingNewlyEnabledRef = useRef<string[]>([])
@@ -97,6 +99,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       if (chat.lockedRange) setLockedRange(chat.lockedRange)
       setDisabledInjections(chat.injectionOverrides?.disabled ?? [])
       setActiveInjections(chat.injectionOverrides?.active ?? null)
+      setPendingEnabled(chat.injectionOverrides?.pending ?? [])
     })
   }, [chatId])
 
@@ -245,24 +248,38 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     if (!activeInjections) return
     const newKeys = injectionItems
       .map((i) => i.key)
-      .filter((k) => !activeInjections.includes(k) && !disabledInjections.includes(k))
+      .filter((k) => !activeInjections.includes(k) && !disabledInjections.includes(k) && !pendingEnabled.includes(k))
     if (newKeys.length > 0) {
       newSummaryNotifiedRef.current = true
       toast.info(t('chat.newSummaryDetected', { n: newKeys.length }))
     }
-  }, [chat, overview, started, activeInjections, disabledInjections, injectionItems, t])
+  }, [chat, overview, started, activeInjections, disabledInjections, pendingEnabled, injectionItems, t])
 
   function toggleInjection(key: string): void {
     if (streaming || titleGenerating) return
-    const enabled = started
-      ? (activeInjections?.includes(key) ?? false)
-      : !disabledInjections.includes(key)
     if (started) {
-      // 对话开始后：不能关闭仍激活的摘要，只能开启（新摘要或此前关闭的摘要）
-      if (enabled) return
-      const nextActive = [...(activeInjections ?? []), key]
-      setActiveInjections(nextActive)
-      void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: disabledInjections, active: nextActive } } })
+      const isActive = activeInjections?.includes(key) ?? false
+      const isPending = pendingEnabled.includes(key)
+      if (isActive) return // 已随消息使用的摘要：锁定，不能关闭
+      if (isPending) {
+        // 已开启但尚未随消息使用：仍可自由关闭
+        const nextPending = pendingEnabled.filter((k) => k !== key)
+        setPendingEnabled(nextPending)
+        pendingNewlyEnabledRef.current = pendingNewlyEnabledRef.current.filter((k) => k !== key)
+        if (pendingNewlyEnabledRef.current.length === 0) pendingReasonRef.current = null
+        void api.invoke('chat:patch', {
+          chatId,
+          patch: { injectionOverrides: { disabled: disabledInjections, active: activeInjections ?? [], pending: nextPending } }
+        })
+        return
+      }
+      // 关闭状态 → 手动开启（进入 pending，发送消息后锁定）
+      const nextPending = [...pendingEnabled, key]
+      setPendingEnabled(nextPending)
+      void api.invoke('chat:patch', {
+        chatId,
+        patch: { injectionOverrides: { disabled: disabledInjections, active: activeInjections ?? [], pending: nextPending } }
+      })
       pendingNewlyEnabledRef.current = [...pendingNewlyEnabledRef.current, key]
       if (hasOutput) {
         pendingReasonRef.current = pendingReasonRef.current === 'context' ? 'both' : 'summary'
@@ -270,6 +287,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       }
     } else {
       // 对话开始前：自由开关（记录到 disabled）
+      const enabled = !disabledInjections.includes(key)
       const next = enabled ? [...disabledInjections, key] : disabledInjections.filter((k) => k !== key)
       setDisabledInjections(next)
       void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: next } } })
@@ -282,11 +300,17 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     const requestId = crypto.randomUUID()
     const userMessageId = crypto.randomUUID()
     if (!regenerate) {
-      // 首条消息发出时：冻结当前激活的注入键（此后新摘要默认关闭）
+      // 冻结激活键：首条消息 = 当前开启项；此后 = 把 pending 并入 active（锁定）
       if (messages.length === 0) {
         const onKeys = injectionItems.filter((i) => !disabledInjections.includes(i.key)).map((i) => i.key)
         setActiveInjections(onKeys)
-        void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: disabledInjections, active: onKeys } } })
+        setPendingEnabled([])
+        void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: disabledInjections, active: onKeys, pending: [] } } })
+      } else if (pendingEnabled.length > 0) {
+        const nextActive = [...(activeInjections ?? []), ...pendingEnabled]
+        setActiveInjections(nextActive)
+        setPendingEnabled([])
+        void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: disabledInjections, active: nextActive, pending: [] } } })
       }
       setMessages((m) => [
         ...m,
@@ -294,6 +318,13 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       ])
       setPrevAnswer(null)
     } else {
+      // 重新生成同样会“使用”pending 中的摘要 → 锁定
+      if (pendingEnabled.length > 0) {
+        const nextActive = [...(activeInjections ?? []), ...pendingEnabled]
+        setActiveInjections(nextActive)
+        setPendingEnabled([])
+        void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: disabledInjections, active: nextActive, pending: [] } } })
+      }
       const lastA = [...messages].reverse().find((m) => m.role === 'assistant')
       if (lastA) setPrevAnswer({ content: lastA.content, reasoning: lastA.reasoning })
     }
@@ -503,9 +534,9 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
             <div className="mt-1 max-h-40 space-y-0.5 overflow-y-auto">
               {injectionItems.map((item) => {
                 const enabled = started
-                  ? (activeInjections?.includes(item.key) ?? false)
+                  ? (activeInjections?.includes(item.key) ?? false) || pendingEnabled.includes(item.key)
                   : !disabledInjections.includes(item.key)
-                const locked = started && enabled
+                const locked = started && (activeInjections?.includes(item.key) ?? false)
                 return (
                   <label
                     key={item.key}
