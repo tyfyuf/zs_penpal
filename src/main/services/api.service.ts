@@ -198,6 +198,7 @@ async function injectSummaries(
   if (!tree) return { docMsgs, chatMsgs, resourceMsgs }
 
   const kind = chat.kind
+  const disabled = chat.injectionOverrides?.disabled ?? []
 
   // 文档摘要
   let docIds: string[] = []
@@ -209,6 +210,7 @@ async function injectSummaries(
     docIds = tree.docs.map((d) => d.id) // 含关联文档
   }
   for (const docId of docIds) {
+    if (disabled.includes(`doc:${docId}`)) continue
     let summary: DocSummary | null = null
     if (kind === 'context' && docId === chat.docId && docContent !== null) {
       summary = await ensureDocSummary(projectId, docId, docContent)
@@ -228,6 +230,7 @@ async function injectSummaries(
     chatIds = tree.chats.filter((c) => c.docId === chat.docId && c.id !== chat.id).map((c) => c.id)
   }
   for (const chatId of chatIds) {
+    if (disabled.includes(`chat:${chatId}`)) continue
     const s = await readChatSummary(projectId, chatId)
     if (s && s.items.length > 0) chatMsgs.push({ role: 'system', content: buildChatSummaryBlock(s) })
   }
@@ -237,6 +240,7 @@ async function injectSummaries(
     kind === 'project' ? inj.project.resourceSummaries : kind === 'doc' ? inj.doc.resourceSummaries : inj.context.resourceSummaries
   if (includeResources) {
     for (const r of tree.resources) {
+      if (disabled.includes(`res:${r.id}`)) continue
       const s = await readResourceSummary(projectId, r.id)
       if (s) resourceMsgs.push({ role: 'system', content: buildResourceSummaryBlock(s, r.name) })
     }
@@ -249,6 +253,76 @@ async function injectSummaries(
 // 组装消息
 // ---------------------------------------------------------------------------
 
+/** 重新生成引导：告知模型用户对上一回答不满意、扩大了上下文/补充了摘要 */
+async function buildRegenerateGuidance(
+  req: StreamRequest,
+  chat: ChatMeta,
+  docContent: string | null
+): Promise<string | null> {
+  const reason = req.regenerateReason
+  if (!reason) return null
+  const blocks: string[] = []
+
+  // 新增上下文片段（与锁定的旧范围对比）
+  if (
+    (reason === 'context' || reason === 'both') &&
+    chat.kind === 'context' &&
+    req.contextRange &&
+    chat.lockedRange &&
+    docContent !== null
+  ) {
+    const old = chat.lockedRange
+    const range = req.contextRange
+    const hasSel =
+      range.selectionFrom !== undefined && range.selectionTo !== undefined && range.selectionTo > range.selectionFrom
+    const coreStart = hasSel ? range.selectionFrom! : range.anchor
+    const coreEnd = hasSel ? range.selectionTo! : range.anchor
+    const n = docContent.length
+    if (range.before > old.before) {
+      const from = Math.max(0, coreStart - range.before)
+      const to = Math.max(0, Math.min(coreStart - old.before, n))
+      if (to > from) blocks.push(`【新增上下文·前文】\n${docContent.slice(from, to).slice(0, 4000)}`)
+    }
+    if (range.after > old.after) {
+      const from = Math.min(coreEnd + old.after, n)
+      const to = Math.min(coreEnd + range.after, n)
+      if (to > from) blocks.push(`【新增上下文·后文】\n${docContent.slice(from, to).slice(0, 4000)}`)
+    }
+  }
+
+  // 新增摘要
+  if ((reason === 'summary' || reason === 'both') && req.newlyEnabledSummaries?.length) {
+    for (const key of req.newlyEnabledSummaries) {
+      if (key.startsWith('doc:')) {
+        const s = await readDocSummary(chat.projectId, key.slice(4))
+        if (s) blocks.push(buildDocSummaryBlock(s))
+      } else if (key.startsWith('chat:')) {
+        const s = await readChatSummary(chat.projectId, key.slice(5))
+        if (s && s.items.length > 0) blocks.push(buildChatSummaryBlock(s))
+      } else if (key.startsWith('res:')) {
+        const resId = key.slice(4)
+        const s = await readResourceSummary(chat.projectId, resId)
+        if (s) {
+          const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
+          const name = tree?.resources.find((r) => r.id === resId)?.name ?? '资源'
+          blocks.push(buildResourceSummaryBlock(s, name))
+        }
+      }
+    }
+  }
+
+  if (blocks.length === 0) return null
+
+  const intro =
+    reason === 'context'
+      ? '【重要】用户对上一个回答不满意，并扩大了上下文读取范围。请着重阅读以下【新增上下文】片段，并据此调整你的新回答：'
+      : reason === 'summary'
+        ? '【重要】用户对上一个回答不满意，并补充了以下摘要上下文。请结合这些新信息调整你的新回答：'
+        : '【重要】用户对上一个回答不满意，扩大了上下文读取范围并补充了摘要上下文。请着重阅读以下新增内容，并据此调整你的新回答：'
+
+  return `${intro}\n\n${blocks.join('\n\n')}`
+}
+
 async function buildMessages(
   req: StreamRequest,
   chat: ChatMeta,
@@ -257,6 +331,7 @@ async function buildMessages(
 ): Promise<ChatCompletionMessageParam[]> {
   const cfg = await loadConfig()
   const settings = await loadApiSettings()
+  const disabled = chat.injectionOverrides?.disabled ?? []
 
   const systemMsgs: ChatCompletionMessageParam[] = [{ role: 'system', content: SYSTEM_PROMPT }]
 
@@ -266,9 +341,21 @@ async function buildMessages(
     docContent = (await readDoc(req.contextRange.docId)).content
     const slice = sliceContext(docContent, req.contextRange)
     systemMsgs.push({ role: 'system', content: buildContextBlock(slice) })
-  } else if (chat.kind === 'doc' && chat.docId && cfg.summaryInjection.doc.fullText) {
+  } else if (chat.kind === 'doc' && chat.docId) {
+    // 文档级对话：读取全文用于触发摘要检测（PRD 7.2），并按配置注入全文
     docContent = (await readDoc(chat.docId)).content
-    systemMsgs.push({ role: 'system', content: `【关联文档全文】\n${docContent}` })
+    if (cfg.summaryEnabled) {
+      await ensureDocSummary(chat.projectId, chat.docId, docContent)
+    }
+    if (cfg.summaryInjection.doc.fullText && !disabled.includes('fulltext')) {
+      systemMsgs.push({ role: 'system', content: `【关联文档全文】\n${docContent}` })
+    }
+  }
+
+  // 重新生成引导（扩大范围/补充摘要）
+  if (req.regenerate && req.regenerateReason) {
+    const guidance = await buildRegenerateGuidance(req, chat, docContent)
+    if (guidance) systemMsgs.push({ role: 'system', content: guidance })
   }
 
   // 摘要注入：文档摘要 > 资源快照 > 对话摘要 > 资源摘要（按优先级排列）

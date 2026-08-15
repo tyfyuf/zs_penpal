@@ -4,6 +4,7 @@ import type { ChatSummary, DocSummary, ProjectSummariesOverview, ResourceSummary
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
 import { useAppStore } from '../../store/app.store'
+import { useT } from '../../i18n'
 import { runDistill, runUndistill } from '../../lib/summaryActions'
 import Modal from '../common/Modal'
 
@@ -37,13 +38,18 @@ function resourceText(s: ResourceSummary): string {
 }
 
 export default function SummaryArea({ projectId }: { projectId: string }): JSX.Element {
+  const t = useT()
   const [overview, setOverview] = useState<ProjectSummariesOverview | null>(null)
   const [preview, setPreview] = useState<{ title: string; text: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const summaryRevision = useAppStore((s) => s.summaryRevision)
 
   const load = useCallback(async (): Promise<void> => {
-    setOverview(await api.invoke('summary:listProject', projectId))
+    try {
+      setOverview(await api.invoke('summary:listProject', projectId))
+    } catch (err) {
+      toast.error((err as Error).message)
+    }
   }, [projectId])
 
   useEffect(() => {
@@ -53,8 +59,8 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
   async function previewDoc(docId: string): Promise<void> {
     try {
       const s = await api.invoke('summary:getDoc', docId)
-      if (s) setPreview({ title: '文档摘要', text: storyText(s) })
-      else toast.info('该文档暂无摘要')
+      if (s) setPreview({ title: t('summary.previewDocTitle'), text: storyText(s) })
+      else toast.info(t('summary.noDocSummary'))
     } catch (err) {
       toast.error((err as Error).message)
     }
@@ -63,8 +69,8 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
   async function previewChat(chatId: string): Promise<void> {
     try {
       const s = await api.invoke('summary:getChat', chatId)
-      if (s) setPreview({ title: '对话摘要', text: chatText(s) })
-      else toast.info('该对话暂无摘要')
+      if (s) setPreview({ title: t('summary.previewChatTitle'), text: chatText(s) })
+      else toast.info(t('summary.noChatSummary'))
     } catch (err) {
       toast.error((err as Error).message)
     }
@@ -73,8 +79,8 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
   async function previewResource(resourceId: string): Promise<void> {
     try {
       const s = await api.invoke('summary:getResource', { projectId, resourceId })
-      if (s) setPreview({ title: '资源摘要', text: resourceText(s) })
-      else toast.info('该资源未蒸馏')
+      if (s) setPreview({ title: t('summary.previewResTitle'), text: resourceText(s) })
+      else toast.info(t('summary.noResSummary'))
     } catch (err) {
       toast.error((err as Error).message)
     }
@@ -85,10 +91,30 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
     try {
       const res = await api.invoke('summary:regenerateDoc', docId)
       if (res.ok) {
-        toast.success('文档摘要已重新生成')
+        toast.success(t('summary.docRegenerated'))
+        useAppStore.getState().bumpSummary()
         await load()
       } else {
-        toast.error(res.error ?? '重新生成失败')
+        toast.error(res.error ?? t('summary.regenerateFail'))
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function regenChat(chatId: string): Promise<void> {
+    setBusy(true)
+    try {
+      const res = await api.invoke('summary:regenerateChat', chatId)
+      if (res.ok) {
+        toast.success(t('summary.chatRegenerated'))
+        // 等待后台队列完成后刷新
+        setTimeout(() => {
+          useAppStore.getState().bumpSummary()
+          void load()
+        }, 2500)
+      } else {
+        toast.error(res.error ?? t('summary.regenerateFail'))
       }
     } finally {
       setBusy(false)
@@ -96,54 +122,58 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
   }
 
   if (!overview) {
-    return <div className="px-6 py-2 text-xs" style={{ color: 'var(--muted)' }}>加载中…</div>
+    return <div className="px-6 py-2 text-xs" style={{ color: 'var(--muted)' }}>{t('summary.loading')}</div>
   }
+
+  const distilledResources = overview.resources.filter((r) => r.distilled)
 
   return (
     <div className="space-y-2 px-4 pb-2">
-      <div className="text-[11px] font-medium" style={{ color: 'var(--muted)' }}>文档摘要</div>
-      {overview.docs.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>（无文档）</div>}
+      <div className="text-[11px] font-medium" style={{ color: 'var(--muted)' }}>{t('summary.secDocs')}</div>
+      {overview.docs.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noDocs')}</div>}
       {overview.docs.map((d) => (
         <div key={d.docId} className="flex items-center gap-1 text-[12px]">
           <span className={`h-1.5 w-1.5 rounded-full ${d.hasSummary ? 'bg-[var(--ok)]' : 'bg-[var(--border)]'}`} />
           <span className="min-w-0 flex-1 truncate" title={d.title}>{d.title}</span>
-          {d.hasSummary && (
-            <IconBtn icon={<Eye size={12} />} title="预览" onClick={() => void previewDoc(d.docId)} />
-          )}
-          <IconBtn icon={<RefreshCw size={12} />} title="重新生成" disabled={busy} onClick={() => void regenDoc(d.docId)} />
+          {d.hasSummary && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewDoc(d.docId)} />}
+          <IconBtn icon={<RefreshCw size={12} />} title={t('summary.regenerate')} disabled={busy} onClick={() => void regenDoc(d.docId)} />
         </div>
       ))}
 
-      <div className="mt-2 text-[11px] font-medium" style={{ color: 'var(--muted)' }}>对话摘要</div>
-      {overview.chats.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>（无对话）</div>}
+      <div className="mt-2 text-[11px] font-medium" style={{ color: 'var(--muted)' }}>{t('summary.secChats')}</div>
+      {overview.chats.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noChats')}</div>}
       {overview.chats.map((c) => (
         <div key={c.chatId} className="flex items-center gap-1 text-[12px]">
           <span className={`h-1.5 w-1.5 rounded-full ${c.hasSummary ? 'bg-[var(--ok)]' : 'bg-[var(--border)]'}`} />
           <span className="min-w-0 flex-1 truncate" title={c.title}>{c.title}</span>
-          {c.hasSummary && <IconBtn icon={<Eye size={12} />} title="预览" onClick={() => void previewChat(c.chatId)} />}
+          {c.hasSummary && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewChat(c.chatId)} />}
+          <IconBtn icon={<RefreshCw size={12} />} title={t('summary.regenerate')} disabled={busy} onClick={() => void regenChat(c.chatId)} />
         </div>
       ))}
 
-      <div className="mt-2 text-[11px] font-medium" style={{ color: 'var(--muted)' }}>资源摘要</div>
-      {overview.resources.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>（无资源）</div>}
-      {overview.resources.map((r) => (
+      <div className="mt-2 text-[11px] font-medium" style={{ color: 'var(--muted)' }}>{t('summary.secResources')}</div>
+      {distilledResources.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noResources')}</div>}
+      {distilledResources.map((r) => (
         <div key={r.resourceId} className="flex items-center gap-1 text-[12px]">
-          <span className={`h-1.5 w-1.5 rounded-full ${r.distilled ? 'bg-[var(--ok)]' : 'bg-[var(--border)]'}`} />
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--ok)]" />
           <span className="min-w-0 flex-1 truncate" title={r.name}>
             {r.name}
-            {r.distilled && <span className="text-[10px]" style={{ color: 'var(--muted)' }}>（{r.type === 'story' ? '故事' : '其他'}）</span>}
+            <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
+              （{r.type === 'story' ? t('summary.typeStory') : t('summary.typeOther')}）
+            </span>
           </span>
-          {r.distilled && <IconBtn icon={<Eye size={12} />} title="预览" onClick={() => void previewResource(r.resourceId)} />}
-          {r.distilled ? (
-            <IconBtn icon={<Trash2 size={12} />} title="取消蒸馏" onClick={() => void runUndistill(projectId, r.resourceId).then(load)} />
-          ) : (
-            <IconBtn icon={<FlaskConical size={12} />} title="蒸馏" onClick={() => void runDistill(projectId, r.resourceId).then(load)} />
-          )}
+          <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewResource(r.resourceId)} />
+          <IconBtn icon={<Trash2 size={12} />} title={t('summary.undistill')} onClick={() => void runUndistill(projectId, r.resourceId).then(load)} />
         </div>
       ))}
+      {overview.resources.some((r) => !r.distilled) && (
+        <div className="text-[10px]" style={{ color: 'var(--muted)' }}>
+          {t('summary.distillHint')}
+        </div>
+      )}
 
       {preview && (
-        <Modal title={preview.title} onClose={() => setPreview(null)} footer={<button className="btn" onClick={() => setPreview(null)}>关闭</button>}>
+        <Modal title={preview.title} onClose={() => setPreview(null)} footer={<button className="btn" onClick={() => setPreview(null)}>{t('dialog.cancel')}</button>}>
           <pre className="max-h-80 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed">{preview.text}</pre>
         </Modal>
       )}

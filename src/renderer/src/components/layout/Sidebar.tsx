@@ -12,20 +12,25 @@ import {
   Plus,
   Settings,
   Sparkles,
+  Stethoscope,
   Trash2,
-  Upload
+  TrendingUp,
+  Upload,
+  Wand2
 } from 'lucide-react'
 import type { ChatMeta, DocMeta, ProjectTree } from '@shared/types'
 import { useAppStore } from '../../store/app.store'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
 import { confirmDialog, promptText } from '../../store/dialog.store'
+import { useT } from '../../i18n'
 import { runDistill, runGenerateTitle } from '../../lib/summaryActions'
 import SummaryArea from './SummaryArea'
 
 const ALLOWED_EXT = ['.txt', '.md', '.csv']
 
 export default function Sidebar(): JSX.Element {
+  const t = useT()
   const workspace = useAppStore((s) => s.workspace)
   const refresh = useAppStore((s) => s.refreshWorkspace)
   const openDoc = useAppStore((s) => s.openDoc)
@@ -43,7 +48,7 @@ export default function Sidebar(): JSX.Element {
   }
 
   async function createProject(): Promise<void> {
-    const name = await promptName('项目名称')
+    const name = await promptName(t('sidebar.promptProject'))
     if (!name) return
     try {
       await api.invoke('project:create', { name })
@@ -54,7 +59,7 @@ export default function Sidebar(): JSX.Element {
   }
 
   async function createDoc(projectId: string): Promise<void> {
-    const title = await promptName('文档标题', '未命名文档')
+    const title = await promptName(t('sidebar.promptDoc'), t('sidebar.promptDocDefault'))
     if (!title) return
     try {
       const doc = await api.invoke('doc:create', { projectId, title })
@@ -66,7 +71,7 @@ export default function Sidebar(): JSX.Element {
   }
 
   async function createChat(projectId: string, docId?: string): Promise<void> {
-    const title = await promptName('对话标题', '新对话')
+    const title = await promptName(t('sidebar.promptChat'), t('sidebar.promptChatDefault'))
     if (!title) return
     try {
       const chat = await api.invoke('chat:create', { projectId, kind: docId ? 'doc' : 'project', title, docId })
@@ -78,33 +83,33 @@ export default function Sidebar(): JSX.Element {
   }
 
   async function renameProject(projectId: string, current: string): Promise<void> {
-    const name = await promptName('重命名项目', current)
+    const name = await promptName(t('sidebar.renameProjectPrompt'), current)
     if (!name) return
     await api.invoke('project:rename', { projectId, name })
     await refresh()
   }
 
   async function deleteProject(projectId: string): Promise<void> {
-    if (!(await confirmDialog('删除项目？项目将进入回收站，可恢复。'))) return
+    if (!(await confirmDialog(t('sidebar.confirmDeleteProject')))) return
     await api.invoke('project:delete', projectId)
     await refresh()
   }
 
   async function renameDoc(doc: DocMeta): Promise<void> {
-    const title = await promptName('重命名文档', doc.title)
+    const title = await promptName(t('sidebar.renameDocPrompt'), doc.title)
     if (!title) return
     await api.invoke('doc:rename', { docId: doc.id, title })
     await refresh()
   }
 
   async function deleteDoc(doc: DocMeta): Promise<void> {
-    if (!(await confirmDialog('删除文档？文档将进入回收站，可恢复。'))) return
+    if (!(await confirmDialog(t('sidebar.confirmDeleteDoc')))) return
     await api.invoke('doc:delete', doc.id)
     await refresh()
   }
 
   async function deleteChat(chat: ChatMeta): Promise<void> {
-    if (!(await confirmDialog('删除对话？对话将进入归档区，可恢复。'))) return
+    if (!(await confirmDialog(t('sidebar.confirmDeleteChat')))) return
     await api.invoke('chat:delete', chat.id)
     await refresh()
   }
@@ -115,7 +120,7 @@ export default function Sidebar(): JSX.Element {
   }
 
   async function purgeChat(chat: ChatMeta): Promise<void> {
-    if (!(await confirmDialog('彻底删除该对话？此操作不可恢复。'))) return
+    if (!(await confirmDialog(t('sidebar.confirmPurgeChat')))) return
     await api.invoke('chat:purge', chat.id)
     await refresh()
   }
@@ -131,7 +136,7 @@ export default function Sidebar(): JSX.Element {
     if (!projectId) return
     const ext = '.' + file.name.split('.').pop()?.toLowerCase()
     if (!ALLOWED_EXT.includes(ext)) {
-      toast.error('仅支持 .txt / .md / .csv 文本文件')
+      toast.error(t('sidebar.badExt'))
       return
     }
     const content = await file.text()
@@ -144,7 +149,7 @@ export default function Sidebar(): JSX.Element {
   }
 
   async function deleteResource(projectId: string, resourceId: string): Promise<void> {
-    if (!(await confirmDialog('删除该资源文件？'))) return
+    if (!(await confirmDialog(t('sidebar.confirmDeleteResource')))) return
     await api.invoke('resource:delete', { projectId, resourceId })
     await refresh()
   }
@@ -155,7 +160,7 @@ export default function Sidebar(): JSX.Element {
   }
 
   async function purgeDoc(doc: DocMeta): Promise<void> {
-    if (!(await confirmDialog('彻底删除该文档？关联对话将转为孤儿对话进入归档区。'))) return
+    if (!(await confirmDialog(t('sidebar.confirmPurgeDoc')))) return
     await api.invoke('doc:purge', doc.id)
     await refresh()
   }
@@ -168,9 +173,10 @@ export default function Sidebar(): JSX.Element {
         <span className="min-w-0 flex-1 cursor-pointer truncate" onClick={() => openChat(c)} title={c.title}>
           {c.title}
         </span>
+        <ActionBadge chat={c} />
         <div className="hidden gap-0.5 group-hover:flex">
           <TitleButton chatId={c.id} />
-          <IconButton icon={<Trash2 size={12} />} title="删除" onClick={() => void deleteChat(c)} />
+          <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteChat(c)} />
         </div>
       </div>
     ))
@@ -198,15 +204,15 @@ export default function Sidebar(): JSX.Element {
           </div>
         </div>
         <div className="flex items-center gap-1">
-          <IconButton icon={<Plus size={15} />} title="新建项目" onClick={() => void createProject()} />
-          <IconButton icon={<Settings size={15} />} title="设置" onClick={openSettings} />
+          <IconButton icon={<Plus size={15} />} title={t('sidebar.newProject')} onClick={() => void createProject()} />
+          <IconButton icon={<Settings size={15} />} title={t('sidebar.settings')} onClick={openSettings} />
         </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
         {workspace.projects.length === 0 && (
           <div className="px-3 py-6 text-center text-xs" style={{ color: 'var(--muted)' }}>
-            暂无项目，点击左上角 + 新建
+            {t('sidebar.empty')}
           </div>
         )}
 
@@ -225,17 +231,17 @@ export default function Sidebar(): JSX.Element {
                   {p.project.name}
                 </span>
                 <div className="hidden gap-0.5 group-hover:flex">
-                  <IconButton icon={<FileText size={12} />} title="新建文档" onClick={() => void createDoc(p.project.id)} />
-                  <IconButton icon={<MessageSquare size={12} />} title="新建项目对话" onClick={() => void createChat(p.project.id)} />
-                  <IconButton icon={<MoreHorizontal size={12} />} title="重命名" onClick={() => void renameProject(p.project.id, p.project.name)} />
-                  <IconButton icon={<Trash2 size={12} />} title="删除项目" onClick={() => void deleteProject(p.project.id)} />
+                  <IconButton icon={<FileText size={12} />} title={t('sidebar.newDoc')} onClick={() => void createDoc(p.project.id)} />
+                  <IconButton icon={<MessageSquare size={12} />} title={t('sidebar.newProjChat')} onClick={() => void createChat(p.project.id)} />
+                  <IconButton icon={<MoreHorizontal size={12} />} title={t('sidebar.rename')} onClick={() => void renameProject(p.project.id, p.project.name)} />
+                  <IconButton icon={<Trash2 size={12} />} title={t('sidebar.deleteProject')} onClick={() => void deleteProject(p.project.id)} />
                 </div>
               </div>
 
               {open && (
                 <div>
                   <Section
-                    label="写作文档"
+                    label={t('sidebar.secDocs')}
                     open={isOpen(`${projectKey}:docs`)}
                     onToggle={() => toggle(`${projectKey}:docs`)}
                     onAdd={() => void createDoc(p.project.id)}
@@ -253,9 +259,9 @@ export default function Sidebar(): JSX.Element {
                               {doc.title}
                             </span>
                             <div className="hidden gap-0.5 group-hover:flex">
-                              <IconButton icon={<MessageSquare size={12} />} title="新建文档对话" onClick={() => void createChat(p.project.id, doc.id)} />
-                              <IconButton icon={<MoreHorizontal size={12} />} title="重命名" onClick={() => void renameDoc(doc)} />
-                              <IconButton icon={<Trash2 size={12} />} title="删除" onClick={() => void deleteDoc(doc)} />
+                              <IconButton icon={<MessageSquare size={12} />} title={t('sidebar.newDocChat')} onClick={() => void createChat(p.project.id, doc.id)} />
+                              <IconButton icon={<MoreHorizontal size={12} />} title={t('sidebar.rename')} onClick={() => void renameDoc(doc)} />
+                              <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteDoc(doc)} />
                             </div>
                           </div>
                           {renderDocChats(p, doc)}
@@ -264,7 +270,7 @@ export default function Sidebar(): JSX.Element {
                   </Section>
 
                   <Section
-                    label="项目对话"
+                    label={t('sidebar.secChats')}
                     open={isOpen(`${projectKey}:chats`)}
                     onToggle={() => toggle(`${projectKey}:chats`)}
                     onAdd={() => void createChat(p.project.id)}
@@ -278,13 +284,13 @@ export default function Sidebar(): JSX.Element {
                           </span>
                           <div className="hidden gap-0.5 group-hover:flex">
                             <TitleButton chatId={c.id} />
-                            <IconButton icon={<Trash2 size={12} />} title="删除" onClick={() => void deleteChat(c)} />
+                            <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteChat(c)} />
                           </div>
                         </div>
                       ))}
                   </Section>
 
-                  <Section label="资源" open={isOpen(`${projectKey}:res`)} onToggle={() => toggle(`${projectKey}:res`)} onAdd={() => void uploadResource(p.project.id)}>
+                  <Section label={t('sidebar.secResources')} open={isOpen(`${projectKey}:res`)} onToggle={() => toggle(`${projectKey}:res`)} onAdd={() => void uploadResource(p.project.id)}>
                     {isOpen(`${projectKey}:res`) &&
                       p.resources.map((r) => (
                         <div key={r.id} className="group flex items-center gap-1 py-0.5 pl-6 pr-1 text-[13px] hover:bg-[var(--panel3)]">
@@ -293,18 +299,18 @@ export default function Sidebar(): JSX.Element {
                             {r.name}
                           </span>
                           <div className="hidden gap-0.5 group-hover:flex">
-                            <IconButton icon={<FlaskConical size={12} />} title="蒸馏" onClick={() => void runDistill(p.project.id, r.id)} />
-                            <IconButton icon={<Trash2 size={12} />} title="删除" onClick={() => void deleteResource(p.project.id, r.id)} />
+                            <IconButton icon={<FlaskConical size={12} />} title={t('sidebar.distill')} onClick={() => void runDistill(p.project.id, r.id)} />
+                            <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteResource(p.project.id, r.id)} />
                           </div>
                         </div>
                       ))}
                   </Section>
 
-                  <Section label="摘要区" open={isOpen(`${projectKey}:summary`)} onToggle={() => toggle(`${projectKey}:summary`)}>
+                  <Section label={t('sidebar.secSummary')} open={isOpen(`${projectKey}:summary`)} onToggle={() => toggle(`${projectKey}:summary`)}>
                     {isOpen(`${projectKey}:summary`) && <SummaryArea projectId={p.project.id} />}
                   </Section>
 
-                  <Section label="归档区" open={isOpen(`${projectKey}:archive`)} onToggle={() => toggle(`${projectKey}:archive`)}>
+                  <Section label={t('sidebar.secArchive')} open={isOpen(`${projectKey}:archive`)} onToggle={() => toggle(`${projectKey}:archive`)}>
                     {isOpen(`${projectKey}:archive`) &&
                       p.archivedChats.map((c) => (
                         <div key={c.id} className="group flex items-center gap-1 py-0.5 pl-6 pr-1 text-[13px] hover:bg-[var(--panel3)]">
@@ -313,23 +319,23 @@ export default function Sidebar(): JSX.Element {
                             {c.title}
                           </span>
                           <div className="hidden gap-0.5 group-hover:flex">
-                            <IconButton icon={<Plus size={12} />} title="恢复" onClick={() => void restoreChat(c)} />
-                            <IconButton icon={<Trash2 size={12} />} title="彻底删除" onClick={() => void purgeChat(c)} />
+                            <IconButton icon={<Plus size={12} />} title={t('sidebar.restore')} onClick={() => void restoreChat(c)} />
+                            <IconButton icon={<Trash2 size={12} />} title={t('sidebar.purge')} onClick={() => void purgeChat(c)} />
                           </div>
                         </div>
                       ))}
                   </Section>
 
                   {p.trashedDocs.length > 0 && (
-                    <Section label="回收站" open={isOpen(`${projectKey}:trash`)} onToggle={() => toggle(`${projectKey}:trash`)}>
+                    <Section label={t('sidebar.secTrash')} open={isOpen(`${projectKey}:trash`)} onToggle={() => toggle(`${projectKey}:trash`)}>
                       {isOpen(`${projectKey}:trash`) &&
                         p.trashedDocs.map((doc) => (
                           <div key={doc.id} className="group flex items-center gap-1 py-0.5 pl-6 pr-1 text-[13px] hover:bg-[var(--panel3)]">
                             <Trash2 size={13} style={{ color: 'var(--muted)' }} />
                             <span className="min-w-0 flex-1 truncate">{doc.title}</span>
                             <div className="hidden gap-0.5 group-hover:flex">
-                              <IconButton icon={<Plus size={12} />} title="恢复" onClick={() => void restoreDoc(doc)} />
-                              <IconButton icon={<Trash2 size={12} />} title="彻底删除" onClick={() => void purgeDoc(doc)} />
+                              <IconButton icon={<Plus size={12} />} title={t('sidebar.restore')} onClick={() => void restoreDoc(doc)} />
+                              <IconButton icon={<Trash2 size={12} />} title={t('sidebar.purge')} onClick={() => void purgeDoc(doc)} />
                             </div>
                           </div>
                         ))}
@@ -344,7 +350,7 @@ export default function Sidebar(): JSX.Element {
         {workspace.trashedProjects.length > 0 && (
           <div className="mt-3 border-t px-2 pt-2" style={{ borderColor: 'var(--border)' }}>
             <div className="mb-1 px-1 text-[11px] font-medium" style={{ color: 'var(--muted)' }}>
-              项目回收站
+              {t('sidebar.secProjTrash')}
             </div>
             {workspace.trashedProjects.map((p) => (
               <div key={p.id} className="group flex items-center gap-1 px-2 py-1 text-[13px] hover:bg-[var(--panel3)]">
@@ -353,7 +359,7 @@ export default function Sidebar(): JSX.Element {
                 <div className="hidden gap-0.5 group-hover:flex">
                   <IconButton
                     icon={<Plus size={12} />}
-                    title="恢复项目"
+                    title={t('sidebar.restoreProject')}
                     onClick={async () => {
                       await api.invoke('project:restore', p.id)
                       await refresh()
@@ -361,9 +367,9 @@ export default function Sidebar(): JSX.Element {
                   />
                   <IconButton
                     icon={<Trash2 size={12} />}
-                    title="彻底删除项目"
+                    title={t('sidebar.purgeProject')}
                     onClick={async () => {
-                      if (!(await confirmDialog('彻底删除该项目？其下所有数据将一并删除。'))) return
+                      if (!(await confirmDialog(t('sidebar.confirmPurgeProject')))) return
                       await api.invoke('project:purge', p.id)
                       await refresh()
                     }}
@@ -428,14 +434,29 @@ function Section({
 }
 
 function TitleButton({ chatId }: { chatId: string }): JSX.Element {
+  const t = useT()
   const streaming = useAppStore((s) => s.streamingChats[chatId])
   const generating = useAppStore((s) => s.titleGenerating[chatId])
   return (
     <IconButton
       icon={<Sparkles size={12} />}
-      title={generating ? '生成标题中…' : '自动生成标题'}
+      title={generating ? t('sidebar.genTitleBusy') : t('sidebar.genTitle')}
       disabled={!!streaming || !!generating}
       onClick={() => void runGenerateTitle(chatId)}
     />
+  )
+}
+
+function ActionBadge({ chat }: { chat: ChatMeta }): JSX.Element | null {
+  const t = useT()
+  if (!chat.action) return null
+  const label =
+    chat.action === 'diagnose' ? t('sidebar.actionDiagnose') : chat.action === 'plot' ? t('sidebar.actionPlot') : t('sidebar.actionOptimize')
+  const icon =
+    chat.action === 'diagnose' ? <Stethoscope size={11} /> : chat.action === 'plot' ? <TrendingUp size={11} /> : <Wand2 size={11} />
+  return (
+    <span className="inline-flex rounded px-1 py-0.5" style={{ color: 'var(--accent)' }} title={label}>
+      {icon}
+    </span>
   )
 }

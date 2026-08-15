@@ -60,10 +60,10 @@ const GENERIC_PROMPT = `你是通用文本文件的拆解助手。请阅读下�
 
 const CLASSIFY_PROMPT = `请判断下面文本的内容类型，输出 JSON（不要输出其他任何内容）：
 { "type": "story" 或 "other", "confidence": 0到1之间的数字, "reasons": ["理由1", "理由2"] }
-判定标准：
-- "story"：小说、剧本、故事类叙事作品（有人物、情节、叙事推进）。
-- "other"：信息性/结构化文本（代码、列表、报告、邮件、法律条款、百科、表格等）。
-只依据文本内容判断，输出必须是合法 JSON。`
+判定标准（以内容本质为准，排版格式不是依据）：
+- "story"：小说、剧本、故事类叙事作品——有人物、有情节推进、有叙事。注意：主要由人物对话构成的对话体故事/剧本也属于 story；标题层级、列表、加粗等格式特征不能作为"other"的理由。
+- "other"：信息性/结构化文本——代码、数据列表、报告、邮件、法律条款、百科条目、表格，以及非叙事的聊天记录/会议转写等。
+只依据文本内容本质判断，输出必须是合法 JSON。`
 
 const CHAT_PROMPT = `请为下面这段写作讨论对话，按顺序为每条消息生成简短摘要（每条不超过 30 字），输出 JSON 数组，每个元素形如：
 [ { "role": "user" 或 "assistant", "summary": "..." } ]
@@ -190,7 +190,8 @@ interface ClassifyDecision {
 }
 
 /**
- * 确定性启发式预筛（零成本）：仅在强信号时直接判定，弱信号返回 null 交给模型。
+ * 确定性启发式预筛（零成本）：极保守——仅当另一类信号完全为零时才直接判定，
+ * 任何混合信号（如既有对话又有标题层级）一律返回 null 交给模型。
  */
 function heuristicClassify(content: string): ClassifyDecision | null {
   const n = Math.max(content.length, 1)
@@ -207,28 +208,28 @@ function heuristicClassify(content: string): ClassifyDecision | null {
   const urls = (content.match(/https?:\/\/|www\.|\b[\w.+-]+@[\w-]+\.[\w.]+\b/g) ?? []).length
   const digits = content.replace(/\D/g, '').length
 
+  const storyFlags: string[] = []
+  if (per1k(quoteChars) >= 6) storyFlags.push('对话引号密度高')
+  if (chapter > 0) storyFlags.push('存在章节标题')
+  if (per1k(pronouns) >= 10) storyFlags.push('人物指代密度高')
+  if (dialogue > 0) storyFlags.push('存在对话段落')
+
+  const otherFlags: string[] = []
+  if (code > 0) otherFlags.push('存在代码特征')
+  if (headings > 0) otherFlags.push('存在标题层级')
+  if (tableRows > 0) otherFlags.push('存在表格')
+  if (urls > 0) otherFlags.push('存在链接/邮箱')
+  if (per1k(digits) >= 30) otherFlags.push('数字密度高')
+
   const storyScore = per1k(quoteChars) * 2 + chapter * 5 + per1k(pronouns) * 1.5 + dialogue * 3
   const otherScore = code * 6 + headings * 4 + tableRows * 2 + urls * 4 + per1k(digits) * 1.5
 
-  const storySignals: string[] = []
-  if (per1k(quoteChars) >= 6) storySignals.push('对话引号密度高')
-  if (chapter > 0) storySignals.push('存在章节标题')
-  if (per1k(pronouns) >= 10) storySignals.push('人物指代密度高')
-  if (dialogue > 0) storySignals.push('存在对话段落')
-
-  const otherSignals: string[] = []
-  if (code > 0) otherSignals.push('存在代码特征')
-  if (headings > 0) otherSignals.push('存在标题层级')
-  if (tableRows > 0) otherSignals.push('存在表格')
-  if (urls > 0) otherSignals.push('存在链接/邮箱')
-  if (per1k(digits) >= 30) otherSignals.push('数字密度高')
-
-  // 强信号才直接判定（保守阈值，避免误判）
-  if (storyScore > otherScore * 2 && storyScore >= 6) {
-    return { type: 'story', confidence: 0.95, reasons: storySignals.length ? storySignals : ['叙事文本特征明显'] }
+  // 极保守：仅当另一类信号完全为零时才直接判定
+  if (storyScore >= 6 && otherFlags.length === 0) {
+    return { type: 'story', confidence: 0.95, reasons: storyFlags.length ? storyFlags : ['叙事文本特征明显'] }
   }
-  if (otherScore > storyScore * 2 && otherScore >= 6) {
-    return { type: 'other', confidence: 0.95, reasons: otherSignals.length ? otherSignals : ['结构化文本特征明显'] }
+  if (otherScore >= 6 && storyFlags.length === 0) {
+    return { type: 'other', confidence: 0.95, reasons: otherFlags.length ? otherFlags : ['结构化文本特征明显'] }
   }
   return null
 }
@@ -357,7 +358,7 @@ function enqueue<T>(task: () => Promise<T>): Promise<T> {
   return run
 }
 
-async function generateChatSummary(chatId: string): Promise<void> {
+async function generateChatSummary(chatId: string, force = false): Promise<void> {
   const cfg = await loadApiSettings()
   if (!cfg.apiKey) throw new Error('未配置 API Key')
 
@@ -368,12 +369,12 @@ async function generateChatSummary(chatId: string): Promise<void> {
   const lastMessageId = turns[turns.length - 1].id
   const messageCount = turns.length
   const existing = await readChatSummary(chat.projectId, chatId)
-  // 变化检测：无变化则不调用
-  if (existing && existing.lastMessageId === lastMessageId && existing.messageCount === messageCount) return
+  // 变化检测：无变化则不调用（手动重新生成时强制跳过）
+  if (!force && existing && existing.lastMessageId === lastMessageId && existing.messageCount === messageCount) return
 
   const client = makeClient(cfg)
   const dialogue = turns
-    .map((m) => `${m.role === 'user' ? '用户' : 'AI'}：${m.content}`)
+    .map((m, i) => `${i + 1}. ${m.role === 'user' ? '用户' : 'AI'}：${m.content}`)
     .join('\n')
     .slice(0, 12000)
   const res = await client.chat.completions.create({
@@ -388,19 +389,21 @@ async function generateChatSummary(chatId: string): Promise<void> {
   if (res.usage) await recordUsage(res.usage, 'summary')
 
   const parsed = parseJson<{ role: string; summary: string }[]>(res.choices[0]?.message?.content ?? '')
-  const items: ChatSummaryItem[] = (parsed ?? []).map((it, i) => ({
-    messageId: turns[i]?.id ?? `m${i}`,
-    role: it.role === 'user' ? ('user' as const) : ('assistant' as const),
-    summary: String(it.summary ?? '')
+  // 与消息一一对应（以真实消息角色为准，按位置对齐；不足补空、多余丢弃）
+  const rawItems = Array.isArray(parsed) ? parsed : []
+  const items: ChatSummaryItem[] = turns.map((t, i) => ({
+    messageId: t.id,
+    role: t.role === 'user' ? ('user' as const) : ('assistant' as const),
+    summary: rawItems[i] ? String(rawItems[i].summary ?? '') : ''
   }))
   await writeChatSummary(chat.projectId, chatId, { items, updatedAt: nowIso(), lastMessageId, messageCount })
 }
 
-/** 关闭对话窗口后入队生成对话摘要（PRD 7.5） */
-export function queueChatSummary(chatId: string): Promise<void> {
+/** 关闭对话窗口后入队生成对话摘要（PRD 7.5）；force 用于手动重新生成 */
+export function queueChatSummary(chatId: string, force = false): Promise<void> {
   return enqueue(async () => {
     try {
-      await generateChatSummary(chatId)
+      await generateChatSummary(chatId, force)
       pendingRetry.delete(chatId)
       await persistRetry()
     } catch {
@@ -408,6 +411,18 @@ export function queueChatSummary(chatId: string): Promise<void> {
       await persistRetry()
     }
   })
+}
+
+/** 手动重新生成对话摘要（摘要区按钮） */
+export async function regenerateChatSummary(chatId: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const cfg = await loadConfig()
+    if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未开启' }
+    await queueChatSummary(chatId, true)
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: (err as Error).message }
+  }
 }
 
 export async function retryPendingSummaries(): Promise<void> {
@@ -506,7 +521,7 @@ export async function listProjectSummaries(projectId: string): Promise<ProjectSu
   const chats = await Promise.all(
     tree.chats.map(async (c) => {
       const s = await readChatSummary(projectId, c.id)
-      return { chatId: c.id, title: c.title, hasSummary: !!s, updatedAt: s?.updatedAt }
+      return { chatId: c.id, title: c.title, hasSummary: !!s, updatedAt: s?.updatedAt, docId: c.docId, kind: c.kind }
     })
   )
   const resources = await Promise.all(

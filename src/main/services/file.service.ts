@@ -311,7 +311,8 @@ export async function createChat(
   kind: ChatKind,
   title: string,
   docId?: string,
-  contextRange?: import('@shared/types').ContextRange
+  contextRange?: import('@shared/types').ContextRange,
+  action?: import('@shared/types').ChatAction
 ): Promise<ChatMeta> {
   const id = newId()
   const meta: ChatMeta = {
@@ -326,10 +327,22 @@ export async function createChat(
   }
   if (kind === 'context') {
     meta.contextRange = contextRange
+    if (action) meta.action = action
   }
   await atomicWriteJson(chatMetaPath(projectId, id), meta)
   await atomicWrite(chatJsonlPath(projectId, id), '')
   return meta
+}
+
+/** 更新对话 meta 的可变字段（contextRange / lockedRange / injectionOverrides） */
+export async function updateChatMeta(
+  chatId: string,
+  patch: Partial<Pick<ChatMeta, 'contextRange' | 'lockedRange' | 'injectionOverrides'>>
+): Promise<ChatMeta> {
+  const chat = await getChatMeta(chatId)
+  const next = { ...chat, ...patch, updatedAt: nowIso() }
+  await atomicWriteJson(chatMetaPath(chat.projectId, chatId), next)
+  return next
 }
 
 export async function getChat(chatId: string): Promise<{ chat: ChatMeta; messages: ChatMessage[] }> {

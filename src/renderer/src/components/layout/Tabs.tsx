@@ -2,24 +2,26 @@ import { X } from 'lucide-react'
 import { useAppStore } from '../../store/app.store'
 import { flushDoc } from '../../lib/editorRegistry'
 import { confirmDialog } from '../../store/dialog.store'
+import { useT } from '../../i18n'
 
 export default function Tabs(): JSX.Element {
+  const t = useT()
   const tabs = useAppStore((s) => s.tabs)
   const activeTabId = useAppStore((s) => s.activeTabId)
   const dirty = useAppStore((s) => s.dirty)
   const activateTab = useAppStore((s) => s.activateTab)
   const closeTab = useAppStore((s) => s.closeTab)
 
-  async function handleClose(t: (typeof tabs)[number]): Promise<void> {
-    const isDirty = t.kind === 'doc' && t.refId && dirty[t.refId]
-    if (isDirty && t.refId) {
-      const save = await confirmDialog('文档有未保存改动，是否保存后关闭？')
+  async function handleClose(tab: (typeof tabs)[number]): Promise<void> {
+    const isDirty = tab.kind === 'doc' && tab.refId && dirty[tab.refId]
+    if (isDirty && tab.refId) {
+      const save = await confirmDialog(t('tabs.unsavedClose'))
       if (save) {
-        void flushDoc(t.refId).then(() => closeTab(t.id))
+        void flushDoc(tab.refId).then(() => closeTab(tab.id))
         return
       }
     }
-    closeTab(t.id)
+    closeTab(tab.id)
   }
 
   if (tabs.length === 0) return <div style={{ height: 38, background: 'var(--panel)' }} />

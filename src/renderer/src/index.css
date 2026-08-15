@@ -86,6 +86,17 @@ body {
   background: var(--panel3);
   color: var(--text);
 }
+/* 选区：半透明强调蓝，保证深色主题下白色文字可读 */
+.cm-editor .cm-selectionBackground,
+.cm-editor.cm-focused .cm-selectionBackground,
+.cm-editor .cm-content ::selection {
+  background: rgba(68, 147, 248, 0.32) !important;
+}
+html.light .cm-editor .cm-selectionBackground,
+html.light .cm-editor.cm-focused .cm-selectionBackground,
+html.light .cm-editor .cm-content ::selection {
+  background: rgba(9, 105, 218, 0.22) !important;
+}
 
 /* 上下文高亮装饰 */
 .cm-context-before {

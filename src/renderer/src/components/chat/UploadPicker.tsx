@@ -4,6 +4,7 @@ import type { UploadResult } from '@shared/types'
 import { useAppStore } from '../../store/app.store'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
+import { useT } from '../../i18n'
 import Modal from '../common/Modal'
 
 interface Props {
@@ -16,6 +17,7 @@ interface Props {
 const ALLOWED_EXT = ['.txt', '.md', '.csv']
 
 export default function UploadPicker({ chatId, projectId, onAttached, onClose }: Props): JSX.Element {
+  const t = useT()
   const resources = useAppStore((s) => s.workspace.projects.find((p) => p.project.id === projectId)?.resources ?? [])
   const fileInput = useRef<HTMLInputElement>(null)
 
@@ -32,7 +34,7 @@ export default function UploadPicker({ chatId, projectId, onAttached, onClose }:
   async function attachLocal(file: File): Promise<void> {
     const ext = '.' + file.name.split('.').pop()?.toLowerCase()
     if (!ALLOWED_EXT.includes(ext)) {
-      toast.error('仅支持 .txt / .md / .csv 文本文件')
+      toast.error(t('sidebar.badExt'))
       return
     }
     const content = await file.text()
@@ -47,11 +49,11 @@ export default function UploadPicker({ chatId, projectId, onAttached, onClose }:
 
   return (
     <Modal
-      title="上传文件到会话"
+      title={t('upload.title')}
       onClose={onClose}
       footer={
         <button className="btn" onClick={onClose}>
-          关闭
+          {t('upload.close')}
         </button>
       }
     >
@@ -68,16 +70,16 @@ export default function UploadPicker({ chatId, projectId, onAttached, onClose }:
       />
       <button className="btn mb-3 w-full" onClick={() => fileInput.current?.click()}>
         <Upload size={14} />
-        从本地上传（自动加入资源区）
+        {t('upload.local')}
       </button>
 
       <div className="mb-1 text-xs" style={{ color: 'var(--muted)' }}>
-        从资源区选取
+        {t('upload.fromResources')}
       </div>
       <div className="max-h-64 overflow-y-auto rounded-lg border" style={{ borderColor: 'var(--border)' }}>
         {resources.length === 0 && (
           <div className="px-3 py-4 text-center text-xs" style={{ color: 'var(--muted)' }}>
-            当前项目暂无资源文件
+            {t('upload.empty')}
           </div>
         )}
         {resources.map((r) => (
@@ -92,7 +94,7 @@ export default function UploadPicker({ chatId, projectId, onAttached, onClose }:
         ))}
       </div>
       <p className="mt-2 text-[11px]" style={{ color: 'var(--muted)' }}>
-        文件仅对本次会话有效；上传时保存内容快照，后续修改原文件不影响本会话。
+        {t('upload.hint')}
       </p>
     </Modal>
   )

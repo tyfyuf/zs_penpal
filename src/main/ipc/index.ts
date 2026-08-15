@@ -38,6 +38,7 @@ import {
   restoreProject,
   saveDoc,
   updateChatContext,
+  updateChatMeta,
   uploadResource
 } from '../services/file.service'
 import { hasApiKey, setApiKey } from '../services/crypto.service'
@@ -46,6 +47,7 @@ import {
   distillResource,
   listProjectSummaries,
   queueChatSummary,
+  regenerateChatSummary,
   regenerateDocSummary,
   retryPendingSummaries,
   undistillResource
@@ -108,7 +110,7 @@ export function registerIpcHandlers(): void {
   handle(IPC.docPurge, (id) => purgeDoc(id))
 
   // 对话
-  handle(IPC.chatCreate, (req) => createChat(req.projectId, req.kind, req.title, req.docId, req.contextRange))
+  handle(IPC.chatCreate, (req) => createChat(req.projectId, req.kind, req.title, req.docId, req.contextRange, req.action))
   handle(IPC.chatGet, (id) => getChat(id))
   handle(IPC.chatRename, (req) => renameChat(req.chatId, req.title))
   handle(IPC.chatAppend, (req) => appendMessage(req.chatId, req.message))
@@ -117,6 +119,7 @@ export function registerIpcHandlers(): void {
   handle(IPC.chatRestore, (id) => restoreChat(id))
   handle(IPC.chatPurge, (id) => purgeChat(id))
   handle(IPC.chatSetContext, (req) => updateChatContext(req.chatId, req.contextRange))
+  handle(IPC.chatPatch, (req) => updateChatMeta(req.chatId, req.patch))
   handle(IPC.chatGenerateTitle, (chatId) => generateChatTitle(chatId))
 
   // 资源
@@ -153,6 +156,7 @@ export function registerIpcHandlers(): void {
   handle(IPC.summaryGetResource, (req) => readResourceSummary(req.projectId, req.resourceId))
   handle(IPC.summaryListProject, (projectId) => listProjectSummaries(projectId))
   handle(IPC.summaryRegenerateDoc, (docId) => regenerateDocSummary(docId))
+  handle(IPC.summaryRegenerateChat, (chatId) => regenerateChatSummary(chatId))
   handle(IPC.summaryQueueChat, (chatId) => {
     void queueChatSummary(chatId)
   })

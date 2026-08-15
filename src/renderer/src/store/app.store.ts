@@ -1,6 +1,7 @@
 import { create } from 'zustand'
-import type { AppConfig, ChatMeta, ContextRange, DocMeta, WorkspaceSnapshot } from '@shared/types'
+import type { AppConfig, ChatAction, ChatMeta, ContextRange, DocMeta, WorkspaceSnapshot } from '@shared/types'
 import { api } from '../lib/api'
+import { useI18nStore } from '../i18n'
 
 export type TabKind = 'doc' | 'chat' | 'settings' | 'resource'
 
@@ -12,6 +13,7 @@ export interface Tab {
   projectId?: string
   chatKind?: 'project' | 'doc' | 'context'
   contextRange?: ContextRange
+  action?: ChatAction
 }
 
 interface AppStore {
@@ -65,6 +67,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     const theme = get().theme
     document.documentElement.classList.toggle('light', theme === 'light')
     document.documentElement.classList.toggle('dark', theme === 'dark')
+    useI18nStore.getState().setLocale(config.language ?? 'zh')
     set({ config, workspace, initialized: true })
   },
 
@@ -133,8 +136,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
       kind: 'chat',
       title: chat.title,
       refId: chat.id,
+      projectId: chat.projectId,
       chatKind: chat.kind,
-      contextRange: chat.contextRange
+      contextRange: chat.contextRange,
+      action: chat.action
     }
     set({ tabs: [...tabs, tab], activeTabId: tab.id })
     void api.invoke('recovery:update', { projectId: chat.projectId, chatId: chat.id, timestamp: new Date().toISOString() })

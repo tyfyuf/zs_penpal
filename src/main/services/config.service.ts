@@ -15,7 +15,8 @@ const DEFAULT_CONFIG: Omit<AppConfig, 'workspaceDir'> = {
   model: 'gpt-4o',
   apiBaseUrl: 'https://api.openai.com/v1',
   contextLimit: 256000,
-  summaryInjection: DEFAULT_INJECTION
+  summaryInjection: DEFAULT_INJECTION,
+  language: 'zh'
 }
 
 let cache: AppConfig | null = null

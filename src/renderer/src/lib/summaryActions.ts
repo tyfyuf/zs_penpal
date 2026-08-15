@@ -2,12 +2,13 @@ import { api } from './api'
 import { toast } from '../store/toast.store'
 import { chooseOption, confirmDialog } from '../store/dialog.store'
 import { useAppStore } from '../store/app.store'
+import { tGlobal } from '../i18n'
 
 export async function runDistill(projectId: string, resourceId: string): Promise<void> {
   try {
-    const type = await chooseOption('选择文件所属类型', [
-      { value: 'story', label: '故事' },
-      { value: 'other', label: '其他' }
+    const type = await chooseOption(tGlobal('distill.chooseType'), [
+      { value: 'story', label: tGlobal('distill.story') },
+      { value: 'other', label: tGlobal('distill.other') }
     ])
     if (!type) return
     await doDistill(projectId, resourceId, type as 'story' | 'other', false)
@@ -26,34 +27,33 @@ async function doDistill(
 ): Promise<void> {
   const res = await api.invoke('resource:distill', { projectId, resourceId, type, force })
   if (res.ok) {
-    toast.success('蒸馏完成')
+    toast.success(tGlobal('distill.ok'))
     return
   }
   if (res.mismatch) {
-    const detected = res.detectedType === 'story' ? '故事' : '其他'
-    const reasons = res.reasons?.length ? `\n理由：${res.reasons.join('；')}` : ''
-    toast.error(`类型不符：该文件被判定为「${detected}」，请重新选择。${reasons}`)
+    const detected = res.detectedType === 'story' ? tGlobal('distill.story') : tGlobal('distill.other')
+    const reasons = res.reasons?.length ? `\n${res.reasons.join('；')}` : ''
+    toast.error(tGlobal('distill.mismatch', { type: detected, reasons }))
     return
   }
   if (res.uncertain) {
-    const detected = res.detectedType === 'story' ? '故事' : '其他'
+    const detected = res.detectedType === 'story' ? tGlobal('distill.story') : tGlobal('distill.other')
+    const chosen = type === 'story' ? tGlobal('distill.story') : tGlobal('distill.other')
     const reasons = res.reasons?.length ? `（${res.reasons.join('；')}）` : ''
-    const proceed = await confirmDialog(
-      `无法自动判定该文件类型${reasons}，倾向「${detected}」。\n仍按所选类型「${type === 'story' ? '故事' : '其他'}」生成摘要吗？`
-    )
+    const proceed = await confirmDialog(tGlobal('distill.uncertain', { type: detected, chosen, reasons }))
     if (proceed) {
       await doDistill(projectId, resourceId, type, true)
     }
     return
   }
-  toast.error(res.error ?? '蒸馏失败')
+  toast.error(res.error ?? tGlobal('distill.fail'))
 }
 
 export async function runUndistill(projectId: string, resourceId: string): Promise<void> {
   try {
-    if (!(await confirmDialog('取消蒸馏？该资源摘要将被移除。'))) return
+    if (!(await confirmDialog(tGlobal('distill.undistillConfirm')))) return
     await api.invoke('resource:undistill', { projectId, resourceId })
-    toast.success('已取消蒸馏')
+    toast.success(tGlobal('distill.undistillOk'))
   } catch (err) {
     toast.error((err as Error).message)
   }
@@ -67,11 +67,11 @@ export async function runGenerateTitle(chatId: string): Promise<void> {
   try {
     const res = await api.invoke('chat:generateTitle', chatId)
     if (res.ok) {
-      toast.success(`标题已更新：${res.title}`)
+      toast.success(tGlobal('distill.titleOk', { title: res.title ?? '' }))
       await refreshWorkspace()
       bumpSummary()
     } else {
-      toast.error(res.error ?? '标题生成失败')
+      toast.error(res.error ?? tGlobal('distill.titleFail'))
     }
   } catch (err) {
     toast.error((err as Error).message)

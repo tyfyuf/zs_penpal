@@ -13,9 +13,16 @@ export function nowIso(): string {
 
 /**
  * 原子写入：先写临时文件再 rename，避免进程中断留下半写文件（PRD 1.6 / C10）。
- * 优先复用 write-file-atomic 的语义；rename 在 Windows 上会覆盖目标文件。
+ * - Windows 上同一文件高频写入时 rename 可能因并发冲突报 EPERM：
+ *   按文件串行化 + EPERM 退避重试，彻底避免滑块快速拖动导致的报错。
  */
-export async function atomicWrite(filePath: string, content: string, encoding: BufferEncoding = 'utf8'): Promise<void> {
+const writeQueues = new Map<string, Promise<void>>()
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function atomicWriteRaw(filePath: string, content: string, encoding: BufferEncoding): Promise<void> {
   const dir = dirname(filePath)
   await mkdir(dir, { recursive: true })
   const tmp = `${filePath}.${newId()}.tmp`
@@ -26,6 +33,29 @@ export async function atomicWrite(filePath: string, content: string, encoding: B
     await rm(tmp, { force: true }).catch(() => {})
     throw err
   }
+}
+
+export async function atomicWrite(filePath: string, content: string, encoding: BufferEncoding = 'utf8'): Promise<void> {
+  // 同一文件串行写入
+  const prev = writeQueues.get(filePath) ?? Promise.resolve()
+  const next = prev.then(async () => {
+    // EPERM 退避重试（Windows rename 竞争）
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await atomicWriteRaw(filePath, content, encoding)
+        return
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EPERM' && attempt < 5) {
+          await sleep(60 + attempt * 80)
+          continue
+        }
+        throw err
+      }
+    }
+  })
+  // 失败后允许后续写入继续
+  writeQueues.set(filePath, next.catch(() => {}))
+  await next
 }
 
 export async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {

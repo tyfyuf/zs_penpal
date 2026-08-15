@@ -2,16 +2,21 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Compartment, EditorState, type Extension } from '@codemirror/state'
 import { Decoration, EditorView } from '@codemirror/view'
 import { Download, Minus, Plus, Save } from 'lucide-react'
-import type { ContextRange, DocMeta } from '@shared/types'
+import type { ChatAction, ContextRange, DocMeta } from '@shared/types'
 import type { Tab } from '../../store/app.store'
 import { useAppStore } from '../../store/app.store'
 import { useContextStore, type ContextHighlight } from '../../store/context.store'
 import { api } from '../../lib/api'
 import { registerSaveHandler } from '../../lib/editorRegistry'
 import { toast } from '../../store/toast.store'
+import { useT } from '../../i18n'
 import { buildExtensions } from './editor-setup'
 
-type Action = '诊断' | '走向' | '优化'
+const ACTIONS: { value: ChatAction; labelKey: string }[] = [
+  { value: 'diagnose', labelKey: 'sidebar.actionDiagnose' },
+  { value: 'plot', labelKey: 'sidebar.actionPlot' },
+  { value: 'optimize', labelKey: 'sidebar.actionOptimize' }
+]
 
 interface MenuState {
   x: number
@@ -35,6 +40,7 @@ function buildHighlightDecos(h: ContextHighlight, docLen: number): Extension {
 }
 
 export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
+  const t = useT()
   const docId = tab.refId!
   const containerRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
@@ -151,7 +157,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
     setMenu({ x: e.clientX, y: e.clientY, from: cur.from, to: cur.to, empty: cur.empty })
   }
 
-  async function runAction(action: Action): Promise<void> {
+  async function runAction(action: ChatAction): Promise<void> {
     const view = viewRef.current
     const m = menu
     setMenu(null)
@@ -161,7 +167,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
     const anchor = hasSelection ? m.from : m.to
     let before = 200
     let after = 200
-    if (action === '走向') {
+    if (action === 'plot') {
       before = 500
       after = m.to < docLength ? 200 : 0
     }
@@ -177,9 +183,10 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
       const chat = await api.invoke('chat:create', {
         projectId: docMeta.projectId,
         kind: 'context',
-        title: `${action} · ${tab.title}`,
+        title: t('sidebar.promptChatDefault'),
         docId,
-        contextRange
+        contextRange,
+        action
       })
       await refresh()
       openChat(chat)
@@ -190,8 +197,8 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
 
   async function exportDoc(format: 'md' | 'txt'): Promise<void> {
     const res = await api.invoke('export:doc', { docId, format })
-    if (res.ok) toast.success(`已导出：${res.path}`)
-    else if (res.error !== '已取消') toast.error(res.error ?? '导出失败')
+    if (res.ok) toast.success(t('editor.exportOk', { path: res.path ?? '' }))
+    else if (res.error !== '已取消') toast.error(res.error ?? t('editor.exportFail'))
   }
 
   return (
@@ -200,23 +207,23 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
         <span className="text-sm font-medium">{tab.title}</span>
         {dirty && (
           <span className="text-xs" style={{ color: 'var(--warn)' }}>
-            ● 未保存
+            ● {t('editor.unsaved')}
           </span>
         )}
         <span className="flex-1" />
-        <button className="btn !px-2 !py-1" onClick={() => setFontSize((f) => Math.max(12, f - 1))} title="缩小字号">
+        <button className="btn !px-2 !py-1" onClick={() => setFontSize((f) => Math.max(12, f - 1))} title={t('editor.fontDown')}>
           <Minus size={14} />
         </button>
         <span className="w-8 text-center text-xs" style={{ color: 'var(--muted)' }}>
           {fontSize}
         </span>
-        <button className="btn !px-2 !py-1" onClick={() => setFontSize((f) => Math.min(28, f + 1))} title="放大字号">
+        <button className="btn !px-2 !py-1" onClick={() => setFontSize((f) => Math.min(28, f + 1))} title={t('editor.fontUp')}>
           <Plus size={14} />
         </button>
-        <button className="btn !px-2 !py-1" onClick={() => void doSave()} title="保存 (Ctrl+S)">
+        <button className="btn !px-2 !py-1" onClick={() => void doSave()} title={t('editor.save')}>
           <Save size={14} />
         </button>
-        <button className="btn !px-2 !py-1" onClick={() => void exportDoc('md')} title="导出 Markdown">
+        <button className="btn !px-2 !py-1" onClick={() => void exportDoc('md')} title={t('editor.exportMd')}>
           <Download size={14} />
         </button>
       </div>
@@ -236,13 +243,13 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
           style={{ left: menu.x, top: menu.y, background: 'var(--panel2)', borderColor: 'var(--border)' }}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          {(['诊断', '走向', ...(menu.empty ? [] : ['优化'])] as Action[]).map((a) => (
+          {ACTIONS.filter((a) => a.value !== 'optimize' || !menu.empty).map((a) => (
             <button
-              key={a}
+              key={a.value}
               className="block w-full px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]"
-              onClick={() => void runAction(a)}
+              onClick={() => void runAction(a.value)}
             >
-              {a}
+              {t(a.labelKey)}
             </button>
           ))}
         </div>

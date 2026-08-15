@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ContextRange } from '@shared/types'
 import { api } from '../../lib/api'
+import { useT } from '../../i18n'
 
 interface Props {
   docId: string
@@ -14,6 +15,7 @@ interface Props {
 }
 
 export default function ContextPanel({ docId, range, disabled, onChange, minBefore, minAfter }: Props): JSX.Element {
+  const t = useT()
   const [docLen, setDocLen] = useState<number | null>(null)
 
   useEffect(() => {
@@ -39,19 +41,19 @@ export default function ContextPanel({ docId, range, disabled, onChange, minBefo
     <div className="rounded-lg border p-3" style={{ background: 'var(--panel)', borderColor: 'var(--border)' }}>
       <div className="mb-2 flex items-center justify-between">
         <span className="text-xs font-semibold" style={{ color: 'var(--muted)' }}>
-          上下文范围
+          {t('context.title')}
         </span>
         {(minBefore || minAfter) && (
           <span className="text-[11px]" style={{ color: 'var(--warn)' }}>
-            仅可扩大
+            {t('context.expandOnly')}
           </span>
         )}
       </div>
 
       <div className="mb-3">
         <div className="mb-1 flex items-center justify-between text-xs">
-          <span style={{ color: 'var(--muted)' }}>前文</span>
-          <span style={{ color: 'var(--text)' }}>{range.before} 字</span>
+          <span style={{ color: 'var(--muted)' }}>{t('context.before')}</span>
+          <span style={{ color: 'var(--text)' }}>{t('context.chars', { n: range.before })}</span>
         </div>
         <div className="flex items-center gap-2">
           <input
@@ -78,8 +80,8 @@ export default function ContextPanel({ docId, range, disabled, onChange, minBefo
 
       <div>
         <div className="mb-1 flex items-center justify-between text-xs">
-          <span style={{ color: 'var(--muted)' }}>后文</span>
-          <span style={{ color: 'var(--text)' }}>{range.after} 字</span>
+          <span style={{ color: 'var(--muted)' }}>{t('context.after')}</span>
+          <span style={{ color: 'var(--text)' }}>{t('context.chars', { n: range.after })}</span>
         </div>
         <div className="flex items-center gap-2">
           <input
@@ -105,9 +107,9 @@ export default function ContextPanel({ docId, range, disabled, onChange, minBefo
       </div>
 
       <div className="mt-2 text-[11px]" style={{ color: 'var(--muted)' }}>
-        {hasSel ? '已按选区确定核心内容' : '以光标位置为中心'}
-        {beforeDisabled ? ' · 光标位于文档开头，前文不可调' : ''}
-        {afterDisabled ? ' · 光标位于文档结尾，后文不可调' : ''}
+        {hasSel ? t('context.coreSel') : t('context.coreCursor')}
+        {beforeDisabled ? t('context.atStart') : ''}
+        {afterDisabled ? t('context.atEnd') : ''}
       </div>
     </div>
   )

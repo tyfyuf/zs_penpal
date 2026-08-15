@@ -1,11 +1,31 @@
-import { useEffect, useRef, useState } from 'react'
-import { Brain, Check, ChevronDown, ChevronRight, Copy, FileText, Paperclip, Send, Square } from 'lucide-react'
-import type { ChatAttachment, ChatMessage, ChatMeta, ContextRange, StreamContextRange } from '@shared/types'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Brain,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Crosshair,
+  FileText,
+  ListFilter,
+  MessageSquare,
+  Paperclip,
+  Send,
+  Square
+} from 'lucide-react'
+import type {
+  ChatAttachment,
+  ChatMessage,
+  ChatMeta,
+  ContextRange,
+  ProjectSummariesOverview,
+  StreamContextRange
+} from '@shared/types'
 import type { Tab } from '../../store/app.store'
 import { useAppStore } from '../../store/app.store'
 import { useContextStore } from '../../store/context.store'
 import { api } from '../../lib/api'
-import { toast } from '../../store/toast.store'
+import { useT } from '../../i18n'
 import ContextPanel from './ContextPanel'
 import UploadPicker from './UploadPicker'
 
@@ -21,7 +41,13 @@ function toStreamRange(range: ContextRange, docId: string, projectId: string): S
   }
 }
 
+interface InjectionItem {
+  key: string
+  label: string
+}
+
 export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
+  const t = useT()
   const chatId = tab.refId!
   const [chat, setChat] = useState<ChatMeta | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -33,23 +59,47 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   const [showUpload, setShowUpload] = useState(false)
   const [regeneratePrompt, setRegeneratePrompt] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
-  /** 本次发送实际使用的上下文范围（用于锁定“只能扩大”） */
+  const [prevAnswer, setPrevAnswer] = useState<{ content: string; reasoning?: string } | null>(null)
+  const [injectionsOpen, setInjectionsOpen] = useState(false)
+  const [overview, setOverview] = useState<ProjectSummariesOverview | null>(null)
+  /** 本次发送实际使用的上下文范围（成功后写入锁定下限） */
   const sentRangeRef = useRef<{ before: number; after: number } | null>(null)
-  /** 对话已进行后锁定的最小范围（PRD 改进：此后上下文只能扩大不能缩小） */
+  /** 对话已进行后锁定的最小范围（只能扩大，持久化） */
   const [lockedRange, setLockedRange] = useState<{ before: number; after: number } | null>(null)
+  /** 该对话关闭的注入键（持久化到对话 meta） */
+  const [disabledInjections, setDisabledInjections] = useState<string[]>([])
+  const pendingReasonRef = useRef<'context' | 'summary' | 'both' | null>(null)
+  const pendingNewlyEnabledRef = useRef<string[]>([])
+  const rangeSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
+  const config = useAppStore((s) => s.config)
+  const workspace = useAppStore((s) => s.workspace)
+  const summaryRevision = useAppStore((s) => s.summaryRevision)
   const setTabContextRange = useAppStore((s) => s.setContextRange)
   const setStreamingChat = useAppStore((s) => s.setStreamingChat)
   const titleGenerating = useAppStore((s) => s.titleGenerating[chatId])
+
+  const docTitle = useMemo(() => {
+    if (!chat?.docId) return undefined
+    return workspace.projects.flatMap((p) => p.docs).find((d) => d.id === chat.docId)?.title
+  }, [workspace, chat?.docId])
 
   useEffect(() => {
     void api.invoke('chat:get', chatId).then(({ chat, messages }) => {
       setChat(chat)
       setMessages(messages)
       if (chat.contextRange) setRange(chat.contextRange)
+      if (chat.lockedRange) setLockedRange(chat.lockedRange)
+      setDisabledInjections(chat.injectionOverrides?.disabled ?? [])
     })
   }, [chatId])
+
+  // 摘要概览（注入开关面板数据）
+  useEffect(() => {
+    if (!chat?.projectId) return
+    void api.invoke('summary:listProject', chat.projectId).then(setOverview).catch(() => {})
+  }, [chat?.projectId, summaryRevision])
 
   // 流式订阅
   useEffect(() => {
@@ -66,11 +116,15 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       setStreaming((s) => (s && s.requestId === p.requestId ? null : s))
       if (p.aborted) {
         sentRangeRef.current = null
+        pendingReasonRef.current = null
+        pendingNewlyEnabledRef.current = []
         return
       }
       if (p.error) {
         setError(p.error)
         sentRangeRef.current = null
+        pendingReasonRef.current = null
+        pendingNewlyEnabledRef.current = []
         return
       }
       if (p.content) {
@@ -80,8 +134,11 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
         ])
         if (sentRangeRef.current) {
           setLockedRange(sentRangeRef.current)
+          void api.invoke('chat:patch', { chatId, patch: { lockedRange: sentRangeRef.current } })
           sentRangeRef.current = null
         }
+        pendingReasonRef.current = null
+        pendingNewlyEnabledRef.current = []
       }
     })
     return () => {
@@ -90,12 +147,17 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     }
   }, [chatId])
 
-  // 关闭对话窗口 → 后台生成/更新聊天摘要（PRD 7.5）+ 清理全局流式状态
+  // 关闭对话窗口 → 后台生成/更新聊天摘要（PRD 7.5）+ 清理全局流式状态 + 落盘防抖中的范围
   useEffect(() => {
     return () => {
       void api.invoke('summary:queueChat', chatId)
       setStreamingChat(chatId, false)
+      if (rangeSaveTimer.current) {
+        clearTimeout(rangeSaveTimer.current)
+        void api.invoke('chat:patch', { chatId, patch: { contextRange: range ?? undefined } })
+      }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId, setStreamingChat])
 
   useEffect(() => {
@@ -107,15 +169,86 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     setStreamingChat(chatId, !!streaming)
   }, [streaming, chatId, setStreamingChat])
 
+  const started = messages.length > 0
+  const hasOutput = messages.some((m) => m.role === 'assistant')
+
   function updateRange(r: ContextRange): void {
     setRange(r)
     setTabContextRange(tab.id, r)
     if (chat?.docId) {
       useContextStore.getState().setHighlight({ docId: chat.docId, ...r })
     }
-    void api.invoke('chat:setContext', { chatId, contextRange: r })
-    if (lockedRange && (r.before !== lockedRange.before || r.after !== lockedRange.after)) {
+    // 防抖持久化（避免高频写入触发 EPERM）
+    if (rangeSaveTimer.current) clearTimeout(rangeSaveTimer.current)
+    rangeSaveTimer.current = setTimeout(() => {
+      void api.invoke('chat:patch', { chatId, patch: { contextRange: r } })
+    }, 400)
+    // 已开始且范围变化 → 提示重新生成（原因：context）
+    if (started && hasOutput && lockedRange && (r.before !== lockedRange.before || r.after !== lockedRange.after)) {
+      pendingReasonRef.current = pendingReasonRef.current === 'summary' ? 'both' : 'context'
       setRegeneratePrompt(true)
+    }
+  }
+
+  // 注入开关项
+  const injectionItems = useMemo<InjectionItem[]>(() => {
+    if (!chat || !overview || !config?.summaryEnabled) return []
+    const kind = chat.kind
+    const inj = config.summaryInjection
+    const items: InjectionItem[] = []
+
+    if (kind === 'doc' && inj.doc.fullText) {
+      items.push({ key: 'fulltext', label: t('chat.fulltext') })
+    }
+
+    let docIds: string[] = []
+    if (kind === 'project' && inj.project.docSummaries) docIds = overview.docs.map((d) => d.docId)
+    else if (kind === 'doc' && inj.doc.otherDocSummaries) docIds = overview.docs.filter((d) => d.docId !== chat.docId).map((d) => d.docId)
+    else if (kind === 'context' && inj.context.docSummaries) docIds = overview.docs.map((d) => d.docId)
+    for (const d of overview.docs) {
+      if (!docIds.includes(d.docId) || !d.hasSummary) continue
+      items.push({ key: `doc:${d.docId}`, label: t('chat.docSummary', { name: d.title }) })
+    }
+
+    let chatIds: string[] = []
+    if (kind === 'project' && inj.project.chatSummaries) {
+      chatIds = overview.chats.filter((c) => c.chatId !== chat.id).map((c) => c.chatId)
+    } else if (kind === 'doc' && inj.doc.docChatSummaries) {
+      chatIds = overview.chats.filter((c) => c.docId === chat.docId && c.chatId !== chat.id).map((c) => c.chatId)
+    } else if (kind === 'context' && inj.context.docChatSummaries) {
+      chatIds = overview.chats.filter((c) => c.docId === chat.docId && c.chatId !== chat.id).map((c) => c.chatId)
+    }
+    for (const c of overview.chats) {
+      if (!chatIds.includes(c.chatId) || !c.hasSummary) continue
+      items.push({ key: `chat:${c.chatId}`, label: t('chat.chatSummary', { name: c.title }) })
+    }
+
+    const includeRes =
+      kind === 'project' ? inj.project.resourceSummaries : kind === 'doc' ? inj.doc.resourceSummaries : inj.context.resourceSummaries
+    if (includeRes) {
+      for (const r of overview.resources) {
+        if (!r.distilled) continue
+        items.push({ key: `res:${r.resourceId}`, label: t('chat.resSummary', { name: r.name }) })
+      }
+    }
+    return items
+  }, [chat, overview, config, t])
+
+  function toggleInjection(key: string): void {
+    if (streaming || titleGenerating) return
+    const enabled = !disabledInjections.includes(key)
+    // 对话开始后：不能关闭仍激活的摘要，只能重新开启
+    if (started && enabled) return
+    const next = enabled ? [...disabledInjections, key] : disabledInjections.filter((k) => k !== key)
+    setDisabledInjections(next)
+    void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: next } } })
+    // 重新激活（对话开始后）→ 提示重新生成
+    if (started && !enabled) {
+      pendingNewlyEnabledRef.current = [...pendingNewlyEnabledRef.current, key]
+      if (hasOutput) {
+        pendingReasonRef.current = pendingReasonRef.current === 'context' ? 'both' : 'summary'
+        setRegeneratePrompt(true)
+      }
     }
   }
 
@@ -129,6 +262,10 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
         ...m,
         { id: userMessageId, role: 'user', content: input, createdAt: new Date().toISOString(), attachments }
       ])
+      setPrevAnswer(null)
+    } else {
+      const lastA = [...messages].reverse().find((m) => m.role === 'assistant')
+      if (lastA) setPrevAnswer({ content: lastA.content, reasoning: lastA.reasoning })
     }
     setStreaming({ requestId, acc: '', reasoning: '' })
     setError(null)
@@ -142,12 +279,20 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       snapshotIds: regenerate ? undefined : attachments.map((a) => a.snapshotId),
       contextRange: streamRange,
       regenerate,
+      regenerateReason: regenerate ? pendingReasonRef.current ?? undefined : undefined,
+      newlyEnabledSummaries: regenerate && pendingNewlyEnabledRef.current.length ? [...pendingNewlyEnabledRef.current] : undefined,
       userMessageId
     })
     if (!regenerate) {
       setInput('')
       setAttachments([])
     }
+  }
+
+  function cancelRegeneratePrompt(): void {
+    setRegeneratePrompt(false)
+    pendingReasonRef.current = null
+    pendingNewlyEnabledRef.current = []
   }
 
   async function copy(text: string, id?: string): Promise<void> {
@@ -159,13 +304,46 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   }
 
   const isContext = chat?.kind === 'context'
+  const regeneratePromptText =
+    pendingReasonRef.current === 'both'
+      ? t('chat.bothChanged')
+      : pendingReasonRef.current === 'summary'
+        ? t('chat.summaryChanged')
+        : t('chat.rangeChanged')
+
+  const regenerateBanner = regeneratePrompt && (
+    <div className="flex items-center gap-3 rounded-lg border px-3 py-2" style={{ background: 'var(--accent-soft)', borderColor: 'var(--accent)' }}>
+      <span className="text-sm">{regeneratePromptText}</span>
+      <button className="btn btn-primary !px-2 !py-1" onClick={() => void send(true)}>
+        {t('chat.regenerate')}
+      </button>
+      <button className="btn !px-2 !py-1" onClick={cancelRegeneratePrompt}>
+        {t('dialog.cancel')}
+      </button>
+    </div>
+  )
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b px-3 py-1.5" style={{ background: 'var(--panel)', borderColor: 'var(--border)' }}>
         <span className="text-sm font-medium">{tab.title}</span>
-        {chat && chat.kind === 'doc' && <span className="text-xs" style={{ color: 'var(--muted)' }}>文档对话</span>}
-        {chat && chat.kind === 'context' && <span className="text-xs" style={{ color: 'var(--accent)' }}>上下文对话</span>}
+        {chat && (
+          <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px]" style={{ background: 'var(--panel3)', color: 'var(--muted)' }}>
+            {chat.kind === 'project' ? <MessageSquare size={11} /> : chat.kind === 'doc' ? <FileText size={11} /> : <Crosshair size={11} />}
+            {chat.kind === 'project' ? t('chat.projectChat') : chat.kind === 'doc' ? t('chat.docChat') : t('chat.contextChat')}
+          </span>
+        )}
+        {chat?.action && (
+          <span className="rounded px-1.5 py-0.5 text-[11px]" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>
+            {chat.action === 'diagnose' ? t('sidebar.actionDiagnose') : chat.action === 'plot' ? t('sidebar.actionPlot') : t('sidebar.actionOptimize')}
+          </span>
+        )}
+        {docTitle && (
+          <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px]" style={{ background: 'var(--panel3)', color: 'var(--muted)' }} title={docTitle}>
+            <FileText size={11} />
+            <span className="max-w-[160px] truncate">{docTitle}</span>
+          </span>
+        )}
       </div>
 
       {/* 上下文调控面板固定在窗口顶部，始终可见 */}
@@ -179,21 +357,13 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
             minBefore={lockedRange?.before}
             minAfter={lockedRange?.after}
           />
-          {regeneratePrompt && (
-            <div className="flex items-center gap-3 rounded-lg border px-3 py-2" style={{ background: 'var(--accent-soft)', borderColor: 'var(--accent)' }}>
-              <span className="text-sm">检测到上下文范围调整，是否自动重新生成最近的 AI 回答？</span>
-              <button className="btn btn-primary !px-2 !py-1" onClick={() => void send(true)}>
-                重新生成
-              </button>
-              <button className="btn !px-2 !py-1" onClick={() => setRegeneratePrompt(false)}>
-                取消
-              </button>
-            </div>
-          )}
+          {regenerateBanner}
         </div>
       )}
 
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+        {!isContext && regenerateBanner}
+
         {messages.map((m) => (
           <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div
@@ -224,22 +394,34 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
                   onClick={() => void copy(m.content, m.id)}
                 >
                   {copiedId === m.id ? <Check size={12} /> : <Copy size={12} />}
-                  {copiedId === m.id ? '已复制' : '全篇复制'}
+                  {copiedId === m.id ? t('chat.copied') : t('chat.copy')}
                 </button>
               )}
             </div>
           </div>
         ))}
 
+        {prevAnswer && (
+          <div className="flex justify-start">
+            <div className="max-w-[80%] rounded-xl border px-3 py-2 text-sm" style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}>
+              <details>
+                <summary className="cursor-pointer text-xs" style={{ color: 'var(--muted)' }}>
+                  {t('chat.prevAnswer')}
+                </summary>
+                <div className="mt-1 whitespace-pre-wrap" style={{ color: 'var(--muted)' }}>
+                  {prevAnswer.content}
+                </div>
+              </details>
+            </div>
+          </div>
+        )}
+
         {streaming && streaming.reasoning && !streaming.acc && (
           <div className="flex justify-start">
-            <div
-              className="max-w-[80%] rounded-xl border px-3 py-2 text-xs"
-              style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}
-            >
+            <div className="max-w-[80%] rounded-xl border px-3 py-2 text-xs" style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}>
               <div className="flex items-center gap-1" style={{ color: 'var(--muted)' }}>
                 <Brain size={12} />
-                思考过程
+                {t('chat.thinking')}
               </div>
               <div className="mt-1 whitespace-pre-wrap leading-relaxed" style={{ color: 'var(--muted)' }}>
                 {streaming.reasoning}
@@ -268,10 +450,53 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
 
         {error && (
           <div className="rounded-lg border px-3 py-2 text-sm" style={{ background: 'var(--danger-soft)', borderColor: 'var(--danger)', color: 'var(--danger)' }}>
-            调用失败：{error}
+            {t('chat.callFailed', { error })}
           </div>
         )}
       </div>
+
+      {/* 摘要注入开关面板（输入框上方，可折叠） */}
+      {injectionItems.length > 0 && (
+        <div className="border-t px-3 py-1.5" style={{ borderColor: 'var(--border)' }}>
+          <button
+            className="flex w-full items-center gap-1 text-xs"
+            style={{ color: 'var(--muted)' }}
+            onClick={() => setInjectionsOpen((o) => !o)}
+          >
+            {injectionsOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <ListFilter size={12} />
+            {t('chat.injections')}
+            <span className="flex-1" />
+            {started && <span className="text-[10px]" style={{ color: 'var(--warn)' }}>{t('chat.injectionLockedHint')}</span>}
+          </button>
+          {injectionsOpen && (
+            <div className="mt-1 max-h-40 space-y-0.5 overflow-y-auto">
+              {injectionItems.map((item) => {
+                const enabled = !disabledInjections.includes(item.key)
+                const locked = started && enabled
+                return (
+                  <label
+                    key={item.key}
+                    className="flex items-center gap-2 rounded px-1 py-0.5 text-xs hover:bg-[var(--panel3)]"
+                    style={{ opacity: locked || streaming ? 0.6 : 1, cursor: locked || streaming ? 'not-allowed' : 'pointer' }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={enabled}
+                      disabled={locked || !!streaming || !!titleGenerating}
+                      onChange={() => toggleInjection(item.key)}
+                    />
+                    <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                    <span style={{ color: enabled ? 'var(--ok)' : 'var(--muted)' }}>
+                      {enabled ? t('chat.injectionOn') : t('chat.injectionOff')}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="border-t p-3" style={{ borderColor: 'var(--border)' }}>
         {attachments.length > 0 && (
@@ -291,13 +516,13 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
           </div>
         )}
         <div className="flex items-end gap-2">
-          <button className="btn !px-2 !py-2" title="上传文件" onClick={() => setShowUpload(true)}>
+          <button className="btn !px-2 !py-2" title={t('chat.upload')} onClick={() => setShowUpload(true)}>
             <Paperclip size={16} />
           </button>
           <textarea
             className="input min-h-[40px] flex-1 resize-none"
             rows={1}
-            placeholder={titleGenerating ? '正在生成标题，暂不可发送…' : '输入消息…'}
+            placeholder={titleGenerating ? t('chat.inputLocked') : t('chat.inputPlaceholder')}
             value={input}
             disabled={!!titleGenerating}
             onChange={(e) => setInput(e.target.value)}
@@ -314,7 +539,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
               onClick={() => streaming && void api.invoke('api:cancelStream', streaming.requestId)}
             >
               <Square size={15} />
-              取消
+              {t('chat.cancel')}
             </button>
           ) : (
             <button
@@ -323,7 +548,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
               disabled={!!titleGenerating || (!input.trim() && attachments.length === 0)}
             >
               <Send size={15} />
-              发送
+              {t('chat.send')}
             </button>
           )}
         </div>
@@ -343,6 +568,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
 
 function ReasoningBlock({ reasoning }: { reasoning: string }): JSX.Element {
   const [open, setOpen] = useState(false)
+  const t = useT()
   return (
     <div className="mb-1.5 rounded-lg border px-2.5 py-1.5 text-xs" style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}>
       <button
@@ -352,7 +578,7 @@ function ReasoningBlock({ reasoning }: { reasoning: string }): JSX.Element {
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         <Brain size={12} />
-        思考过程
+        {t('chat.thinking')}
       </button>
       {open && (
         <div className="mt-1 whitespace-pre-wrap leading-relaxed" style={{ color: 'var(--muted)' }}>

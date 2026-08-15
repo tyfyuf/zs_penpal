@@ -3,6 +3,7 @@
 
 import type {
   AppConfig,
+  ChatAction,
   ChatMessage,
   ChatMeta,
   ChatSummary,
@@ -41,6 +42,8 @@ export interface ChatCreateInput {
   title: string
   docId?: string
   contextRange?: ContextRange
+  /** 右键创建上下文对话的动作（诊断/走向/优化） */
+  action?: ChatAction
 }
 
 export interface ChatGetResult {
@@ -99,6 +102,7 @@ export const IPC = {
   chatRestore: 'chat:restore',
   chatPurge: 'chat:purge',
   chatSetContext: 'chat:setContext',
+  chatPatch: 'chat:patch',
   chatGenerateTitle: 'chat:generateTitle',
   resourceList: 'resource:list',
   resourceUpload: 'resource:upload',
@@ -117,6 +121,7 @@ export const IPC = {
   summaryGetResource: 'summary:getResource',
   summaryListProject: 'summary:listProject',
   summaryRegenerateDoc: 'summary:regenerateDoc',
+  summaryRegenerateChat: 'summary:regenerateChat',
   summaryQueueChat: 'summary:queueChat',
   usageGet: 'usage:get',
   gitEnsure: 'git:ensure',
@@ -165,6 +170,13 @@ export interface IpcApi {
   [IPC.chatRestore]: { req: string; res: ChatMeta }
   [IPC.chatPurge]: { req: string; res: void }
   [IPC.chatSetContext]: { req: { chatId: string; contextRange: ContextRange }; res: ChatMeta }
+  [IPC.chatPatch]: {
+    req: {
+      chatId: string
+      patch: Partial<Pick<ChatMeta, 'contextRange' | 'lockedRange' | 'injectionOverrides'>>
+    }
+    res: ChatMeta
+  }
   [IPC.chatGenerateTitle]: { req: string; res: { ok: boolean; title?: string; error?: string } }
   [IPC.resourceList]: { req: string; res: ResourceMeta[] }
   [IPC.resourceUpload]: { req: ResourceUploadInput; res: ResourceMeta }
@@ -186,6 +198,7 @@ export interface IpcApi {
   [IPC.summaryGetResource]: { req: { projectId: string; resourceId: string }; res: ResourceSummary | null }
   [IPC.summaryListProject]: { req: string; res: ProjectSummariesOverview }
   [IPC.summaryRegenerateDoc]: { req: string; res: { ok: boolean; error?: string } }
+  [IPC.summaryRegenerateChat]: { req: string; res: { ok: boolean; error?: string } }
   [IPC.summaryQueueChat]: { req: string; res: void }
   [IPC.usageGet]: { req: void; res: UsageSnapshot }
   [IPC.gitEnsure]: { req: { consent: boolean }; res: { ok: boolean; reason?: string; path?: string } }

@@ -9,8 +9,10 @@ import SetupScreen from './components/SetupScreen'
 import ToastHost from './components/common/ToastHost'
 import DialogHost from './components/common/DialogHost'
 import Modal from './components/common/Modal'
+import { useT } from './i18n'
 
 export default function App(): JSX.Element {
+  const t = useT()
   const initialized = useAppStore((s) => s.initialized)
   const config = useAppStore((s) => s.config)
   const init = useAppStore((s) => s.init)
@@ -79,7 +81,7 @@ export default function App(): JSX.Element {
   }
 
   if (!initialized) {
-    return <div className="flex h-full items-center justify-center text-sm" style={{ color: 'var(--muted)' }}>加载中…</div>
+    return <div className="flex h-full items-center justify-center text-sm" style={{ color: 'var(--muted)' }}>{t('app.loading')}</div>
   }
 
   return (
@@ -87,20 +89,20 @@ export default function App(): JSX.Element {
       {!config?.workspaceDir ? <SetupScreen /> : <AppLayout />}
       {recovery && (
         <Modal
-          title="恢复上次会话"
+          title={t('app.recoveryTitle')}
           footer={
             <>
               <button className="btn" onClick={() => void confirmRecovery(false)}>
-                不恢复
+                {t('app.recoveryNo')}
               </button>
               <button className="btn btn-primary" onClick={() => void confirmRecovery(true)}>
-                恢复上次打开的内容
+                {t('app.recoveryYes')}
               </button>
             </>
           }
         >
           <p className="text-sm" style={{ color: 'var(--muted)' }}>
-            上次应用异常退出，是否恢复上次打开的内容？
+            {t('app.recoveryText')}
           </p>
         </Modal>
       )}

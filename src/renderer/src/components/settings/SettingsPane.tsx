@@ -5,14 +5,17 @@ import { useAppStore } from '../../store/app.store'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
 import { confirmDialog } from '../../store/dialog.store'
+import { useI18nStore, useT, type Locale } from '../../i18n'
 import UsageCharts from './UsageCharts'
 import Modal from '../common/Modal'
 
 export default function SettingsPane(): JSX.Element {
+  const t = useT()
   const config = useAppStore((s) => s.config)
   const workspace = useAppStore((s) => s.workspace)
   const updateConfig = useAppStore((s) => s.updateConfig)
   const refresh = useAppStore((s) => s.refreshWorkspace)
+  const setLocale = useI18nStore((s) => s.setLocale)
 
   const [apiBaseUrl, setApiBaseUrl] = useState(config?.apiBaseUrl ?? '')
   const [model, setModel] = useState(config?.model ?? '')
@@ -38,7 +41,7 @@ export default function SettingsPane(): JSX.Element {
       setApiKeyInput('')
       setHasKey(true)
     }
-    toast.success('API 配置已保存')
+    toast.success(t('settings.saved'))
   }
 
   async function test(): Promise<void> {
@@ -57,10 +60,10 @@ export default function SettingsPane(): JSX.Element {
     if (!dir) return
     const res = await api.invoke('workspace:migrate', dir)
     if (res.ok) {
-      toast.success('工作目录迁移完成')
+      toast.success(t('settings.migrateOk'))
       await refresh()
     } else {
-      toast.error(res.error ?? '迁移失败')
+      toast.error(res.error ?? t('editor.exportFail'))
     }
   }
 
@@ -68,19 +71,19 @@ export default function SettingsPane(): JSX.Element {
     if (enabled) {
       const check = await api.invoke('git:ensure', { consent: false })
       if (!check.ok) {
-        if (!(await confirmDialog('系统未检测到 Git，是否自动安装？（可能需要一段时间）'))) {
+        if (!(await confirmDialog(t('settings.gitMissing')))) {
           await updateConfig({ gitEnabled: false })
           return
         }
         const installed = await api.invoke('git:ensure', { consent: true })
         if (!installed.ok) {
-          toast.error(installed.reason === 'manual-required' ? '安装失败，请手动安装 Git 后重试' : 'Git 安装失败')
+          toast.error(installed.reason === 'manual-required' ? t('settings.gitManual') : t('settings.gitInstallFail'))
           await updateConfig({ gitEnabled: false })
           return
         }
       }
       await updateConfig({ gitEnabled: true })
-      toast.success('版本管理已开启')
+      toast.success(t('settings.gitOn'))
     } else {
       await updateConfig({ gitEnabled: false })
     }
@@ -89,7 +92,7 @@ export default function SettingsPane(): JSX.Element {
   async function openHistory(): Promise<void> {
     const projects = workspace.projects
     if (projects.length === 0) {
-      toast.info('暂无项目')
+      toast.info(t('settings.noProjects'))
       return
     }
     setHistoryProject(projects[0].project.id)
@@ -108,15 +111,20 @@ export default function SettingsPane(): JSX.Element {
   }
 
   async function rollback(projectId: string, hash: string): Promise<void> {
-    if (!(await confirmDialog('回滚项目到该提交？已打开的相关标签页将关闭，请确认未提交改动已处理。'))) return
+    if (!(await confirmDialog(t('settings.rollbackConfirm')))) return
     const res = await api.invoke('git:rollback', { projectId, hash })
     if (res.ok) {
-      toast.success('回滚完成')
+      toast.success(t('settings.rollbackOk'))
       setShowHistory(false)
       await refresh()
     } else {
-      toast.error(res.error ?? '回滚失败')
+      toast.error(res.error ?? t('editor.exportFail'))
     }
+  }
+
+  async function changeLanguage(locale: Locale): Promise<void> {
+    setLocale(locale)
+    await updateConfig({ language: locale })
   }
 
   if (!config) return <div />
@@ -134,126 +142,143 @@ export default function SettingsPane(): JSX.Element {
 
   return (
     <div className="h-full overflow-y-auto p-6">
-      <h2 className="mb-4 text-lg font-semibold">设置</h2>
+      <h2 className="mb-4 text-lg font-semibold">{t('settings.title')}</h2>
 
       <div className="space-y-6">
-        <Section title="工作目录">
+        <Section title={t('settings.language')}>
+          <div className="flex gap-2">
+            <button
+              className={`btn ${config.language === 'zh' ? 'btn-primary' : ''}`}
+              onClick={() => void changeLanguage('zh')}
+            >
+              {t('settings.languageZh')}
+            </button>
+            <button
+              className={`btn ${config.language === 'en' ? 'btn-primary' : ''}`}
+              onClick={() => void changeLanguage('en')}
+            >
+              {t('settings.languageEn')}
+            </button>
+          </div>
+        </Section>
+
+        <Section title={t('settings.workspace')}>
           <div className="text-sm" style={{ color: 'var(--muted)' }}>
-            {config.workspaceDir || '未设置'}
+            {config.workspaceDir || t('settings.workspaceUnset')}
           </div>
           <button className="btn mt-2" onClick={() => void migrate()}>
-            修改工作目录（迁移项目数据）
+            {t('settings.migrate')}
           </button>
         </Section>
 
-        <Section title="API 配置">
+        <Section title={t('settings.api')}>
           <div className="space-y-3">
-            <Field label="API Base URL">
+            <Field label={t('settings.apiBase')}>
               <input className="input" value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" />
             </Field>
-            <Field label="API Key">
+            <Field label={t('settings.apiKey')}>
               <div className="flex items-center gap-2">
                 <input
                   className="input"
                   type="password"
                   value={apiKeyInput}
                   onChange={(e) => setApiKeyInput(e.target.value)}
-                  placeholder={hasKey ? '••••••••（已配置，输入以更新）' : '未配置'}
+                  placeholder={hasKey ? t('settings.apiKeySet') : t('settings.apiKeyEmpty')}
                 />
                 <span className="whitespace-nowrap text-xs" style={{ color: hasKey ? 'var(--ok)' : 'var(--muted)' }}>
-                  {hasKey ? '已配置' : '未配置'}
+                  {hasKey ? t('settings.configured') : t('settings.apiKeyEmpty')}
                 </span>
               </div>
             </Field>
-            <Field label="模型名称">
+            <Field label={t('settings.model')}>
               <input className="input" value={model} onChange={(e) => setModel(e.target.value)} placeholder="gpt-4o" />
             </Field>
-            <Field label="模型上下文上限（token）">
+            <Field label={t('settings.contextLimit')}>
               <input className="input" type="number" value={contextLimit} onChange={(e) => setContextLimit(Number(e.target.value) || 256000)} />
             </Field>
             <div className="flex gap-2">
               <button className="btn btn-primary" onClick={() => void saveApi()}>
-                保存
+                {t('settings.save')}
               </button>
               <button className="btn" disabled={testing} onClick={() => void test()}>
-                {testing ? '测试中…' : '联通测试'}
+                {testing ? t('settings.testing') : t('settings.test')}
               </button>
             </div>
           </div>
         </Section>
 
-        <Section title="自动保存">
-          <Field label="自动保存间隔（秒，对所有编辑器标签页生效）">
+        <Section title={t('settings.autosave')}>
+          <Field label={t('settings.autosaveInterval')}>
             <input className="input !w-40" type="number" min={1} max={120} value={autosave} onChange={(e) => setAutosave(Number(e.target.value) || 5)} />
           </Field>
-          <button className="btn mt-2" onClick={() => void updateConfig({ autosaveIntervalMs: autosave * 1000 }).then(() => toast.success('已保存'))}>
-            保存
+          <button className="btn mt-2" onClick={() => void updateConfig({ autosaveIntervalMs: autosave * 1000 }).then(() => toast.success(t('settings.saved')))}>
+            {t('settings.save')}
           </button>
         </Section>
 
-        <Section title="摘要功能">
+        <Section title={t('settings.summary')}>
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
               checked={config.summaryEnabled}
               onChange={(e) => void updateConfig({ summaryEnabled: e.target.checked })}
             />
-            启用自动摘要（文档摘要 + 对话摘要 + 资源摘要）
+            {t('settings.summaryToggle')}
           </label>
 
           {config.summaryEnabled && (
             <div className="mt-4 space-y-4">
-              <InjGroup title="项目级对话">
-                <InjCheck label="项目内所有文档摘要" checked={inj.project.docSummaries} onChange={(v) => patchInj('project', 'docSummaries', v)} />
-                <InjCheck label="项目内所有对话摘要" checked={inj.project.chatSummaries} onChange={(v) => patchInj('project', 'chatSummaries', v)} />
-                <InjCheck label="项目内所有资源摘要" checked={inj.project.resourceSummaries} onChange={(v) => patchInj('project', 'resourceSummaries', v)} />
+              <InjGroup title={t('settings.injProject')}>
+                <InjCheck label={t('settings.injProjDocs')} checked={inj.project.docSummaries} onChange={(v) => patchInj('project', 'docSummaries', v)} />
+                <InjCheck label={t('settings.injProjChats')} checked={inj.project.chatSummaries} onChange={(v) => patchInj('project', 'chatSummaries', v)} />
+                <InjCheck label={t('settings.injProjRes')} checked={inj.project.resourceSummaries} onChange={(v) => patchInj('project', 'resourceSummaries', v)} />
               </InjGroup>
 
-              <InjGroup title="文档级对话（无滑块）">
-                <InjCheck label="关联文档全文" checked={inj.doc.fullText} onChange={(v) => patchInj('doc', 'fullText', v)} />
-                <InjCheck label="该文档其他对话摘要" checked={inj.doc.docChatSummaries} onChange={(v) => patchInj('doc', 'docChatSummaries', v)} />
-                <InjCheck label="项目内其他文档摘要" checked={inj.doc.otherDocSummaries} onChange={(v) => patchInj('doc', 'otherDocSummaries', v)} />
-                <InjCheck label="资源摘要" checked={inj.doc.resourceSummaries} onChange={(v) => patchInj('doc', 'resourceSummaries', v)} />
+              <InjGroup title={t('settings.injDoc')}>
+                <InjCheck label={t('settings.injDocFull')} checked={inj.doc.fullText} onChange={(v) => patchInj('doc', 'fullText', v)} />
+                <InjCheck label={t('settings.injDocChats')} checked={inj.doc.docChatSummaries} onChange={(v) => patchInj('doc', 'docChatSummaries', v)} />
+                <InjCheck label={t('settings.injDocOthers')} checked={inj.doc.otherDocSummaries} onChange={(v) => patchInj('doc', 'otherDocSummaries', v)} />
+                <InjCheck label={t('settings.injDocRes')} checked={inj.doc.resourceSummaries} onChange={(v) => patchInj('doc', 'resourceSummaries', v)} />
               </InjGroup>
 
-              <InjGroup title="文档级对话（有滑块）">
-                <InjCheck label="项目内所有文档摘要（含该文档）" checked={inj.context.docSummaries} onChange={(v) => patchInj('context', 'docSummaries', v)} />
-                <InjCheck label="该文档其他对话摘要" checked={inj.context.docChatSummaries} onChange={(v) => patchInj('context', 'docChatSummaries', v)} />
-                <InjCheck label="资源摘要" checked={inj.context.resourceSummaries} onChange={(v) => patchInj('context', 'resourceSummaries', v)} />
+              <InjGroup title={t('settings.injContext')}>
+                <InjCheck label={t('settings.injCtxDocs')} checked={inj.context.docSummaries} onChange={(v) => patchInj('context', 'docSummaries', v)} />
+                <InjCheck label={t('settings.injCtxChats')} checked={inj.context.docChatSummaries} onChange={(v) => patchInj('context', 'docChatSummaries', v)} />
+                <InjCheck label={t('settings.injCtxRes')} checked={inj.context.resourceSummaries} onChange={(v) => patchInj('context', 'resourceSummaries', v)} />
               </InjGroup>
             </div>
           )}
         </Section>
 
-        <Section title="版本管理">
+        <Section title={t('settings.version')}>
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
               checked={config.gitEnabled}
               onChange={(e) => void toggleGit(e.target.checked)}
             />
-            启用 Git 版本管理（每项目一个仓库，关闭时保留仓库但停止自动提交）
+            {t('settings.versionToggle')}
           </label>
           {config.gitEnabled && (
             <button className="btn mt-2" onClick={() => void openHistory()}>
               <History size={14} />
-              打开版本历史
+              {t('settings.openHistory')}
             </button>
           )}
         </Section>
 
-        <Section title="用量统计">
-          {usage ? <UsageCharts snapshot={usage} /> : <div className="text-sm" style={{ color: 'var(--muted)' }}>加载中…</div>}
+        <Section title={t('settings.usage')}>
+          {usage ? <UsageCharts snapshot={usage} /> : <div className="text-sm" style={{ color: 'var(--muted)' }}>{t('summary.loading')}</div>}
         </Section>
       </div>
 
       {showHistory && (
         <Modal
-          title="版本历史"
+          title={t('settings.historyTitle')}
           onClose={() => setShowHistory(false)}
           footer={
             <button className="btn" onClick={() => setShowHistory(false)}>
-              关闭
+              {t('upload.close')}
             </button>
           }
         >
@@ -267,7 +292,7 @@ export default function SettingsPane(): JSX.Element {
           <div className="max-h-72 space-y-2 overflow-y-auto">
             {commits.length === 0 && (
               <div className="py-4 text-center text-xs" style={{ color: 'var(--muted)' }}>
-                暂无提交记录
+                {t('settings.noCommits')}
               </div>
             )}
             {commits.map((c) => (
@@ -278,7 +303,7 @@ export default function SettingsPane(): JSX.Element {
                   </span>
                   <button className="btn !px-2 !py-0.5 text-xs" onClick={() => void rollback(historyProject, c.hash)}>
                     <RefreshCw size={11} />
-                    回滚到此
+                    {t('settings.rollback')}
                   </button>
                 </div>
                 <div className="mt-1 text-sm">{c.message}</div>

@@ -4,6 +4,14 @@ export type ProjectStatus = 'normal' | 'trash'
 export type DocStatus = 'normal' | 'trash'
 export type ChatStatus = 'normal' | 'user_archived' | 'orphan_archived'
 export type ChatKind = 'project' | 'doc' | 'context'
+/** 右键创建上下文对话的动作（PRD 6.1） */
+export type ChatAction = 'diagnose' | 'plot' | 'optimize'
+
+/** 该对话的摘要注入覆盖（对当前对话窗口单独生效） */
+export interface ChatInjectionOverrides {
+  /** 关闭的注入键：'fulltext' | 'doc:<docId>' | 'chat:<chatId>' | 'res:<resourceId>' */
+  disabled: string[]
+}
 
 export interface ProjectMeta {
   id: string
@@ -45,6 +53,12 @@ export interface ChatMeta {
   updatedAt: string
   /** 仅文档级上下文对话存在 */
   contextRange?: ContextRange
+  /** 右键创建上下文对话的动作（诊断/走向/优化） */
+  action?: ChatAction
+  /** 对话开始后锁定的最小上下文范围（只能扩大，持久化，重开恢复） */
+  lockedRange?: { before: number; after: number }
+  /** 该对话的摘要注入覆盖（对当前对话窗口单独生效） */
+  injectionOverrides?: ChatInjectionOverrides
 }
 
 export interface ResourceMeta {
@@ -192,7 +206,14 @@ export interface SummaryInjectionConfig {
 /** 摘要区（左侧栏）展示的项目摘要概览 */
 export interface ProjectSummariesOverview {
   docs: { docId: string; title: string; hasSummary: boolean; updatedAt?: string }[]
-  chats: { chatId: string; title: string; hasSummary: boolean; updatedAt?: string }[]
+  chats: {
+    chatId: string
+    title: string
+    hasSummary: boolean
+    updatedAt?: string
+    docId?: string
+    kind?: ChatKind
+  }[]
   resources: {
     resourceId: string
     name: string
@@ -207,6 +228,8 @@ export interface UsageBucket {
   completion: number
   total: number
   calls?: number
+  /** 摘要/标题来源的 total token（图表第二折线用） */
+  summary?: number
 }
 
 export interface UsageDay {
@@ -226,14 +249,18 @@ export interface LifetimeUsage {
   completion: number
   total: number
   uncounted: number
+  /** 摘要/标题来源累计 */
+  summary: number
 }
 
 export interface UsageSnapshot {
   /** 近 30 天逐日 total */
-  last30Days: { date: string; total: number; prompt: number; completion: number }[]
+  last30Days: { date: string; total: number; prompt: number; completion: number; summary: number }[]
   /** 当日逐小时 total */
-  today: { hour: string; total: number; prompt: number; completion: number }[]
+  today: { hour: string; total: number; prompt: number; completion: number; summary: number }[]
   todayTotal: number
+  /** 今日摘要/标题消耗 */
+  todaySummary: number
   lifetime: LifetimeUsage
   uncounted: number
 }
@@ -249,6 +276,8 @@ export interface AppConfig {
   gitBinaryPath?: string
   /** 摘要注入配置（按对话类型勾选） */
   summaryInjection: SummaryInjectionConfig
+  /** 界面语言（暂只影响界面文案） */
+  language: 'zh' | 'en'
 }
 
 export interface ProjectTree {
@@ -304,6 +333,10 @@ export interface StreamRequest {
   contextRange?: StreamContextRange
   /** 重新生成最近一条 AI 回答（PRD 6.6，替换最近回答并保留用户输入） */
   regenerate?: boolean
+  /** 重新生成的原因：扩大了上下文范围 / 重新激活了摘要 / 两者皆有 */
+  regenerateReason?: 'context' | 'summary' | 'both'
+  /** 重新生成时新激活的摘要注入键（'doc:<id>' / 'chat:<id>' / 'res:<id>'） */
+  newlyEnabledSummaries?: string[]
   userMessageId: string
 }
 
