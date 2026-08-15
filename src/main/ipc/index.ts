@@ -99,7 +99,14 @@ export function registerIpcHandlers(): void {
     await ensureWorkspace()
     return buildSnapshot()
   })
-  handle(IPC.workspaceMigrate, (target) => migrateWorkspace(target))
+  handle(IPC.workspaceMigrate, async (target) => {
+    const res = await migrateWorkspace(target)
+    if (res.ok) {
+      // 工作目录已变更：广播新配置，让渲染层同步显示
+      broadcast(EVENTS.configChanged, await loadConfig())
+    }
+    return res
+  })
 
   // 项目
   handle(IPC.projectCreate, (req) => createProject(req.name))

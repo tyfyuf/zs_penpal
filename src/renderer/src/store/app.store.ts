@@ -49,6 +49,8 @@ interface AppStore {
   bumpSummary(): void
 }
 
+let configSub: (() => void) | null = null
+
 export const useAppStore = create<AppStore>((set, get) => ({
   config: null,
   workspace: { workspaceDir: '', projects: [], trashedProjects: [] },
@@ -68,6 +70,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
     document.documentElement.classList.toggle('light', theme === 'light')
     document.documentElement.classList.toggle('dark', theme === 'dark')
     useI18nStore.getState().setLocale(config.language ?? 'zh')
+    // 主进程侧配置变更（如工作目录迁移）→ 同步渲染层缓存
+    if (configSub) configSub()
+    configSub = api.on('config:changed', (cfg) => set({ config: cfg }))
     set({ config, workspace, initialized: true })
   },
 
