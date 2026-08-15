@@ -11,6 +11,34 @@ function isSubdir(child: string, parent: string): boolean {
   return rel !== '' && !rel.startsWith('..') && !resolve(rel).startsWith('..')
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Windows 下 rename 目录到“已存在的目录”会报 EPERM：先移除空目标，再带退避重试改名 */
+async function renameDirAtomically(staging: string, targetAbs: string): Promise<void> {
+  // 目标已存在（校验阶段已确认其为空目录）→ 先移除
+  const targetExists = await stat(targetAbs)
+    .then(() => true)
+    .catch(() => false)
+  if (targetExists) {
+    await rm(targetAbs, { recursive: true, force: true })
+  }
+  // EPERM 退避重试（杀毒软件等瞬时占用）
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(staging, targetAbs)
+      return
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EPERM' && attempt < 5) {
+        await sleep(200 + attempt * 200)
+        continue
+      }
+      throw err
+    }
+  }
+}
+
 async function countFiles(dir: string): Promise<number> {
   let n = 0
   let entries: string[] = []
@@ -77,8 +105,8 @@ export async function migrateWorkspace(targetDir: string): Promise<{ ok: boolean
       throw new Error(`文件数校验不一致（源 ${srcCount}，目标 ${dstCount}）`)
     }
 
-    // 原子生效
-    await rename(staging, targetAbs)
+    // 原子生效（目标为已存在的空目录时先移除，EPERM 退避重试）
+    await renameDirAtomically(staging, targetAbs)
     await setConfig({ workspaceDir: targetAbs })
     broadcast(EVENTS.migrateProgress, { phase: 'done', message: '迁移完成', percent: 100 })
     return { ok: true }
