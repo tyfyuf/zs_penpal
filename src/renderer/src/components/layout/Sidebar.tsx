@@ -3,6 +3,7 @@ import {
   Archive,
   ChevronDown,
   ChevronRight,
+  Eye,
   FileText,
   FlaskConical,
   Folder,
@@ -26,6 +27,7 @@ import { confirmDialog, promptText } from '../../store/dialog.store'
 import { useT } from '../../i18n'
 import { runDistill, runGenerateTitle } from '../../lib/summaryActions'
 import SummaryArea from './SummaryArea'
+import Modal from '../common/Modal'
 
 const ALLOWED_EXT = ['.txt', '.md', '.csv']
 
@@ -40,6 +42,7 @@ export default function Sidebar(): JSX.Element {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const fileInput = useRef<HTMLInputElement>(null)
   const [uploadProject, setUploadProject] = useState<string | null>(null)
+  const [previewRes, setPreviewRes] = useState<{ name: string; content: string } | null>(null)
   const toggle = (key: string): void => setExpanded((e) => ({ ...e, [key]: !e[key] }))
   const isOpen = (key: string): boolean => !!expanded[key]
 
@@ -299,6 +302,18 @@ export default function Sidebar(): JSX.Element {
                             {r.name}
                           </span>
                           <div className="hidden gap-0.5 group-hover:flex">
+                            <IconButton
+                              icon={<Eye size={12} />}
+                              title={t('sidebar.preview')}
+                              onClick={async () => {
+                                try {
+                                  const res = await api.invoke('resource:read', { projectId: p.project.id, resourceId: r.id })
+                                  setPreviewRes({ name: res.name, content: res.content })
+                                } catch (err) {
+                                  toast.error((err as Error).message)
+                                }
+                              }}
+                            />
                             <IconButton icon={<FlaskConical size={12} />} title={t('sidebar.distill')} onClick={() => void runDistill(p.project.id, r.id)} />
                             <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteResource(p.project.id, r.id)} />
                           </div>
@@ -380,6 +395,22 @@ export default function Sidebar(): JSX.Element {
           </div>
         )}
       </div>
+
+      {previewRes && (
+        <Modal
+          title={previewRes.name}
+          onClose={() => setPreviewRes(null)}
+          footer={
+            <button className="btn" onClick={() => setPreviewRes(null)}>
+              {t('upload.close')}
+            </button>
+          }
+        >
+          <pre className="max-h-[60vh] overflow-y-auto whitespace-pre-wrap font-mono text-xs leading-relaxed">
+            {previewRes.content}
+          </pre>
+        </Modal>
+      )}
     </div>
   )
 }

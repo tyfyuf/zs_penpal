@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Compartment, EditorState, type Extension } from '@codemirror/state'
 import { Decoration, EditorView } from '@codemirror/view'
-import { Download, Minus, Plus, Save } from 'lucide-react'
+import { ClipboardPaste, Copy, Download, Minus, Plus, Save, Scissors } from 'lucide-react'
 import type { ChatAction, ContextRange, DocMeta } from '@shared/types'
 import type { Tab } from '../../store/app.store'
 import { useAppStore } from '../../store/app.store'
@@ -52,6 +52,8 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   const [docMeta, setDocMeta] = useState<DocMeta | null>(null)
   const [fontSize, setFontSize] = useState(15)
   const [menu, setMenu] = useState<MenuState | null>(null)
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
 
   const config = useAppStore((s) => s.config)
   const dirty = useAppStore((s) => s.dirty[docId])
@@ -142,6 +144,22 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
     view.dispatch({ effects: highlightCompartment.current.reconfigure(buildHighlightDecos(highlight, view.state.doc.length)) })
   }, [highlight, docId])
 
+  // 右键菜单边界钳制：靠近窗口边缘时自动回移，避免被截断
+  useLayoutEffect(() => {
+    if (!menu) {
+      setMenuPos(null)
+      return
+    }
+    setMenuPos({ x: menu.x, y: menu.y })
+    if (!menuRef.current) return
+    const rect = menuRef.current.getBoundingClientRect()
+    let x = menu.x
+    let y = menu.y
+    if (x + rect.width > window.innerWidth - 4) x = Math.max(4, window.innerWidth - rect.width - 4)
+    if (y + rect.height > window.innerHeight - 4) y = Math.max(4, window.innerHeight - rect.height - 4)
+    setMenuPos({ x, y })
+  }, [menu])
+
   function onContextMenu(e: React.MouseEvent): void {
     e.preventDefault()
     const view = viewRef.current
@@ -155,6 +173,48 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
     }
     const cur = view.state.selection.main
     setMenu({ x: e.clientX, y: e.clientY, from: cur.from, to: cur.to, empty: cur.empty })
+  }
+
+  async function copySelection(): Promise<void> {
+    const view = viewRef.current
+    const m = menu
+    setMenu(null)
+    if (!view || !m || m.empty) return
+    try {
+      await api.invoke('clipboard:write', view.state.sliceDoc(m.from, m.to))
+    } catch (err) {
+      toast.error((err as Error).message)
+    }
+  }
+
+  async function cutSelection(): Promise<void> {
+    const view = viewRef.current
+    const m = menu
+    setMenu(null)
+    if (!view || !m || m.empty) return
+    try {
+      await api.invoke('clipboard:write', view.state.sliceDoc(m.from, m.to))
+      view.dispatch({ changes: { from: m.from, to: m.to, insert: '' } })
+    } catch (err) {
+      toast.error((err as Error).message)
+    }
+  }
+
+  async function pasteAtCursor(): Promise<void> {
+    const view = viewRef.current
+    const m = menu
+    setMenu(null)
+    if (!view || !m) return
+    try {
+      const text = await api.invoke('clipboard:read', undefined)
+      view.dispatch({
+        changes: { from: m.from, to: m.to, insert: text },
+        selection: { anchor: m.from + text.length }
+      })
+      view.focus()
+    } catch (err) {
+      toast.error(t('editor.pasteFail'))
+    }
   }
 
   async function runAction(action: ChatAction): Promise<void> {
@@ -239,14 +299,32 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
 
       {menu && (
         <div
-          className="fixed z-50 w-32 rounded-lg border py-1 shadow-xl"
-          style={{ left: menu.x, top: menu.y, background: 'var(--panel2)', borderColor: 'var(--border)' }}
+          ref={menuRef}
+          className="fixed z-50 w-36 rounded-lg border py-1 shadow-xl"
+          style={{ left: menuPos?.x ?? menu.x, top: menuPos?.y ?? menu.y, background: 'var(--panel2)', borderColor: 'var(--border)' }}
           onMouseDown={(e) => e.stopPropagation()}
         >
+          {!menu.empty && (
+            <>
+              <button className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]" onClick={() => void copySelection()}>
+                <Copy size={13} />
+                {t('editor.copy')}
+              </button>
+              <button className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]" onClick={() => void cutSelection()}>
+                <Scissors size={13} />
+                {t('editor.cut')}
+              </button>
+            </>
+          )}
+          <button className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]" onClick={() => void pasteAtCursor()}>
+            <ClipboardPaste size={13} />
+            {t('editor.paste')}
+          </button>
+          <div className="mx-2 my-1 border-t" style={{ borderColor: 'var(--border)' }} />
           {ACTIONS.filter((a) => a.value !== 'optimize' || !menu.empty).map((a) => (
             <button
               key={a.value}
-              className="block w-full px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]"
               onClick={() => void runAction(a.value)}
             >
               {t(a.labelKey)}

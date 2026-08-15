@@ -28,6 +28,28 @@ import {
 import { atomicWriteJson, nowIso, readJson } from '../util'
 import { join } from 'path'
 import { getUserDataDir } from '../paths'
+import { EVENTS } from '@shared/ipc'
+import { broadcast } from '../window'
+
+// ---------------------------------------------------------------------------
+// 摘要生成状态（供摘要区显示“生成中”黄点，生成完毕转绿并解锁）
+// ---------------------------------------------------------------------------
+
+const generatingKeys = new Map<string, number>()
+
+export function isSummaryGenerating(key: string): boolean {
+  return generatingKeys.has(key)
+}
+
+function markGenerating(key: string): void {
+  generatingKeys.set(key, Date.now())
+  broadcast(EVENTS.summaryStatus, { key, generating: true })
+}
+
+function markDone(key: string): void {
+  generatingKeys.delete(key)
+  broadcast(EVENTS.summaryStatus, { key, generating: false })
+}
 
 // ---------------------------------------------------------------------------
 // 摘要系统（重写）：
@@ -143,13 +165,50 @@ function makeClient(cfg: ApiSettings): OpenAI {
   return new OpenAI({ baseURL: cfg.baseURL, apiKey: cfg.apiKey!, timeout: 180000, maxRetries: 0 })
 }
 
-async function callStoryDecomposition(content: string, cfg: ApiSettings): Promise<StorySummary> {
+// ---------------------------------------------------------------------------
+// 超长文档：分段摘要 + 合并（map-reduce），避免截断导致内容不完整
+// ---------------------------------------------------------------------------
+
+const LONG_THRESHOLD = 30000
+const CHUNK_SIZE = 25000
+const CHUNK_OVERLAP = 1000
+
+function splitLongContent(content: string): string[] {
+  if (content.length <= LONG_THRESHOLD) return [content]
+  const chunks: string[] = []
+  let start = 0
+  while (start < content.length) {
+    const end = Math.min(start + CHUNK_SIZE, content.length)
+    chunks.push(content.slice(start, end))
+    if (end >= content.length) break
+    start = end - CHUNK_OVERLAP
+  }
+  return chunks
+}
+
+const STORY_MERGE_PROMPT = `请把下面多段“故事拆解摘要”（JSON 数组）合并为一份全局一致的结构化摘要，输出 JSON（不要输出其他任何内容），字段与各段相同：
+{ "overview": "...", "characters": [...], "plot": [...], "foreshadowing": [...], "keySettings": [...], "keyQuotes": [...] }
+要求：
+- overview 覆盖全文主线剧情；
+- characters 合并去重：同一人物的不同称呼统一为 canonical 名，别名合并，保留身份与目标；
+- plot 按原文顺序串接（相邻小节可合并，id 重新编号为 s1、s2…）；
+- foreshadowing 合并相同伏笔；
+- keySettings / keyQuotes 保留最重要的即可。
+输出必须是合法 JSON。`
+
+const GENERIC_MERGE_PROMPT = `请把下面多段“通用文本拆解摘要”（JSON 数组）合并为一份全局一致的摘要，输出 JSON（不要输出其他任何内容），字段与各段相同：
+{ "docType": "...", "overview": "...", "keyPoints": [...], "keyTerms": [...], "structure": "..." }
+要求：overview 覆盖全文；keyPoints 合并去重并按重要性排列；keyTerms 合并去重；structure 概括全文结构。
+输出必须是合法 JSON。`
+
+async function callStoryOnce(content: string, cfg: ApiSettings, note?: string): Promise<StorySummary> {
   const client = makeClient(cfg)
+  const userContent = note ? `${note}\n\n${content}` : content
   const res = await client.chat.completions.create({
     model: cfg.model,
     messages: [
       { role: 'system', content: STORY_PROMPT },
-      { role: 'user', content: content.slice(0, 30000) || '（空文档）' }
+      { role: 'user', content: userContent || '（空文档）' }
     ],
     temperature: 0.3,
     max_tokens: 4096
@@ -158,13 +217,61 @@ async function callStoryDecomposition(content: string, cfg: ApiSettings): Promis
   return normalizeStory(parseJson(res.choices[0]?.message?.content ?? ''))
 }
 
-async function callGenericDecomposition(content: string, cfg: ApiSettings): Promise<GenericResourceSummary> {
+async function callStoryDecomposition(content: string, cfg: ApiSettings): Promise<StorySummary> {
+  const chunks = splitLongContent(content)
+  if (chunks.length === 1) {
+    return callStoryOnce(chunks[0], cfg)
+  }
+  // 逐段摘要（串行），再合并
+  const partSummaries: StorySummary[] = []
+  for (let i = 0; i < chunks.length; i++) {
+    partSummaries.push(await callStoryOnce(chunks[i], cfg, `（本文档较长，已分段处理。这是第 ${i + 1}/${chunks.length} 段）`))
+  }
   const client = makeClient(cfg)
   const res = await client.chat.completions.create({
     model: cfg.model,
     messages: [
+      { role: 'system', content: STORY_MERGE_PROMPT },
+      { role: 'user', content: JSON.stringify(partSummaries).slice(0, 30000) }
+    ],
+    temperature: 0.3,
+    max_tokens: 4096
+  })
+  if (res.usage) await recordUsage(res.usage, 'summary')
+  return normalizeStory(parseJson(res.choices[0]?.message?.content ?? ''))
+}
+
+async function callGenericOnce(content: string, cfg: ApiSettings, note?: string): Promise<GenericResourceSummary> {
+  const client = makeClient(cfg)
+  const userContent = note ? `${note}\n\n${content}` : content
+  const res = await client.chat.completions.create({
+    model: cfg.model,
+    messages: [
       { role: 'system', content: GENERIC_PROMPT },
-      { role: 'user', content: content.slice(0, 30000) || '（空内容）' }
+      { role: 'user', content: userContent || '（空内容）' }
+    ],
+    temperature: 0.3,
+    max_tokens: 2048
+  })
+  if (res.usage) await recordUsage(res.usage, 'summary')
+  return normalizeGeneric(parseJson(res.choices[0]?.message?.content ?? ''))
+}
+
+async function callGenericDecomposition(content: string, cfg: ApiSettings): Promise<GenericResourceSummary> {
+  const chunks = splitLongContent(content)
+  if (chunks.length === 1) {
+    return callGenericOnce(chunks[0], cfg)
+  }
+  const partSummaries: GenericResourceSummary[] = []
+  for (let i = 0; i < chunks.length; i++) {
+    partSummaries.push(await callGenericOnce(chunks[i], cfg, `（本文档较长，已分段处理。这是第 ${i + 1}/${chunks.length} 段）`))
+  }
+  const client = makeClient(cfg)
+  const res = await client.chat.completions.create({
+    model: cfg.model,
+    messages: [
+      { role: 'system', content: GENERIC_MERGE_PROMPT },
+      { role: 'user', content: JSON.stringify(partSummaries).slice(0, 30000) }
     ],
     temperature: 0.3,
     max_tokens: 2048
@@ -293,12 +400,16 @@ export async function ensureDocSummary(projectId: string, docId: string, current
 
   const existing = await readDocSummary(projectId, docId)
   if (!existing) {
+    const key = `doc:${docId}`
+    markGenerating(key)
     try {
       const summary = await generateDocSummary(projectId, docId, currentContent, settings)
       await writeDocSummary(projectId, docId, summary)
       return summary
     } catch {
       return null
+    } finally {
+      markDone(key)
     }
   }
 
@@ -307,17 +418,23 @@ export async function ensureDocSummary(projectId: string, docId: string, current
   const needUpdate = changed / Math.max(existing.snapshotLength, 1) > 0.3 || netAdded > 500
   if (!needUpdate) return existing
 
+  const key = `doc:${docId}`
+  markGenerating(key)
   try {
     const summary = await generateDocSummary(projectId, docId, currentContent, settings)
     await writeDocSummary(projectId, docId, summary)
     return summary
   } catch {
     return existing
+  } finally {
+    markDone(key)
   }
 }
 
 /** 手动重新生成文档摘要（摘要区入口） */
 export async function regenerateDocSummary(docId: string): Promise<{ ok: boolean; error?: string }> {
+  const key = `doc:${docId}`
+  markGenerating(key)
   try {
     const cfg = await loadConfig()
     if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未开启' }
@@ -329,6 +446,8 @@ export async function regenerateDocSummary(docId: string): Promise<{ ok: boolean
     return { ok: true }
   } catch (err) {
     return { ok: false, error: (err as Error).message }
+  } finally {
+    markDone(key)
   }
 }
 
@@ -372,31 +491,37 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
   // 变化检测：无变化则不调用（手动重新生成时强制跳过）
   if (!force && existing && existing.lastMessageId === lastMessageId && existing.messageCount === messageCount) return
 
-  const client = makeClient(cfg)
-  const dialogue = turns
-    .map((m, i) => `${i + 1}. ${m.role === 'user' ? '用户' : 'AI'}：${m.content}`)
-    .join('\n')
-    .slice(0, 12000)
-  const res = await client.chat.completions.create({
-    model: cfg.model,
-    messages: [
-      { role: 'system', content: CHAT_PROMPT },
-      { role: 'user', content: dialogue }
-    ],
-    temperature: 0.3,
-    max_tokens: 2048
-  })
-  if (res.usage) await recordUsage(res.usage, 'summary')
+  const key = `chat:${chatId}`
+  markGenerating(key)
+  try {
+    const client = makeClient(cfg)
+    const dialogue = turns
+      .map((m, i) => `${i + 1}. ${m.role === 'user' ? '用户' : 'AI'}：${m.content}`)
+      .join('\n')
+      .slice(0, 12000)
+    const res = await client.chat.completions.create({
+      model: cfg.model,
+      messages: [
+        { role: 'system', content: CHAT_PROMPT },
+        { role: 'user', content: dialogue }
+      ],
+      temperature: 0.3,
+      max_tokens: 2048
+    })
+    if (res.usage) await recordUsage(res.usage, 'summary')
 
-  const parsed = parseJson<{ role: string; summary: string }[]>(res.choices[0]?.message?.content ?? '')
-  // 与消息一一对应（以真实消息角色为准，按位置对齐；不足补空、多余丢弃）
-  const rawItems = Array.isArray(parsed) ? parsed : []
-  const items: ChatSummaryItem[] = turns.map((t, i) => ({
-    messageId: t.id,
-    role: t.role === 'user' ? ('user' as const) : ('assistant' as const),
-    summary: rawItems[i] ? String(rawItems[i].summary ?? '') : ''
-  }))
-  await writeChatSummary(chat.projectId, chatId, { items, updatedAt: nowIso(), lastMessageId, messageCount })
+    const parsed = parseJson<{ role: string; summary: string }[]>(res.choices[0]?.message?.content ?? '')
+    // 与消息一一对应（以真实消息角色为准，按位置对齐；不足补空、多余丢弃）
+    const rawItems = Array.isArray(parsed) ? parsed : []
+    const items: ChatSummaryItem[] = turns.map((t, i) => ({
+      messageId: t.id,
+      role: t.role === 'user' ? ('user' as const) : ('assistant' as const),
+      summary: rawItems[i] ? String(rawItems[i].summary ?? '') : ''
+    }))
+    await writeChatSummary(chat.projectId, chatId, { items, updatedAt: nowIso(), lastMessageId, messageCount })
+  } finally {
+    markDone(key)
+  }
 }
 
 /** 关闭对话窗口后入队生成对话摘要（PRD 7.5）；force 用于手动重新生成 */
@@ -448,6 +573,21 @@ export async function distillResource(
   resourceId: string,
   type: 'story' | 'other',
   force = false
+): Promise<DistillResult> {
+  const key = `res:${resourceId}`
+  markGenerating(key)
+  try {
+    return await distillResourceInner(projectId, resourceId, type, force)
+  } finally {
+    markDone(key)
+  }
+}
+
+async function distillResourceInner(
+  projectId: string,
+  resourceId: string,
+  type: 'story' | 'other',
+  force: boolean
 ): Promise<DistillResult> {
   const cfg = await loadConfig()
   if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未开启' }
@@ -515,22 +655,38 @@ export async function listProjectSummaries(projectId: string): Promise<ProjectSu
   const docs = await Promise.all(
     tree.docs.map(async (d) => {
       const s = await readDocSummary(projectId, d.id)
-      return { docId: d.id, title: d.title, hasSummary: !!s, updatedAt: s?.updatedAt }
+      return {
+        docId: d.id,
+        title: d.title,
+        hasSummary: !!s,
+        updatedAt: s?.updatedAt,
+        generating: isSummaryGenerating(`doc:${d.id}`)
+      }
     })
   )
   const chats = await Promise.all(
     tree.chats.map(async (c) => {
       const s = await readChatSummary(projectId, c.id)
-      return { chatId: c.id, title: c.title, hasSummary: !!s, updatedAt: s?.updatedAt, docId: c.docId, kind: c.kind }
+      return {
+        chatId: c.id,
+        title: c.title,
+        hasSummary: !!s,
+        updatedAt: s?.updatedAt,
+        docId: c.docId,
+        kind: c.kind,
+        generating: isSummaryGenerating(`chat:${c.id}`)
+      }
     })
   )
   const resources = await Promise.all(
     tree.resources.map(async (r) => {
       const s = await readResourceSummary(projectId, r.id)
-      return { resourceId: r.id, name: r.name, distilled: !!s, type: s?.type, updatedAt: s?.updatedAt }
+      const generating = isSummaryGenerating(`res:${r.id}`)
+      return { resourceId: r.id, name: r.name, distilled: !!s, type: s?.type, updatedAt: s?.updatedAt, generating }
     })
   )
-  return { docs, chats, resources }
+  // 资源区只展示已蒸馏或正在蒸馏的资源（未蒸馏且未生成的隐藏，避免堆积）
+  return { docs, chats, resources: resources.filter((r) => r.distilled || r.generating) }
 }
 
 // ---------------------------------------------------------------------------

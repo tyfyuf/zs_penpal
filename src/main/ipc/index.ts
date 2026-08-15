@@ -1,4 +1,4 @@
-import { dialog, ipcMain } from 'electron'
+import { dialog, ipcMain, clipboard } from 'electron'
 import { EVENTS, IPC, type IpcApi } from '@shared/ipc'
 import type { RecoveryState } from '@shared/types'
 import {
@@ -42,7 +42,7 @@ import {
   uploadResource
 } from '../services/file.service'
 import { hasApiKey, setApiKey } from '../services/crypto.service'
-import { cancelStream, generateChatTitle, streamChat, testConnection } from '../services/api.service'
+import { cancelStream, generateChatTitle, listModels, streamChat, testConnection } from '../services/api.service'
 import {
   distillResource,
   listProjectSummaries,
@@ -58,12 +58,20 @@ import { ensureGit } from '../install/git-installer'
 import { exportDoc, exportProject } from '../services/export.service'
 import { clearRecovery, readRecovery, updateRecovery } from '../services/recovery.service'
 import { migrateWorkspace } from '../services/migration.service'
+import { logError } from '../services/log.service'
 import { broadcast, getMainWindow } from '../window'
 
 type Handler<K extends keyof IpcApi> = (req: IpcApi[K]['req']) => Promise<IpcApi[K]['res']> | IpcApi[K]['res']
 
 function handle<K extends keyof IpcApi>(channel: K, fn: Handler<K>): void {
-  ipcMain.handle(channel, (_event, req) => fn(req))
+  ipcMain.handle(channel, async (_event, req) => {
+    try {
+      return await fn(req)
+    } catch (err) {
+      logError(`ipc:${String(channel)}`, (err as Error).message, (err as Error).stack)
+      throw err
+    }
+  })
 }
 
 export function registerIpcHandlers(): void {
@@ -137,6 +145,18 @@ export function registerIpcHandlers(): void {
   })
   handle(IPC.apiCancelStream, (requestId) => {
     cancelStream(requestId)
+  })
+  handle(IPC.apiListModels, (req) => listModels(req))
+
+  // 剪贴板
+  handle(IPC.clipboardRead, () => clipboard.readText())
+  handle(IPC.clipboardWrite, (text) => {
+    clipboard.writeText(text)
+  })
+
+  // 错误日志（渲染层上报）
+  handle(IPC.logError, (req) => {
+    logError(req.source, req.message, req.stack)
   })
 
   // 加密 / 联通测试

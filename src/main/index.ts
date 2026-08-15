@@ -7,8 +7,21 @@ import { EVENTS } from '@shared/ipc'
 import { commitAllProjects } from './services/git.service'
 import { waitForSummaryQueue } from './services/summary.service'
 import { clearRecovery } from './services/recovery.service'
+import { initErrorLog, logError } from './services/log.service'
 
 const ALLOWED_EXT = ['.txt', '.md', '.csv']
+
+// 全局错误落盘（供维护查阅）
+process.on('uncaughtException', (err) => {
+  logError('main:uncaughtException', err.message, err.stack)
+})
+process.on('unhandledRejection', (reason) => {
+  logError(
+    'main:unhandledRejection',
+    reason instanceof Error ? reason.message : String(reason),
+    reason instanceof Error ? reason.stack : undefined
+  )
+})
 
 function findExternalFile(argv: string[]): string | null {
   return argv.find((a) => ALLOWED_EXT.some((ext) => a.toLowerCase().endsWith(ext))) ?? null
@@ -40,6 +53,7 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     setUserDataDir(app.getPath('userData'))
     await loadConfig()
+    await initErrorLog()
     registerIpcHandlers()
 
     const win = createMainWindow()

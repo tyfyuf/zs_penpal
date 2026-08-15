@@ -12,7 +12,9 @@ function projectDir(projectId: string): string {
 async function getGit(projectId: string): Promise<SimpleGit> {
   const binary = await resolveGitBinary()
   if (!binary) throw new Error('未检测到 Git，请先在设置中开启版本管理并安装')
-  return simpleGit({ baseDir: projectDir(projectId) }).customBinary(binary)
+  // Git 安装路径可能含空格等字符（如 C:\Program Files\Git\...），
+  // simple-git 默认拒绝此类 customBinary，需显式允许（路径来自我们自己的解析器，安全）
+  return simpleGit({ baseDir: projectDir(projectId), unsafe: { allowUnsafeCustomBinary: true } }).customBinary(binary)
 }
 
 /** 确保项目拥有独立 Git 仓库（PRD 2.3） */

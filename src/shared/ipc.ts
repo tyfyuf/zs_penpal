@@ -71,7 +71,8 @@ export const EVENTS = {
   migrateProgress: 'migrate:progress',
   gitInstallProgress: 'git:install-progress',
   configChanged: 'config:changed',
-  appFlush: 'app:flush'
+  appFlush: 'app:flush',
+  summaryStatus: 'summary:status'
 } as const
 
 /** 渲染进程 → 主进程的 invoke 通道 */
@@ -113,9 +114,13 @@ export const IPC = {
   fileOpenExternal: 'file:openExternal',
   apiStreamChat: 'api:streamChat',
   apiCancelStream: 'api:cancelStream',
+  apiListModels: 'api:listModels',
   cryptoSetApiKey: 'crypto:setApiKey',
   cryptoHasApiKey: 'crypto:hasApiKey',
   cryptoTestConnection: 'crypto:testConnection',
+  clipboardRead: 'clipboard:read',
+  clipboardWrite: 'clipboard:write',
+  logError: 'log:error',
   summaryGetDoc: 'summary:getDoc',
   summaryGetChat: 'summary:getChat',
   summaryGetResource: 'summary:getResource',
@@ -190,9 +195,16 @@ export interface IpcApi {
   [IPC.fileOpenExternal]: { req: string; res: ExternalFileResult }
   [IPC.apiStreamChat]: { req: StreamChatInput; res: void }
   [IPC.apiCancelStream]: { req: string; res: void }
+  [IPC.apiListModels]: {
+    req: { baseURL?: string; apiKey?: string }
+    res: { ok: boolean; models?: string[]; error?: string }
+  }
   [IPC.cryptoSetApiKey]: { req: string; res: void }
   [IPC.cryptoHasApiKey]: { req: void; res: boolean }
   [IPC.cryptoTestConnection]: { req: void; res: ConnectionTestResult }
+  [IPC.clipboardRead]: { req: void; res: string }
+  [IPC.clipboardWrite]: { req: string; res: void }
+  [IPC.logError]: { req: { source: string; message: string; stack?: string }; res: void }
   [IPC.summaryGetDoc]: { req: string; res: DocSummary | null }
   [IPC.summaryGetChat]: { req: string; res: ChatSummary | null }
   [IPC.summaryGetResource]: { req: { projectId: string; resourceId: string }; res: ResourceSummary | null }
@@ -223,6 +235,7 @@ export interface EventPayloads {
   [EVENTS.gitInstallProgress]: { level: number; message: string }
   [EVENTS.configChanged]: AppConfig
   [EVENTS.appFlush]: void
+  [EVENTS.summaryStatus]: { key: string; generating: boolean }
 }
 
 export type EventChannel = keyof EventPayloads

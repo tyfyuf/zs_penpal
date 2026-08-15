@@ -56,6 +56,14 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
     void load()
   }, [load, summaryRevision])
 
+  // 摘要生成状态事件：开始/结束都刷新，展示黄点“生成中”→绿点解锁
+  useEffect(() => {
+    const off = api.on('summary:status', () => {
+      void load()
+    })
+    return off
+  }, [load])
+
   async function previewDoc(docId: string): Promise<void> {
     try {
       const s = await api.invoke('summary:getDoc', docId)
@@ -125,7 +133,7 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
     return <div className="px-6 py-2 text-xs" style={{ color: 'var(--muted)' }}>{t('summary.loading')}</div>
   }
 
-  const distilledResources = overview.resources.filter((r) => r.distilled)
+  const distilledResources = overview.resources.filter((r) => r.distilled || r.generating)
 
   return (
     <div className="space-y-2 px-4 pb-2">
@@ -133,10 +141,16 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
       {overview.docs.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noDocs')}</div>}
       {overview.docs.map((d) => (
         <div key={d.docId} className="flex items-center gap-1 text-[12px]">
-          <span className={`h-1.5 w-1.5 rounded-full ${d.hasSummary ? 'bg-[var(--ok)]' : 'bg-[var(--border)]'}`} />
-          <span className="min-w-0 flex-1 truncate" title={d.title}>{d.title}</span>
-          {d.hasSummary && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewDoc(d.docId)} />}
-          <IconBtn icon={<RefreshCw size={12} />} title={t('summary.regenerate')} disabled={busy} onClick={() => void regenDoc(d.docId)} />
+          <span
+            className="h-1.5 w-1.5 rounded-full"
+            style={{ background: d.generating ? 'var(--warn)' : d.hasSummary ? 'var(--ok)' : 'var(--border)' }}
+          />
+          <span className="min-w-0 flex-1 truncate" title={d.title}>
+            {d.title}
+            {d.generating && <span className="text-[10px]" style={{ color: 'var(--warn)' }}> · {t('summary.generating')}</span>}
+          </span>
+          {!d.generating && d.hasSummary && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewDoc(d.docId)} />}
+          {!d.generating && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.regenerate')} disabled={busy} onClick={() => void regenDoc(d.docId)} />}
         </div>
       ))}
 
@@ -144,10 +158,16 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
       {overview.chats.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noChats')}</div>}
       {overview.chats.map((c) => (
         <div key={c.chatId} className="flex items-center gap-1 text-[12px]">
-          <span className={`h-1.5 w-1.5 rounded-full ${c.hasSummary ? 'bg-[var(--ok)]' : 'bg-[var(--border)]'}`} />
-          <span className="min-w-0 flex-1 truncate" title={c.title}>{c.title}</span>
-          {c.hasSummary && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewChat(c.chatId)} />}
-          <IconBtn icon={<RefreshCw size={12} />} title={t('summary.regenerate')} disabled={busy} onClick={() => void regenChat(c.chatId)} />
+          <span
+            className="h-1.5 w-1.5 rounded-full"
+            style={{ background: c.generating ? 'var(--warn)' : c.hasSummary ? 'var(--ok)' : 'var(--border)' }}
+          />
+          <span className="min-w-0 flex-1 truncate" title={c.title}>
+            {c.title}
+            {c.generating && <span className="text-[10px]" style={{ color: 'var(--warn)' }}> · {t('summary.generating')}</span>}
+          </span>
+          {!c.generating && c.hasSummary && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewChat(c.chatId)} />}
+          {!c.generating && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.regenerate')} disabled={busy} onClick={() => void regenChat(c.chatId)} />}
         </div>
       ))}
 
@@ -155,18 +175,27 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
       {distilledResources.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noResources')}</div>}
       {distilledResources.map((r) => (
         <div key={r.resourceId} className="flex items-center gap-1 text-[12px]">
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--ok)]" />
+          <span
+            className="h-1.5 w-1.5 rounded-full"
+            style={{ background: r.generating ? 'var(--warn)' : 'var(--ok)' }}
+          />
           <span className="min-w-0 flex-1 truncate" title={r.name}>
             {r.name}
-            <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
-              （{r.type === 'story' ? t('summary.typeStory') : t('summary.typeOther')}）
-            </span>
+            {r.generating ? (
+              <span className="text-[10px]" style={{ color: 'var(--warn)' }}> · {t('summary.generating')}</span>
+            ) : (
+              <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
+                （{r.type === 'story' ? t('summary.typeStory') : t('summary.typeOther')}）
+              </span>
+            )}
           </span>
-          <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewResource(r.resourceId)} />
-          <IconBtn icon={<Trash2 size={12} />} title={t('summary.undistill')} onClick={() => void runUndistill(projectId, r.resourceId).then(load)} />
+          {!r.generating && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewResource(r.resourceId)} />}
+          {!r.generating && (
+            <IconBtn icon={<Trash2 size={12} />} title={t('summary.undistill')} onClick={() => void runUndistill(projectId, r.resourceId).then(load)} />
+          )}
         </div>
       ))}
-      {overview.resources.some((r) => !r.distilled) && (
+      {overview.resources.some((r) => !r.distilled && !r.generating) && (
         <div className="text-[10px]" style={{ color: 'var(--muted)' }}>
           {t('summary.distillHint')}
         </div>

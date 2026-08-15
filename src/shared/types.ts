@@ -205,7 +205,7 @@ export interface SummaryInjectionConfig {
 
 /** 摘要区（左侧栏）展示的项目摘要概览 */
 export interface ProjectSummariesOverview {
-  docs: { docId: string; title: string; hasSummary: boolean; updatedAt?: string }[]
+  docs: { docId: string; title: string; hasSummary: boolean; updatedAt?: string; generating: boolean }[]
   chats: {
     chatId: string
     title: string
@@ -213,6 +213,7 @@ export interface ProjectSummariesOverview {
     updatedAt?: string
     docId?: string
     kind?: ChatKind
+    generating: boolean
   }[]
   resources: {
     resourceId: string
@@ -220,6 +221,7 @@ export interface ProjectSummariesOverview {
     distilled: boolean
     type?: 'story' | 'other'
     updatedAt?: string
+    generating: boolean
   }[]
 }
 

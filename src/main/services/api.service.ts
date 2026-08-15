@@ -593,3 +593,19 @@ export async function testConnection(): Promise<ConnectionTestResult> {
     return { ok: false, message: (err as Error).message }
   }
 }
+
+/** 获取可用模型列表（优先使用调用方传入的 URL/Key，用于设置页未保存的新配置） */
+export async function listModels(req: { baseURL?: string; apiKey?: string }): Promise<{ ok: boolean; models?: string[]; error?: string }> {
+  try {
+    const settings = await loadApiSettings()
+    const baseURL = req.baseURL?.trim() || settings.baseURL
+    const apiKey = req.apiKey?.trim() || settings.apiKey
+    if (!apiKey) return { ok: false, error: '未配置 API Key' }
+    const client = makeClient(baseURL, apiKey)
+    const res = await client.models.list()
+    const models = (res.data ?? []).map((m) => String(m.id ?? m ?? '')).filter((s) => s.length > 0)
+    return { ok: true, models }
+  } catch (err) {
+    return { ok: false, error: (err as Error).message }
+  }
+}

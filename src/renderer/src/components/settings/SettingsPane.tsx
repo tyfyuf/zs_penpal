@@ -28,6 +28,9 @@ export default function SettingsPane(): JSX.Element {
   const [commits, setCommits] = useState<GitCommitInfo[]>([])
   const [showHistory, setShowHistory] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [models, setModels] = useState<string[]>([])
+  const [manualModel, setManualModel] = useState(true)
+  const [fetchingModels, setFetchingModels] = useState(false)
 
   useEffect(() => {
     void api.invoke('crypto:hasApiKey', undefined).then(setHasKey)
@@ -127,6 +130,24 @@ export default function SettingsPane(): JSX.Element {
     await updateConfig({ language: locale })
   }
 
+  async function fetchModels(): Promise<void> {
+    setFetchingModels(true)
+    try {
+      const res = await api.invoke('api:listModels', { baseURL: apiBaseUrl, apiKey: apiKeyInput.trim() || undefined })
+      if (res.ok && res.models && res.models.length > 0) {
+        setModels(res.models)
+        setManualModel(false)
+        toast.success(t('settings.modelsFetched', { n: res.models.length }))
+      } else {
+        toast.error(res.error ?? t('settings.modelsEmpty'))
+      }
+    } catch (err) {
+      toast.error((err as Error).message)
+    } finally {
+      setFetchingModels(false)
+    }
+  }
+
   if (!config) return <div />
 
   const inj = config.summaryInjection
@@ -191,7 +212,33 @@ export default function SettingsPane(): JSX.Element {
               </div>
             </Field>
             <Field label={t('settings.model')}>
-              <input className="input" value={model} onChange={(e) => setModel(e.target.value)} placeholder="gpt-4o" />
+              {manualModel ? (
+                <input className="input" value={model} onChange={(e) => setModel(e.target.value)} placeholder="gpt-4o" />
+              ) : (
+                <select
+                  className="input"
+                  value={model}
+                  onChange={(e) => {
+                    setModel(e.target.value)
+                    void updateConfig({ model: e.target.value })
+                  }}
+                >
+                  {model && !models.includes(model) && <option value={model}>{model}</option>}
+                  {models.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <div className="mt-1.5 flex items-center gap-2">
+                <button className="btn !px-2 !py-1 text-xs" disabled={fetchingModels} onClick={() => void fetchModels()}>
+                  {fetchingModels ? t('settings.fetchingModels') : t('settings.fetchModels')}
+                </button>
+                <button className="btn !px-2 !py-1 text-xs" onClick={() => setManualModel((v) => !v)}>
+                  {manualModel ? t('settings.pickModel') : t('settings.manualModel')}
+                </button>
+              </div>
             </Field>
             <Field label={t('settings.contextLimit')}>
               <input className="input" type="number" value={contextLimit} onChange={(e) => setContextLimit(Number(e.target.value) || 256000)} />
