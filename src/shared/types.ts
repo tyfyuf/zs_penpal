@@ -149,10 +149,23 @@ export interface ChatSummaryItem {
   summary: string
 }
 
-/** 对话摘要：按顺序逐条生成的简短摘要 */
+/** 对话摘要的压缩区间（非重叠，覆盖尾部窗口之前的旧消息） */
+export interface ChatSummaryInterval {
+  /** 覆盖的 turn 起始下标（0-based，含） */
+  startIndex: number
+  /** 覆盖的 turn 结束下标（含） */
+  endIndex: number
+  summary: string
+  updatedAt: string
+}
+
+/** 对话摘要：尾部窗口逐条摘要 + 历史压缩区间 */
 export interface ChatSummary {
   schemaVersion?: number
+  /** 尾部窗口内逐条摘要（最近 N 条） */
   items: ChatSummaryItem[]
+  /** 尾部窗口之前的压缩区间（非重叠，增量维护） */
+  compacted: ChatSummaryInterval[]
   updatedAt: string
   /** 用于变化检测：最后一条消息 id */
   lastMessageId: string

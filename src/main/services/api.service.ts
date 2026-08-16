@@ -256,7 +256,7 @@ async function injectSummaries(
   for (const chatId of chatIds) {
     if (!activeKeys.has(`chat:${chatId}`)) continue
     const s = await readChatSummary(projectId, chatId)
-    if (s && s.items.length > 0) chatMsgs.push({ role: 'system', content: buildChatSummaryBlock(s, lang) })
+    if (s && (s.items.length > 0 || (s.compacted?.length ?? 0) > 0)) chatMsgs.push({ role: 'system', content: buildChatSummaryBlock(s, lang) })
   }
 
   // 资源摘要
@@ -324,7 +324,7 @@ async function buildRegenerateGuidance(
         if (s) blocks.push(buildDocSummaryBlock(s, lang))
       } else if (key.startsWith('chat:')) {
         const s = await readChatSummary(chat.projectId, key.slice(5))
-        if (s && s.items.length > 0) blocks.push(buildChatSummaryBlock(s, lang))
+        if (s && (s.items.length > 0 || (s.compacted?.length ?? 0) > 0)) blocks.push(buildChatSummaryBlock(s, lang))
       } else if (key.startsWith('res:')) {
         const resId = key.slice(4)
         const s = await readResourceSummary(chat.projectId, resId)

@@ -27,7 +27,12 @@ function storyText(s: {
 }
 
 function chatText(s: ChatSummary): string {
-  return (Array.isArray(s.items) ? s.items : []).map((i) => `${i.role === 'user' ? '用户' : 'AI'}：${i.summary}`).join('\n') || '（无）'
+  const compacted = Array.isArray(s.compacted) ? s.compacted.map((iv) => `- ${iv.summary}`).join('\n') : ''
+  const items = (Array.isArray(s.items) ? s.items : []).map((i) => `${i.role === 'user' ? '用户' : 'AI'}：${i.summary}`).join('\n')
+  const parts: string[] = []
+  if (compacted) parts.push(`历史（已压缩）：\n${compacted}`)
+  if (items) parts.push(`最近：\n${items}`)
+  return parts.join('\n\n') || '（无）'
 }
 
 function resourceText(s: ResourceSummary): string {

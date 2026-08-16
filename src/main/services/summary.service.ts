@@ -1,6 +1,7 @@
 import OpenAI from 'openai'
 import type {
   ChatSummary,
+  ChatSummaryInterval,
   ChatSummaryItem,
   DistillResult,
   DocRollup,
@@ -131,6 +132,21 @@ Write all summaries in English. Output only the JSON array.`
     : `请为下面这段写作讨论对话，按顺序为每条消息生成简短摘要（每条不超过 30 字），输出 JSON 数组，每个元素形如：
 [ { "role": "user" 或 "assistant", "summary": "..." } ]
 只输出 JSON 数组，不要输出其他内容。`
+}
+
+/** 对话摘要增量压缩参数 */
+const CHAT_TAIL_WINDOW = 20
+const CHAT_COMPACT_THRESHOLD = 40
+const CHAT_COMPACT_BATCH = 10
+
+function chatIntervalPrompt(lang: Lang): string {
+  return lang === 'en'
+    ? `Summarize this segment of a writing discussion into a JSON object with one field:
+{ "summary": "..." }
+Write a concise paragraph (at most 200 words) covering: what progressed, key decisions, and outstanding todos. Output only the JSON.`
+    : `请为下面这段写作讨论记录生成区间摘要，输出恰好一个 JSON 对象：
+{ "summary": "..." }
+summary 用简洁段落概括这段讨论的进展、关键决策、待办事项（不超过 200 字）。只输出 JSON，不要输出其他内容。`
 }
 
 // ---------------------------------------------------------------------------
@@ -554,32 +570,29 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
   markGenerating(key)
   try {
     const client = makeClient(cfg)
-    const dialogue = turns
-      .map((m, i) => `${i + 1}. ${m.role === 'user' ? '用户' : 'AI'}：${m.content}`)
-      .join('\n')
-      .slice(0, 12000)
-    const res = await client.chat.completions.create({
-      model: cfg.model,
-      messages: [
-        { role: 'system', content: chatPrompt(cfg.language) },
-        { role: 'user', content: dialogue }
-      ],
-      temperature: 0.3,
-      max_tokens: 2048
-    })
-    if (res.usage) await recordUsage(res.usage, 'summary')
+    // 尾部窗口：最近 CHAT_TAIL_WINDOW 条逐条摘要（增量：只重算尾部，不重算全量）
+    const tailStart = Math.max(0, turns.length - CHAT_TAIL_WINDOW)
+    const items = await summarizeTurnItems(client, turns.slice(tailStart), cfg)
 
-    const parsed = parseJson<{ role: string; summary: string }[]>(res.choices[0]?.message?.content ?? '')
-    // 与消息一一对应（以真实消息角色为准，按位置对齐；不足补空、多余丢弃）
-    const rawItems = Array.isArray(parsed) ? parsed : []
-    const items: ChatSummaryItem[] = turns.map((t, i) => ({
-      messageId: t.id,
-      role: t.role === 'user' ? ('user' as const) : ('assistant' as const),
-      summary: rawItems[i] ? String(rawItems[i].summary ?? '') : ''
-    }))
+    // 历史压缩区间：超过阈值时，把尾部窗口之前的旧消息按 CHAT_COMPACT_BATCH 聚合（增量追加）
+    let compacted: ChatSummaryInterval[] = []
+    if (turns.length > CHAT_COMPACT_THRESHOLD) {
+      const prev = force ? [] : Array.isArray(existing?.compacted) ? existing.compacted : []
+      const kept = prev.filter((iv) => iv.endIndex < tailStart)
+      compacted = [...kept]
+      const lastCovered = kept.reduce((m, iv) => Math.max(m, iv.endIndex), -1)
+      const preTailEnd = tailStart - 1
+      for (let s = lastCovered + 1; s <= preTailEnd; s += CHAT_COMPACT_BATCH) {
+        const e = Math.min(s + CHAT_COMPACT_BATCH - 1, preTailEnd)
+        const summary = await summarizeInterval(client, turns.slice(s, e + 1), cfg)
+        if (summary) compacted.push({ startIndex: s, endIndex: e, summary, updatedAt: nowIso() })
+      }
+    }
+
     await writeChatSummary(chat.projectId, chatId, {
       schemaVersion: SUMMARY_SCHEMA_VERSION,
       items,
+      compacted,
       updatedAt: nowIso(),
       lastMessageId,
       messageCount
@@ -587,6 +600,56 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
   } finally {
     markDone(key)
   }
+}
+
+/** 逐条摘要（尾部窗口），与消息一一对齐 */
+async function summarizeTurnItems(
+  client: OpenAI,
+  turns: { id: string; role: string; content: string }[],
+  cfg: ApiSettings
+): Promise<ChatSummaryItem[]> {
+  if (turns.length === 0) return []
+  const dialogue = turns
+    .map((m, i) => `${i + 1}. ${m.role === 'user' ? '用户' : 'AI'}：${m.content}`)
+    .join('\n')
+    .slice(0, 12000)
+  const res = await client.chat.completions.create({
+    model: cfg.model,
+    messages: [
+      { role: 'system', content: chatPrompt(cfg.language) },
+      { role: 'user', content: dialogue }
+    ],
+    temperature: 0.3,
+    max_tokens: 2048
+  })
+  if (res.usage) await recordUsage(res.usage, 'summary')
+  const parsed = parseJson<{ role: string; summary: string }[]>(res.choices[0]?.message?.content ?? '')
+  const rawItems = Array.isArray(parsed) ? parsed : []
+  return turns.map((t, i) => ({
+    messageId: t.id,
+    role: t.role === 'user' ? ('user' as const) : ('assistant' as const),
+    summary: rawItems[i] ? String(rawItems[i].summary ?? '') : ''
+  }))
+}
+
+/** 区间摘要（历史压缩块）：进展/决策/待办 */
+async function summarizeInterval(client: OpenAI, turns: { role: string; content: string }[], cfg: ApiSettings): Promise<string> {
+  const dialogue = turns
+    .map((m, i) => `${i + 1}. ${m.role === 'user' ? '用户' : 'AI'}：${m.content}`)
+    .join('\n')
+    .slice(0, 12000)
+  const res = await client.chat.completions.create({
+    model: cfg.model,
+    messages: [
+      { role: 'system', content: chatIntervalPrompt(cfg.language) },
+      { role: 'user', content: dialogue }
+    ],
+    temperature: 0.3,
+    max_tokens: 1024
+  })
+  if (res.usage) await recordUsage(res.usage, 'summary')
+  const parsed = parseJson<{ summary?: string }>(res.choices[0]?.message?.content ?? '')
+  return String(parsed?.summary ?? '').trim()
 }
 
 /** 关闭对话窗口后入队生成对话摘要（PRD 7.5）；force 用于手动重新生成 */
@@ -784,7 +847,9 @@ export async function getDefaultActiveKeys(chatId: string): Promise<string[]> {
 function summarySearchText(s: ResourceSummary | DocSummary | ChatSummary | null): string {
   if (!s) return ''
   if ('items' in s && Array.isArray(s.items)) {
-    return s.items.map((i) => i.summary).join(' ')
+    const items = s.items.map((i) => i.summary).join(' ')
+    const compacted = Array.isArray(s.compacted) ? (s.compacted as ChatSummaryInterval[]).map((iv) => iv.summary).join(' ') : ''
+    return `${items} ${compacted}`
   }
   const parts: string[] = []
   const o = s as unknown as Record<string, unknown>
@@ -1029,10 +1094,19 @@ export function buildDocSummaryBlock(s: DocSummary, lang: Lang = 'zh'): string {
 
 export function buildChatSummaryBlock(s: ChatSummary, lang: Lang = 'zh'): string {
   const en = lang === 'en'
+  const head = en ? '【Chat summary】' : '【对话摘要】'
+  const none = en ? '(none)' : '（无）'
+  const parts: string[] = []
+  const compacted = Array.isArray(s.compacted) ? s.compacted : []
+  if (compacted.length > 0) {
+    const hist = compacted.map((iv) => `- ${iv.summary}`).join('\n')
+    parts.push(en ? `Earlier (compressed):\n${hist}` : `历史（已压缩）：\n${hist}`)
+  }
   const lines = (Array.isArray(s.items) ? s.items : [])
     .map((i) => `${i.role === 'user' ? (en ? 'User' : '用户') : 'AI'}：${i.summary}`)
     .join('\n')
-  return en ? `【Chat summary】\n${lines || '(none)'}` : `【对话摘要】\n${lines || '（无）'}`
+  if (lines) parts.push(en ? `Recent:\n${lines}` : `最近：\n${lines}`)
+  return `${head}\n${parts.join('\n\n') || none}`
 }
 
 export function buildResourceSummaryBlock(s: ResourceSummary, name: string, lang: Lang = 'zh'): string {
