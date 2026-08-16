@@ -14,6 +14,7 @@ import type {
   ResourceMeta,
   ResourceSummary,
   UploadResult,
+  VectorIndex,
   WorkspaceSnapshot
 } from '@shared/types'
 import { getConfigCached } from './config.service'
@@ -86,6 +87,9 @@ function resourceSummaryPath(projectId: string, resourceId: string): string {
 }
 function rollupsPath(projectId: string): string {
   return join(summariesDir(projectId), 'rollups', `${projectId}.json`)
+}
+function vectorIndexPath(projectId: string): string {
+  return join(summariesDir(projectId), 'vector-index', `${projectId}.json`)
 }
 
 function resourcesDir(projectId: string): string {
@@ -632,6 +636,14 @@ export async function readDocRollups(projectId: string): Promise<DocRollup[]> {
 
 export async function writeDocRollups(projectId: string, rollups: DocRollup[]): Promise<void> {
   await atomicWriteJson(rollupsPath(projectId), { rollups })
+}
+
+export async function readVectorIndex(projectId: string): Promise<VectorIndex | null> {
+  return readJson<VectorIndex>(vectorIndexPath(projectId))
+}
+
+export async function writeVectorIndex(projectId: string, index: VectorIndex): Promise<void> {
+  await atomicWriteJson(vectorIndexPath(projectId), index)
 }
 
 // ---------------------------------------------------------------------------

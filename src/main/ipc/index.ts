@@ -59,6 +59,7 @@ import {
   undistillResource
 } from '../services/summary.service'
 import { getSnapshot } from '../services/usage.service'
+import { buildVectorIndex, searchVectorIndex } from '../services/vector.service'
 import { commitAllProjects, commitProject, gitLog, rollback } from '../services/git.service'
 import { ensureGit } from '../install/git-installer'
 import { exportDoc, exportProject } from '../services/export.service'
@@ -199,6 +200,8 @@ export function registerIpcHandlers(): void {
   handle(IPC.summaryGenerateRollups, (projectId) => generateDocRollups(projectId))
   handle(IPC.summaryRegenerateRollup, (req) => regenerateDocRollup(req.projectId, req.rollupId))
   handle(IPC.summaryGetRollup, (req) => getDocRollup(req.projectId, req.rollupId))
+  handle(IPC.vectorBuild, (projectId) => buildVectorIndex(projectId))
+  handle(IPC.vectorSearch, (req) => searchVectorIndex(req.projectId, req.query))
 
   // 用量
   handle(IPC.usageGet, () => getSnapshot())

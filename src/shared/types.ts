@@ -272,6 +272,32 @@ export interface DocRollupOverview {
   batchSize: number
 }
 
+/** 向量索引分块（嵌原文，本地特征哈希） */
+export interface VectorChunk {
+  docId: string
+  kind: 'doc' | 'res'
+  title: string
+  index: number
+  text: string
+  vector: number[]
+}
+
+export interface VectorIndex {
+  schemaVersion: number
+  embedModel: string
+  chunks: VectorChunk[]
+  updatedAt: string
+}
+
+export interface VectorSearchHit {
+  docId: string
+  kind: 'doc' | 'res'
+  title: string
+  index: number
+  text: string
+  score: number
+}
+
 /** 摘要区（左侧栏）展示的项目摘要概览 */
 export interface ProjectSummariesOverview {
   docs: { docId: string; title: string; hasSummary: boolean; updatedAt?: string; generating: boolean }[]

@@ -27,6 +27,7 @@ import type {
   SummarySearchResult,
   UploadResult,
   UsageSnapshot,
+  VectorSearchHit,
   WorkspaceSnapshot
 } from './types'
 
@@ -137,6 +138,8 @@ export const IPC = {
   summaryGenerateRollups: 'summary:generateRollups',
   summaryRegenerateRollup: 'summary:regenerateRollup',
   summaryGetRollup: 'summary:getRollup',
+  vectorBuild: 'vector:build',
+  vectorSearch: 'vector:search',
   usageGet: 'usage:get',
   gitEnsure: 'git:ensure',
   gitCommit: 'git:commit',
@@ -228,6 +231,8 @@ export interface IpcApi {
   [IPC.summaryGenerateRollups]: { req: string; res: { ok: boolean; error?: string } }
   [IPC.summaryRegenerateRollup]: { req: { projectId: string; rollupId: string }; res: { ok: boolean; error?: string } }
   [IPC.summaryGetRollup]: { req: { projectId: string; rollupId: string }; res: DocRollup | null }
+  [IPC.vectorBuild]: { req: string; res: { ok: boolean; error?: string; chunkCount?: number } }
+  [IPC.vectorSearch]: { req: { projectId: string; query: string }; res: VectorSearchHit[] }
   [IPC.usageGet]: { req: void; res: UsageSnapshot }
   [IPC.gitEnsure]: { req: { consent: boolean }; res: { ok: boolean; reason?: string; path?: string } }
   [IPC.gitCommit]: { req: string; res: { ok: boolean; committed?: boolean; error?: string } }
