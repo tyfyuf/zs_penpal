@@ -324,76 +324,11 @@ export default function Sidebar(): JSX.Element {
                   <Section label={t('sidebar.secSummary')} open={isOpen(`${projectKey}:summary`)} onToggle={() => toggle(`${projectKey}:summary`)}>
                     {isOpen(`${projectKey}:summary`) && <SummaryArea projectId={p.project.id} />}
                   </Section>
-
-                  <Section label={t('sidebar.secArchive')} open={isOpen(`${projectKey}:archive`)} onToggle={() => toggle(`${projectKey}:archive`)}>
-                    {isOpen(`${projectKey}:archive`) &&
-                      p.archivedChats.map((c) => (
-                        <div key={c.id} className="group flex items-center gap-1 py-0.5 pl-6 pr-1 text-[13px] hover:bg-[var(--panel3)]">
-                          <Archive size={13} style={{ color: 'var(--muted)' }} />
-                          <span className="min-w-0 flex-1 truncate" title={c.title}>
-                            {c.title}
-                          </span>
-                          <div className="hidden gap-0.5 group-hover:flex">
-                            <IconButton icon={<Plus size={12} />} title={t('sidebar.restore')} onClick={() => void restoreChat(c)} />
-                            <IconButton icon={<Trash2 size={12} />} title={t('sidebar.purge')} onClick={() => void purgeChat(c)} />
-                          </div>
-                        </div>
-                      ))}
-                  </Section>
-
-                  {p.trashedDocs.length > 0 && (
-                    <Section label={t('sidebar.secTrash')} open={isOpen(`${projectKey}:trash`)} onToggle={() => toggle(`${projectKey}:trash`)}>
-                      {isOpen(`${projectKey}:trash`) &&
-                        p.trashedDocs.map((doc) => (
-                          <div key={doc.id} className="group flex items-center gap-1 py-0.5 pl-6 pr-1 text-[13px] hover:bg-[var(--panel3)]">
-                            <Trash2 size={13} style={{ color: 'var(--muted)' }} />
-                            <span className="min-w-0 flex-1 truncate">{doc.title}</span>
-                            <div className="hidden gap-0.5 group-hover:flex">
-                              <IconButton icon={<Plus size={12} />} title={t('sidebar.restore')} onClick={() => void restoreDoc(doc)} />
-                              <IconButton icon={<Trash2 size={12} />} title={t('sidebar.purge')} onClick={() => void purgeDoc(doc)} />
-                            </div>
-                          </div>
-                        ))}
-                    </Section>
-                  )}
                 </div>
               )}
             </div>
           )
         })}
-
-        {workspace.trashedProjects.length > 0 && (
-          <div className="mt-3 border-t px-2 pt-2" style={{ borderColor: 'var(--border)' }}>
-            <div className="mb-1 px-1 text-[11px] font-medium" style={{ color: 'var(--muted)' }}>
-              {t('sidebar.secProjTrash')}
-            </div>
-            {workspace.trashedProjects.map((p) => (
-              <div key={p.id} className="group flex items-center gap-1 px-2 py-1 text-[13px] hover:bg-[var(--panel3)]">
-                <Trash2 size={13} style={{ color: 'var(--muted)' }} />
-                <span className="min-w-0 flex-1 truncate">{p.name}</span>
-                <div className="hidden gap-0.5 group-hover:flex">
-                  <IconButton
-                    icon={<Plus size={12} />}
-                    title={t('sidebar.restoreProject')}
-                    onClick={async () => {
-                      await api.invoke('project:restore', p.id)
-                      await refresh()
-                    }}
-                  />
-                  <IconButton
-                    icon={<Trash2 size={12} />}
-                    title={t('sidebar.purgeProject')}
-                    onClick={async () => {
-                      if (!(await confirmDialog(t('sidebar.confirmPurgeProject')))) return
-                      await api.invoke('project:purge', p.id)
-                      await refresh()
-                    }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
       {previewRes && (

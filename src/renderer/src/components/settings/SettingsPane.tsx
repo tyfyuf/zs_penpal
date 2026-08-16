@@ -411,6 +411,68 @@ export default function SettingsPane(): JSX.Element {
           </div>
         </Section>
 
+        <Section title={t('settings.archive')}>
+          <div className="space-y-3">
+            {workspace.trashedProjects.length > 0 && (
+              <div>
+                <div className="mb-1 text-xs font-semibold" style={{ color: 'var(--muted)' }}>{t('settings.projTrash')}</div>
+                {workspace.trashedProjects.map((p) => (
+                  <div key={p.id} className="flex items-center gap-2 py-0.5 text-sm">
+                    <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                    <button className="btn !py-0.5 text-xs" onClick={async () => { await api.invoke('project:restore', p.id); await refresh() }}>{t('settings.restore')}</button>
+                    <button
+                      className="btn !py-0.5 text-xs"
+                      onClick={async () => {
+                        if (!(await confirmDialog(t('sidebar.confirmPurgeProject')))) return
+                        await api.invoke('project:purge', p.id)
+                        await refresh()
+                      }}
+                    >
+                      {t('settings.purge')}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {workspace.projects.map((p) => {
+              const hasArchive = p.archivedChats.length > 0 || p.trashedDocs.length > 0
+              if (!hasArchive) return null
+              return (
+                <div key={p.project.id} className="rounded border p-2" style={{ borderColor: 'var(--border)' }}>
+                  <div className="text-sm font-medium">{p.project.name}</div>
+                  {p.archivedChats.length > 0 && (
+                    <div className="mt-1">
+                      <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.archivedChats')}</div>
+                      {p.archivedChats.map((c) => (
+                        <div key={c.id} className="flex items-center gap-2 py-0.5 text-sm">
+                          <span className="min-w-0 flex-1 truncate">{c.title}</span>
+                          <button className="btn !py-0.5 text-xs" onClick={async () => { await api.invoke('chat:restore', c.id); await refresh() }}>{t('settings.restore')}</button>
+                          <button className="btn !py-0.5 text-xs" onClick={async () => { if (!(await confirmDialog(t('sidebar.confirmPurgeChat')))) return; await api.invoke('chat:purge', c.id); await refresh() }}>{t('settings.purge')}</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {p.trashedDocs.length > 0 && (
+                    <div className="mt-1">
+                      <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.trashedDocs')}</div>
+                      {p.trashedDocs.map((doc) => (
+                        <div key={doc.id} className="flex items-center gap-2 py-0.5 text-sm">
+                          <span className="min-w-0 flex-1 truncate">{doc.title}</span>
+                          <button className="btn !py-0.5 text-xs" onClick={async () => { await api.invoke('doc:restore', doc.id); await refresh() }}>{t('settings.restore')}</button>
+                          <button className="btn !py-0.5 text-xs" onClick={async () => { if (!(await confirmDialog(t('sidebar.confirmPurgeDoc')))) return; await api.invoke('doc:purge', doc.id); await refresh() }}>{t('settings.purge')}</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+            {workspace.trashedProjects.length === 0 && !workspace.projects.some((p) => p.archivedChats.length > 0 || p.trashedDocs.length > 0) && (
+              <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.archiveEmpty')}</div>
+            )}
+          </div>
+        </Section>
+
         <Section title={t('settings.version')}>
           <label className="flex items-center gap-2 text-sm">
             <input
