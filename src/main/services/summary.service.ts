@@ -7,7 +7,8 @@ import type {
   GenericResourceSummary,
   ProjectSummariesOverview,
   ResourceSummary,
-  StorySummary
+  StorySummary,
+  SummarySearchResult
 } from '@shared/types'
 import { loadApiSettings, type ApiSettings } from './api-settings'
 import { loadConfig } from './config.service'
@@ -30,6 +31,7 @@ import { atomicWriteJson, nowIso, readJson } from '../util'
 import { join } from 'path'
 import { getUserDataDir } from '../paths'
 import { computeSourceInfo, isSourceStale, SUMMARY_SCHEMA_VERSION } from '../summary-source'
+import { computeDefaultActive } from '../summary-relevance'
 import { EVENTS } from '@shared/ipc'
 import { broadcast } from '../window'
 
@@ -764,6 +766,59 @@ export async function listProjectSummaries(projectId: string): Promise<ProjectSu
   )
   // 资源区只展示已蒸馏或正在蒸馏的资源（未蒸馏且未生成的隐藏，避免堆积）
   return { docs, chats, resources: resources.filter((r) => r.distilled || r.generating) }
+}
+
+/** 该对话当前默认激活的注入键（相关度采样，供渲染层展示默认开启项并在首条消息冻结） */
+export async function getDefaultActiveKeys(chatId: string): Promise<string[]> {
+  const { chat } = await getChat(chatId)
+  const cfg = await loadConfig()
+  const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
+  return computeDefaultActive(chat, tree, cfg)
+}
+
+/** 摘要可检索文本（零 LLM，供搜索匹配） */
+function summarySearchText(s: ResourceSummary | DocSummary | ChatSummary | null): string {
+  if (!s) return ''
+  if ('items' in s && Array.isArray(s.items)) {
+    return s.items.map((i) => i.summary).join(' ')
+  }
+  const parts: string[] = []
+  const o = s as unknown as Record<string, unknown>
+  parts.push(String(o.overview ?? ''))
+  for (const key of ['keyPoints', 'keyTerms', 'keySettings', 'keyQuotes']) {
+    if (Array.isArray(o[key])) parts.push((o[key] as unknown[]).map(String).join(' '))
+  }
+  if (Array.isArray(o.characters)) {
+    for (const c of o.characters as Record<string, unknown>[]) {
+      parts.push(String(c.name ?? ''), Array.isArray(c.aliases) ? (c.aliases as unknown[]).map(String).join(' ') : '', String(c.role ?? ''))
+    }
+  }
+  if (Array.isArray(o.plot)) parts.push((o.plot as Record<string, unknown>[]).map((p) => String(p.summary ?? '')).join(' '))
+  return parts.join(' ')
+}
+
+/** 在项目内搜索摘要（标题 + 摘要文本子串匹配，大小写不敏感），用于注入搜索框手动激活 */
+export async function searchProjectSummaries(projectId: string, query: string): Promise<SummarySearchResult[]> {
+  const q = query.trim().toLowerCase()
+  if (!q) return []
+  const snap = await buildSnapshot()
+  const tree = snap.projects.find((p) => p.project.id === projectId)
+  if (!tree) return []
+
+  const results: SummarySearchResult[] = []
+  const hit = (title: string, text: string): boolean => title.toLowerCase().includes(q) || text.toLowerCase().includes(q)
+  const push = (key: string, kind: 'doc' | 'chat' | 'res', title: string, s: ResourceSummary | DocSummary | ChatSummary | null): void => {
+    const text = summarySearchText(s)
+    if (!hit(title, text)) return
+    const preview = text.slice(0, 80)
+    results.push({ key, kind, title, preview, updatedAt: (s as { updatedAt?: string } | null)?.updatedAt })
+  }
+
+  for (const d of tree.docs) push(`doc:${d.id}`, 'doc', d.title, await readDocSummary(projectId, d.id))
+  for (const c of tree.chats) push(`chat:${c.id}`, 'chat', c.title, await readChatSummary(projectId, c.id))
+  for (const r of tree.resources) push(`res:${r.id}`, 'res', r.name, await readResourceSummary(projectId, r.id))
+
+  return results.slice(0, 20)
 }
 
 // ---------------------------------------------------------------------------

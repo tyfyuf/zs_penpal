@@ -22,6 +22,7 @@ import type {
   ResourceSummary,
   StreamDonePayload,
   StreamRequest,
+  SummarySearchResult,
   UploadResult,
   UsageSnapshot,
   WorkspaceSnapshot
@@ -128,6 +129,8 @@ export const IPC = {
   summaryRegenerateDoc: 'summary:regenerateDoc',
   summaryRegenerateChat: 'summary:regenerateChat',
   summaryQueueChat: 'summary:queueChat',
+  summaryDefaultActive: 'summary:defaultActive',
+  summarySearch: 'summary:search',
   usageGet: 'usage:get',
   gitEnsure: 'git:ensure',
   gitCommit: 'git:commit',
@@ -213,6 +216,8 @@ export interface IpcApi {
   [IPC.summaryRegenerateDoc]: { req: string; res: { ok: boolean; error?: string } }
   [IPC.summaryRegenerateChat]: { req: string; res: { ok: boolean; error?: string } }
   [IPC.summaryQueueChat]: { req: string; res: void }
+  [IPC.summaryDefaultActive]: { req: string; res: string[] }
+  [IPC.summarySearch]: { req: { projectId: string; query: string }; res: SummarySearchResult[] }
   [IPC.usageGet]: { req: void; res: UsageSnapshot }
   [IPC.gitEnsure]: { req: { consent: boolean }; res: { ok: boolean; reason?: string; path?: string } }
   [IPC.gitCommit]: { req: string; res: { ok: boolean; committed?: boolean; error?: string } }

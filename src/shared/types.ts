@@ -215,6 +215,15 @@ export interface SummaryInjectionConfig {
   }
 }
 
+/** 摘要搜索结果（注入搜索框用） */
+export interface SummarySearchResult {
+  key: string
+  kind: 'doc' | 'chat' | 'res'
+  title: string
+  preview: string
+  updatedAt?: string
+}
+
 /** 摘要区（左侧栏）展示的项目摘要概览 */
 export interface ProjectSummariesOverview {
   docs: { docId: string; title: string; hasSummary: boolean; updatedAt?: string; generating: boolean }[]

@@ -19,7 +19,8 @@ import type {
   ChatMeta,
   ContextRange,
   ProjectSummariesOverview,
-  StreamContextRange
+  StreamContextRange,
+  SummarySearchResult
 } from '@shared/types'
 import type { Tab } from '../../store/app.store'
 import { useAppStore } from '../../store/app.store'
@@ -73,6 +74,11 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   const [activeInjections, setActiveInjections] = useState<string[] | null>(null)
   /** 对话开始后手动开启、尚未随消息使用的键（仍可自由关闭；发送消息后并入 active） */
   const [pendingEnabled, setPendingEnabled] = useState<string[]>([])
+  /** 该对话默认激活的注入键（相关度采样结果，首条消息前的“默认开”） */
+  const [defaultActive, setDefaultActive] = useState<string[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<SummarySearchResult[]>([])
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const newSummaryNotifiedRef = useRef(false)
   const pendingReasonRef = useRef<'context' | 'summary' | 'both' | null>(null)
   const pendingNewlyEnabledRef = useRef<string[]>([])
@@ -108,6 +114,12 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     if (!chat?.projectId) return
     void api.invoke('summary:listProject', chat.projectId).then(setOverview).catch(() => {})
   }, [chat?.projectId, summaryRevision])
+
+  // 默认激活集（相关度采样），随摘要变化刷新
+  useEffect(() => {
+    if (!chat?.id) return
+    void api.invoke('summary:defaultActive', chat.id).then(setDefaultActive).catch(() => setDefaultActive([]))
+  }, [chat?.id, summaryRevision])
 
   // 流式订阅
   useEffect(() => {
@@ -286,12 +298,37 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
         setRegeneratePrompt(true)
       }
     } else {
-      // 对话开始前：自由开关（记录到 disabled）
-      const enabled = !disabledInjections.includes(key)
-      const next = enabled ? [...disabledInjections, key] : disabledInjections.filter((k) => k !== key)
-      setDisabledInjections(next)
-      void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: next } } })
+      // 对话开始前：默认开启项可关（记 disabled）；默认关闭项可开（记 pending）
+      const inDefault = defaultActive.includes(key)
+      let nextDisabled = disabledInjections
+      let nextPending = pendingEnabled
+      if (inDefault) {
+        const enabled = !disabledInjections.includes(key)
+        nextDisabled = enabled ? [...disabledInjections, key] : disabledInjections.filter((k) => k !== key)
+        setDisabledInjections(nextDisabled)
+      } else {
+        const enabled = pendingEnabled.includes(key)
+        nextPending = enabled ? pendingEnabled.filter((k) => k !== key) : [...pendingEnabled, key]
+        setPendingEnabled(nextPending)
+      }
+      void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: nextDisabled, pending: nextPending } } })
     }
+  }
+
+  async function runSearch(q: string): Promise<void> {
+    setSearchQuery(q)
+    if (searchTimer.current) clearTimeout(searchTimer.current)
+    if (!q.trim() || !chat?.projectId) {
+      setSearchResults([])
+      return
+    }
+    searchTimer.current = setTimeout(async () => {
+      try {
+        setSearchResults(await api.invoke('summary:search', { projectId: chat.projectId!, query: q }))
+      } catch {
+        setSearchResults([])
+      }
+    }, 300)
   }
 
   async function send(regenerate = false): Promise<void> {
@@ -300,9 +337,11 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     const requestId = crypto.randomUUID()
     const userMessageId = crypto.randomUUID()
     if (!regenerate) {
-      // 冻结激活键：首条消息 = 当前开启项；此后 = 把 pending 并入 active（锁定）
+      // 冻结激活键：首条消息 = 默认采样集 ∪ 手动开启(pending) − 手动关闭(disabled)
       if (messages.length === 0) {
-        const onKeys = injectionItems.filter((i) => !disabledInjections.includes(i.key)).map((i) => i.key)
+        const onKeys = injectionItems
+          .filter((i) => (defaultActive.includes(i.key) || pendingEnabled.includes(i.key)) && !disabledInjections.includes(i.key))
+          .map((i) => i.key)
         setActiveInjections(onKeys)
         setPendingEnabled([])
         void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: disabledInjections, active: onKeys, pending: [] } } })
@@ -531,31 +570,59 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
             {started && <span className="text-[10px]" style={{ color: 'var(--warn)' }}>{t('chat.injectionLockedHint')}</span>}
           </button>
           {injectionsOpen && (
-            <div className="mt-1 max-h-40 space-y-0.5 overflow-y-auto">
-              {injectionItems.map((item) => {
-                const enabled = started
-                  ? (activeInjections?.includes(item.key) ?? false) || pendingEnabled.includes(item.key)
-                  : !disabledInjections.includes(item.key)
-                const locked = started && (activeInjections?.includes(item.key) ?? false)
-                return (
-                  <label
-                    key={item.key}
-                    className="flex items-center gap-2 rounded px-1 py-0.5 text-xs hover:bg-[var(--panel3)]"
-                    style={{ opacity: locked || streaming ? 0.6 : 1, cursor: locked || streaming ? 'not-allowed' : 'pointer' }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={enabled}
-                      disabled={locked || !!streaming || !!titleGenerating}
-                      onChange={() => toggleInjection(item.key)}
-                    />
-                    <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                    <span style={{ color: enabled ? 'var(--ok)' : 'var(--muted)' }}>
-                      {enabled ? t('chat.injectionOn') : t('chat.injectionOff')}
-                    </span>
-                  </label>
-                )
-              })}
+            <div className="mt-1 space-y-0.5">
+              <input
+                className="input !py-1 text-xs"
+                placeholder={t('chat.searchInjections')}
+                value={searchQuery}
+                onChange={(e) => void runSearch(e.target.value)}
+              />
+              {searchResults.length > 0 && (
+                <div className="max-h-28 space-y-0.5 overflow-y-auto rounded border p-1" style={{ borderColor: 'var(--border)' }}>
+                  {searchResults
+                    .filter((r) => injectionItems.some((i) => i.key === r.key))
+                    .map((r) => (
+                      <div key={r.key} className="flex items-center gap-2 text-xs">
+                        <button
+                          className="flex-1 truncate rounded px-1 py-0.5 text-left hover:bg-[var(--panel3)]"
+                          onClick={() => toggleInjection(r.key)}
+                        >
+                          <span className="font-medium">{r.title}</span>
+                          <span className="ml-1" style={{ color: 'var(--muted)' }}>{r.preview}</span>
+                        </button>
+                        <span className="shrink-0" style={{ color: 'var(--muted)' }}>
+                          {t(r.kind === 'doc' ? 'chat.docSummaryShort' : r.kind === 'chat' ? 'chat.chatSummaryShort' : 'chat.resSummaryShort')}
+                        </span>
+                      </div>
+                    ))}
+                </div>
+              )}
+              <div className="max-h-40 space-y-0.5 overflow-y-auto">
+                {injectionItems.map((item) => {
+                  const enabled = started
+                    ? (activeInjections?.includes(item.key) ?? false) || pendingEnabled.includes(item.key)
+                    : !disabledInjections.includes(item.key) && (defaultActive.includes(item.key) || pendingEnabled.includes(item.key))
+                  const locked = started && (activeInjections?.includes(item.key) ?? false)
+                  return (
+                    <label
+                      key={item.key}
+                      className="flex items-center gap-2 rounded px-1 py-0.5 text-xs hover:bg-[var(--panel3)]"
+                      style={{ opacity: locked || streaming ? 0.6 : 1, cursor: locked || streaming ? 'not-allowed' : 'pointer' }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={enabled}
+                        disabled={locked || !!streaming || !!titleGenerating}
+                        onChange={() => toggleInjection(item.key)}
+                      />
+                      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                      <span style={{ color: enabled ? 'var(--ok)' : 'var(--muted)' }}>
+                        {enabled ? t('chat.injectionOn') : t('chat.injectionOff')}
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
             </div>
           )}
         </div>

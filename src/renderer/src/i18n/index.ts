@@ -104,6 +104,10 @@ const zh: Record<string, string> = {
   'chat.docSummary': '文档摘要 · {name}',
   'chat.chatSummary': '对话摘要 · {name}',
   'chat.resSummary': '资源摘要 · {name}',
+  'chat.searchInjections': '搜索摘要并激活注入…',
+  'chat.docSummaryShort': '文档',
+  'chat.chatSummaryShort': '对话',
+  'chat.resSummaryShort': '资源',
 
   'context.title': '上下文范围',
   'context.expandOnly': '仅可扩大',
@@ -343,6 +347,10 @@ const en: Record<string, string> = {
   'chat.docSummary': 'Document summary · {name}',
   'chat.chatSummary': 'Chat summary · {name}',
   'chat.resSummary': 'Resource summary · {name}',
+  'chat.searchInjections': 'Search summaries and activate injection…',
+  'chat.docSummaryShort': 'Doc',
+  'chat.chatSummaryShort': 'Chat',
+  'chat.resSummaryShort': 'Res',
 
   'context.title': 'Context range',
   'context.expandOnly': 'Expand only',
