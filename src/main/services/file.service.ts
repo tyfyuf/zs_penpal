@@ -17,6 +17,7 @@ import type {
 } from '@shared/types'
 import { getConfigCached } from './config.service'
 import { appendJsonl, atomicWrite, atomicWriteJson, newId, nowIso, readJson, readJsonl } from '../util'
+import { computeSourceInfo } from '../summary-source'
 
 // ---------------------------------------------------------------------------
 // 目录结构（依据 tech-stack 7.2，生命周期状态存于元数据 JSON，不依赖目录移动）
@@ -573,10 +574,23 @@ export async function readSnapshot(projectId: string, chatId: string, snapshotId
 // 摘要读写
 // ---------------------------------------------------------------------------
 
-/** 读取文档摘要；旧格式（三字段版）视为无摘要，触发重新生成 */
+/** 读取文档摘要；旧格式（三字段版）视为无摘要；v1 内嵌全文快照版迁移为指纹 */
 export async function readDocSummary(projectId: string, docId: string): Promise<DocSummary | null> {
-  const s = await readJson<DocSummary>(docSummaryPath(projectId, docId))
+  const s = await readJson<DocSummary & { snapshot?: string; snapshotLength?: number }>(
+    docSummaryPath(projectId, docId)
+  )
   if (!s || !Array.isArray(s.characters)) return null
+  // 旧格式迁移：剥离内嵌全文快照，换为源指纹（省约一半存储）
+  if (!s.sourceFingerprint && typeof s.snapshot === 'string') {
+    const { snapshot: _snap, snapshotLength: _len, ...rest } = s
+    const migrated: DocSummary = {
+      ...rest,
+      ...computeSourceInfo(s.snapshot),
+      updatedAt: s.updatedAt ?? nowIso()
+    }
+    await writeDocSummary(projectId, docId, migrated)
+    return migrated
+  }
   return s
 }
 

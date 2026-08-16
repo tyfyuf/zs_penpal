@@ -29,6 +29,7 @@ import {
 import { atomicWriteJson, nowIso, readJson } from '../util'
 import { join } from 'path'
 import { getUserDataDir } from '../paths'
+import { computeSourceInfo, isSourceStale, SUMMARY_SCHEMA_VERSION } from '../summary-source'
 import { EVENTS } from '@shared/ipc'
 import { broadcast } from '../window'
 
@@ -64,40 +65,40 @@ type Lang = 'zh' | 'en'
 
 function storyPrompt(lang: Lang): string {
   return lang === 'en'
-    ? `You are a story decomposition assistant. Read the full story below and output a JSON object (nothing else) with these fields:
-- "overview": a summary of the main plot (one paragraph, as complete as possible)
-- "characters": array of characters, each with "name", "aliases" (array), "role", "goal"
-- "plot": array of plot points in story order, each with "id" (e.g. "s1"), "function" (advance/reveal/turn/foreshadow/resolve), "summary" (what happens at this point, as specific as possible)
-- "foreshadowing": array, each with "planted" (what was set up) and "status" ("resolved" or "unresolved")
-- "keySettings": array of key settings
+    ? `You are a story decomposition assistant. Read the full story below and output EXACTLY ONE JSON object (nothing else — no code fences, no prose), with these fields:
+- "overview": the main plot in one paragraph, at most 200 words, as complete as possible
+- "characters": array of characters, each with "name", "aliases" (array; empty if none), "role", "goal" (empty string if none)
+- "plot": array of plot points in story order, each with "id" (e.g. "s1"), "function" (exactly one of: advance/reveal/turn/foreshadow/resolve), "summary" (what happens, at most 80 words, be specific)
+- "foreshadowing": array, each with "planted" (what was set up) and "status" (exactly "resolved" or "unresolved")
+- "keySettings": array of key settings, each at most 40 words
 - "keyQuotes": array of key quotes
-Cover the entire text and do not omit important plot points. All content must be written in English. Output valid JSON only.`
-    : `你是故事拆解助手。请阅读下面的故事全文，输出一个 JSON 对象（不要输出其他内容），字段如下：
-- "overview"：主线剧情总览（一段话，尽量完整）
-- "characters"：人物数组，每项含 "name"（名字）、"aliases"（别名数组）、"role"（身份）、"goal"（目标）
-- "plot"：按故事顺序的情节点数组，每项含 "id"（如 s1）、"function"（推进/揭示/转折/铺垫/收束）、"summary"（这个情节点发生了什么，尽量具体）
-- "foreshadowing"：伏笔数组，每项含 "planted"（埋了什么）、"status"（resolved 或 unresolved）
-- "keySettings"：关键设定（字符串数组）
-- "keyQuotes"：关键台词（字符串数组）
-要求覆盖全文，不要遗漏重要情节。只输出合法 JSON。`
+Cover the entire text and do not omit important plot points. Leave a field empty ([] or "") when the information is absent — DO NOT invent. All content in English. Output valid JSON only.`
+    : `你是故事拆解助手。请阅读下面的故事全文，输出恰好一个 JSON 对象（不要输出 JSON 以外的任何内容，不要用代码块包裹），字段如下：
+- "overview"：主线剧情总览，一段话，不超过 200 字，尽量完整
+- "characters"：人物数组，每项含 "name"（名字）、"aliases"（别名数组，无则空数组）、"role"（身份）、"goal"（目标，无则空字符串）
+- "plot"：按故事顺序的情节点数组，每项含 "id"（如 s1）、"function"（只能取：推进/揭示/转折/铺垫/收束）、"summary"（这个情节点发生了什么，每点不超过 80 字，尽量具体）
+- "foreshadowing"：伏笔数组，每项含 "planted"（埋了什么）、"status"（只能取 resolved 或 unresolved）
+- "keySettings"：关键设定，字符串数组，每条不超过 40 字
+- "keyQuotes"：关键台词，字符串数组
+要求覆盖全文、不遗漏重要情节；信息不足的字段留空数组或空字符串，禁止编造。只输出合法 JSON。`
 }
 
 function genericPrompt(lang: Lang): string {
   return lang === 'en'
-    ? `You are a text decomposition assistant. Read the full text below and output a JSON object (nothing else) with these fields:
-- "docType": the content type (e.g. code/transcript/legal/table/narrative/email/encyclopedia)
-- "overview": a summary of the content (one paragraph)
-- "keyPoints": key points (array of strings, ordered by importance)
-- "keyTerms": key terms/entities (array of strings)
-- "structure": an overview of the structure/sections
-All content must be written in English. Output valid JSON only.`
-    : `你是文本拆解助手。请阅读下面的文本全文，输出一个 JSON 对象（不要输出其他内容），字段如下：
-- "docType"：内容类型（如 代码/对话记录/法律条款/表格/叙事/邮件/百科）
-- "overview"：内容概述（一段话）
-- "keyPoints"：核心要点（字符串数组，按重要性排列）
-- "keyTerms"：关键术语/实体（字符串数组）
-- "structure"：结构/章节概览
-只输出合法 JSON。`
+    ? `You are a text decomposition assistant. Read the full text below and output EXACTLY ONE JSON object (nothing else — no code fences, no prose), with these fields:
+- "docType": the content type (one of: code/transcript/legal/table/narrative/email/encyclopedia/data/reference)
+- "overview": a summary of the content, one paragraph, at most 200 words
+- "keyPoints": key points, array of strings ordered by importance, each at most 80 words
+- "keyTerms": key terms/entities, array of strings, each at most 40 words
+- "structure": an overview of the structure/sections, at most 200 words
+Leave a field empty ([] or "") when absent — DO NOT invent. All content in English. Output valid JSON only.`
+    : `你是文本拆解助手。请阅读下面的文本全文，输出恰好一个 JSON 对象（不要输出 JSON 以外的任何内容，不要用代码块包裹），字段如下：
+- "docType"：内容类型（只能取：代码/对话记录/法律条款/表格/叙事/邮件/百科/数据/参考）
+- "overview"：内容概述，一段话，不超过 200 字
+- "keyPoints"：核心要点，字符串数组，按重要性排列，每条不超过 80 字
+- "keyTerms"：关键术语/实体，字符串数组，每条不超过 40 字
+- "structure"：结构/章节概览，不超过 200 字
+信息不足的字段留空数组或空字符串，禁止编造。只输出合法 JSON。`
 }
 
 function classifyPrompt(lang: Lang): string {
@@ -423,7 +424,7 @@ async function classifyByLlm(content: string, cfg: ApiSettings): Promise<Classif
 // 文档摘要（故事拆解）
 // ---------------------------------------------------------------------------
 
-/** 估算“增删改字符总量”（行级差异 + 长度差，PRD 7.2 触发条件） */
+/** 估算“增删改字符总量”（行级差异 + 长度差）；已由源指纹失效检测取代，保留仅供参考 */
 export function estimateChangedChars(prev: string, curr: string): number {
   if (prev === curr) return 0
   const a = prev.split('\n')
@@ -440,7 +441,7 @@ async function generateDocSummary(projectId: string, docId: string, content: str
   void projectId
   void docId
   const story = await callStoryDecomposition(content, cfg)
-  return { ...story, snapshotLength: content.length, snapshot: content, updatedAt: nowIso() }
+  return { ...story, ...computeSourceInfo(content), updatedAt: nowIso() }
 }
 
 /**
@@ -468,10 +469,7 @@ export async function ensureDocSummary(projectId: string, docId: string, current
     }
   }
 
-  const changed = estimateChangedChars(existing.snapshot ?? '', currentContent)
-  const netAdded = Math.max(0, currentContent.length - (existing.snapshot?.length ?? 0))
-  const needUpdate = changed / Math.max(existing.snapshotLength, 1) > 0.3 || netAdded > 500
-  if (!needUpdate) return existing
+  if (!isSourceStale(existing, currentContent)) return existing
 
   const key = `doc:${docId}`
   markGenerating(key)
@@ -573,7 +571,13 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
       role: t.role === 'user' ? ('user' as const) : ('assistant' as const),
       summary: rawItems[i] ? String(rawItems[i].summary ?? '') : ''
     }))
-    await writeChatSummary(chat.projectId, chatId, { items, updatedAt: nowIso(), lastMessageId, messageCount })
+    await writeChatSummary(chat.projectId, chatId, {
+      schemaVersion: SUMMARY_SCHEMA_VERSION,
+      items,
+      updatedAt: nowIso(),
+      lastMessageId,
+      messageCount
+    })
   } finally {
     markDone(key)
   }
@@ -689,8 +693,8 @@ async function distillResourceInner(
   try {
     const summary: ResourceSummary =
       type === 'story'
-        ? { ...(await callStoryDecomposition(content, settings)), updatedAt: nowIso() }
-        : { ...(await callGenericDecomposition(content, settings)), updatedAt: nowIso() }
+        ? { ...(await callStoryDecomposition(content, settings)), ...computeSourceInfo(content), updatedAt: nowIso() }
+        : { ...(await callGenericDecomposition(content, settings)), ...computeSourceInfo(content), updatedAt: nowIso() }
     await writeResourceSummary(projectId, resourceId, summary)
     return { ok: true, summary, detectedType: type }
   } catch (err) {
@@ -700,6 +704,23 @@ async function distillResourceInner(
 
 export async function undistillResource(projectId: string, resourceId: string): Promise<void> {
   await removeResourceSummary(projectId, resourceId)
+}
+
+/** 读时惰性检测资源摘要是否过期；旧摘要无指纹则用当前内容补算落盘（视为新鲜，此后可检测） */
+export async function checkResourceSummaryStale(projectId: string, resourceId: string): Promise<boolean> {
+  const s = await readResourceSummary(projectId, resourceId)
+  if (!s) return false
+  try {
+    const { content } = await readResource(projectId, resourceId)
+    if (!s.sourceFingerprint) {
+      const patched: ResourceSummary = { ...s, ...computeSourceInfo(content) }
+      await writeResourceSummary(projectId, resourceId, patched)
+      return false
+    }
+    return isSourceStale(s, content)
+  } catch {
+    return false
+  }
 }
 
 export async function listProjectSummaries(projectId: string): Promise<ProjectSummariesOverview> {
@@ -737,7 +758,8 @@ export async function listProjectSummaries(projectId: string): Promise<ProjectSu
     tree.resources.map(async (r) => {
       const s = await readResourceSummary(projectId, r.id)
       const generating = isSummaryGenerating(`res:${r.id}`)
-      return { resourceId: r.id, name: r.name, distilled: !!s, type: s?.type, updatedAt: s?.updatedAt, generating }
+      const stale = s ? await checkResourceSummaryStale(projectId, r.id) : false
+      return { resourceId: r.id, name: r.name, distilled: !!s, type: s?.type, updatedAt: s?.updatedAt, generating, stale }
     })
   )
   // 资源区只展示已蒸馏或正在蒸馏的资源（未蒸馏且未生成的隐藏，避免堆积）

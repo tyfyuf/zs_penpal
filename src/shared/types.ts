@@ -127,12 +127,19 @@ export interface StorySummary {
   keyQuotes: string[]
 }
 
-/** 写作文档摘要 = 故事拆解 + 快照（用于 PRD 7.2 触发条件） */
-export interface DocSummary extends StorySummary {
-  /** 上次摘要时的文档快照长度（触发条件分母） */
-  snapshotLength: number
-  /** 上次摘要时的文档全文快照（计算“增删改字符总量”） */
-  snapshot: string
+/** 摘要源内容指纹（三级新鲜度判定 FRESH/STALE/NEEDS_REBUILD 的信号源，替代内嵌全文快照） */
+export interface SummarySourceInfo {
+  schemaVersion: number
+  /** 规范化（去空白/标点）后全文的 sha256 */
+  sourceFingerprint: string
+  /** 原始字符数 */
+  sourceLength: number
+  /** 规范化后字符数 */
+  sourceNormalizedLength: number
+}
+
+/** 写作文档摘要 = 故事拆解 + 源指纹（不再内嵌全文快照） */
+export interface DocSummary extends StorySummary, SummarySourceInfo {
   updatedAt: string
 }
 
@@ -144,6 +151,7 @@ export interface ChatSummaryItem {
 
 /** 对话摘要：按顺序逐条生成的简短摘要 */
 export interface ChatSummary {
+  schemaVersion?: number
   items: ChatSummaryItem[]
   updatedAt: string
   /** 用于变化检测：最后一条消息 id */
@@ -162,7 +170,7 @@ export interface GenericResourceSummary {
 }
 
 /** 资源摘要：故事拆解 或 通用拆解 */
-export type ResourceSummary = { updatedAt: string } & (StorySummary | GenericResourceSummary)
+export type ResourceSummary = SummarySourceInfo & { updatedAt: string } & (StorySummary | GenericResourceSummary)
 
 export interface DistillResult {
   ok: boolean
@@ -226,6 +234,8 @@ export interface ProjectSummariesOverview {
     type?: 'story' | 'other'
     updatedAt?: string
     generating: boolean
+    /** 源内容已显著变化，摘要待更新（黄标） */
+    stale?: boolean
   }[]
 }
 

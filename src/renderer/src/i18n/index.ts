@@ -146,6 +146,7 @@ const zh: Record<string, string> = {
   'summary.regenerateFail': '重新生成失败',
   'summary.distillHint': '未蒸馏的资源请到「资源」区点击蒸馏按钮',
   'summary.generating': '生成中…',
+  'summary.stale': '待更新',
 
   'settings.title': '设置',
   'settings.workspace': '工作目录',
@@ -384,6 +385,7 @@ const en: Record<string, string> = {
   'summary.regenerateFail': 'Regeneration failed',
   'summary.distillHint': 'To distill other resources, use the distill button in the Resources section',
   'summary.generating': 'Generating…',
+  'summary.stale': 'Outdated',
 
   'settings.title': 'Settings',
   'settings.workspace': 'Workspace folder',

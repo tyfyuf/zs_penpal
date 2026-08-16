@@ -234,9 +234,9 @@ function collectApplicableKeys(chat: ChatMeta, cfg: AppConfig, tree: ProjectTree
 
 /**
  * 计算激活键：对话开始（首条消息）后以冻结的 active 为准（pending 为已开启但尚未随消息使用的键，同样注入）；
- * 此后新加入摘要系统的摘要默认关闭，由用户手动开启。
+ * 首条消息前：默认注入「相关度采样 + 用户置顶(pending)」键（不再是全部），此后新加入摘要系统的摘要默认关闭，由用户手动开启。
  */
-function computeActiveKeys(chat: ChatMeta, applicable: string[]): Set<string> {
+function computeActiveKeys(chat: ChatMeta, applicable: string[], defaultSelected: Set<string>): Set<string> {
   const frozen = chat.injectionOverrides?.active
   const pending = chat.injectionOverrides?.pending ?? []
   const disabled = chat.injectionOverrides?.disabled ?? []
@@ -244,11 +244,88 @@ function computeActiveKeys(chat: ChatMeta, applicable: string[]): Set<string> {
   for (const k of applicable) {
     if (frozen) {
       if (frozen.includes(k) || pending.includes(k)) active.add(k)
-    } else if (!disabled.includes(k)) {
-      active.add(k)
+    } else if (defaultSelected.has(k) || pending.includes(k) || k === 'fulltext') {
+      if (!disabled.includes(k)) active.add(k)
     }
   }
   return active
+}
+
+// ---------------------------------------------------------------------------
+// 内容相关度采样：默认注入「最相关 N 条」而非全部，避免上百文档/对话/资源摘要堵塞上下文。
+// 相关度 = 实体重叠（角色/别名/关键设定/术语）+ 新鲜度（updatedAt），零 LLM。
+// ---------------------------------------------------------------------------
+
+const RELEVANCE_SAMPLE: Record<'doc' | 'chat' | 'res', number> = { doc: 10, chat: 10, res: 10 }
+
+function summaryKeyKind(k: string): 'doc' | 'chat' | 'res' {
+  if (k.startsWith('doc:')) return 'doc'
+  if (k.startsWith('chat:')) return 'chat'
+  return 'res'
+}
+
+/** 从摘要提取实体集合（角色名/别名/关键设定/术语），供相关度打分 */
+function extractSummaryEntities(s: unknown): string[] {
+  if (!s || typeof s !== 'object') return []
+  const o = s as Record<string, unknown>
+  const ents = new Set<string>()
+  const chars = Array.isArray(o.characters) ? (o.characters as Record<string, unknown>[]) : []
+  for (const c of chars) {
+    const name = String(c.name ?? '').trim().toLowerCase()
+    if (name) ents.add(name)
+    const aliases = Array.isArray(c.aliases) ? (c.aliases as unknown[]).map(String) : []
+    for (const a of aliases) {
+      const t = a.trim().toLowerCase()
+      if (t) ents.add(t)
+    }
+  }
+  const push = (arr: unknown): void => {
+    if (Array.isArray(arr)) for (const v of arr) {
+      const t = String(v).trim().toLowerCase()
+      if (t) ents.add(t)
+    }
+  }
+  push(o.keySettings)
+  push(o.keyTerms)
+  return [...ents]
+}
+
+/** 相关度锚点：文档级/上下文对话取当前文档摘要的实体 */
+async function buildAnchorEntities(chat: ChatMeta): Promise<Set<string>> {
+  const ids = new Set<string>()
+  if ((chat.kind === 'doc' || chat.kind === 'context') && chat.docId) {
+    const s = await readDocSummary(chat.projectId, chat.docId)
+    for (const e of extractSummaryEntities(s)) ids.add(e)
+  }
+  return ids
+}
+
+/** 从候选键中采样每个类型「最相关 N 条」（fulltext 由注入逻辑单独处理，不在此采样） */
+async function selectDefaultKeys(chat: ChatMeta, applicable: string[]): Promise<Set<string>> {
+  const anchor = await buildAnchorEntities(chat)
+  const scored: { key: string; kind: 'doc' | 'chat' | 'res'; overlap: number; updatedAt: string }[] = []
+  for (const k of applicable) {
+    if (k === 'fulltext') continue
+    const kind = summaryKeyKind(k)
+    const id = k.slice(kind === 'doc' ? 4 : kind === 'chat' ? 5 : 4)
+    const s =
+      kind === 'doc'
+        ? await readDocSummary(chat.projectId, id)
+        : kind === 'chat'
+          ? await readChatSummary(chat.projectId, id)
+          : await readResourceSummary(chat.projectId, id)
+    const ents = extractSummaryEntities(s)
+    const overlap = anchor.size ? ents.filter((e) => anchor.has(e)).length : 0
+    scored.push({ key: k, kind, overlap, updatedAt: s?.updatedAt ?? '' })
+  }
+  const out = new Set<string>()
+  for (const kind of ['doc', 'chat', 'res'] as const) {
+    const list = scored
+      .filter((x) => x.kind === kind)
+      .sort((a, b) => b.overlap - a.overlap || b.updatedAt.localeCompare(a.updatedAt))
+    for (const x of list.slice(0, RELEVANCE_SAMPLE[kind])) out.add(x.key)
+  }
+  return out
 }
 
 async function injectSummaries(
@@ -414,7 +491,8 @@ async function buildMessages(
   const settings = await loadApiSettings()
   const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
   const applicable = collectApplicableKeys(chat, cfg, tree)
-  const activeKeys = computeActiveKeys(chat, applicable)
+  const defaultSelected = await selectDefaultKeys(chat, applicable)
+  const activeKeys = computeActiveKeys(chat, applicable, defaultSelected)
   const lang = cfg.language ?? 'zh'
   const en = lang === 'en'
 

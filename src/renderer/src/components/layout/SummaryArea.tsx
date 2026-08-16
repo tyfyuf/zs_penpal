@@ -177,16 +177,19 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
         <div key={r.resourceId} className="flex items-center gap-1 text-[12px]">
           <span
             className="h-1.5 w-1.5 rounded-full"
-            style={{ background: r.generating ? 'var(--warn)' : 'var(--ok)' }}
+            style={{ background: r.generating ? 'var(--warn)' : r.stale ? 'var(--warn)' : 'var(--ok)' }}
           />
           <span className="min-w-0 flex-1 truncate" title={r.name}>
             {r.name}
             {r.generating ? (
               <span className="text-[10px]" style={{ color: 'var(--warn)' }}> · {t('summary.generating')}</span>
             ) : (
-              <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
-                （{r.type === 'story' ? t('summary.typeStory') : t('summary.typeOther')}）
-              </span>
+              <>
+                <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
+                  （{r.type === 'story' ? t('summary.typeStory') : t('summary.typeOther')}）
+                </span>
+                {r.stale && <span className="text-[10px]" style={{ color: 'var(--warn)' }}> · {t('summary.stale')}</span>}
+              </>
             )}
           </span>
           {!r.generating && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewResource(r.resourceId)} />}
