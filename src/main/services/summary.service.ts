@@ -574,9 +574,14 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
     const tailStart = Math.max(0, turns.length - CHAT_TAIL_WINDOW)
     const items = await summarizeTurnItems(client, turns.slice(tailStart), cfg)
 
-    // 历史压缩区间：超过阈值时，把尾部窗口之前的旧消息按 CHAT_COMPACT_BATCH 聚合（增量追加）
+    // 历史压缩区间：消息数超阈值 或 对话 token 估算超输入预算 60% 时，把尾部窗口之前的旧消息按 CHAT_COMPACT_BATCH 聚合（增量追加）
+    const dialogueTokens = estimateInputTokens(
+      turns.map((m) => m.content).join('\n'),
+      cfg.model
+    )
+    const needCompact = turns.length > CHAT_COMPACT_THRESHOLD || dialogueTokens > inputBudget(cfg) * 0.6
     let compacted: ChatSummaryInterval[] = []
-    if (turns.length > CHAT_COMPACT_THRESHOLD) {
+    if (needCompact) {
       const prev = force ? [] : Array.isArray(existing?.compacted) ? existing.compacted : []
       const kept = prev.filter((iv) => iv.endIndex < tailStart)
       compacted = [...kept]
