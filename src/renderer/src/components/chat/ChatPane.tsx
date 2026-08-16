@@ -21,8 +21,7 @@ import type {
   MemoryContext,
   ProjectSummariesOverview,
   StreamContextRange,
-  SummarySearchResult,
-  VectorSearchHit
+  SummarySearchResult
 } from '@shared/types'
 import type { Tab } from '../../store/app.store'
 import { useAppStore } from '../../store/app.store'
@@ -337,19 +336,6 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     }, 300)
   }
 
-  /** C 层向量检索：以模型自述缺口或最后一条用户消息为查询，检索项目原文分块 */
-  async function runVectorSearch(reason: string): Promise<VectorSearchHit[]> {
-    if (!chat?.projectId) return []
-    const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
-    const query = (reason || lastUser || '').trim()
-    if (!query) return []
-    try {
-      return await api.invoke('vector:search', { projectId: chat.projectId, query })
-    } catch {
-      return []
-    }
-  }
-
   /** 附加关联文档（写作文档）到当前对话；与全文注入去重 */
   function attachLinkedDoc(): void {
     if (!chat?.docId) return
@@ -520,12 +506,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
               )}
               {m.role === 'assistant' && m.reasoning && <ReasoningBlock reasoning={m.reasoning} />}
               {m.content}
-              {m.role === 'assistant' && memories[m.id] && (
-                <MemoryCard
-                  memory={memories[m.id]}
-                  onSearch={() => runVectorSearch(memories[m.id]?.reason ?? '')}
-                />
-              )}
+              {m.role === 'assistant' && memories[m.id] && <MemoryCard memory={memories[m.id]} />}
               {m.role === 'assistant' && (
                 <button
                   className="mt-1.5 flex items-center gap-1 text-xs opacity-60 hover:opacity-100"
@@ -767,15 +748,14 @@ function ReasoningBlock({ reasoning }: { reasoning: string }): JSX.Element {
 }
 
 /** “本次记忆”卡：透明展示本次回答使用了哪些摘要/大摘要/向量命中 */
-function MemoryCard({ memory, onSearch }: { memory: MemoryContext; onSearch: () => Promise<VectorSearchHit[]> }): JSX.Element {
+function MemoryCard({ memory }: { memory: MemoryContext }): JSX.Element {
   const [open, setOpen] = useState(true)
-  const [hits, setHits] = useState<VectorSearchHit[] | null>(null)
-  const [searching, setSearching] = useState(false)
   const t = useT()
   const small = memory.small ?? []
   const rollups = memory.rollups ?? []
   const vector = memory.vector ?? []
   const total = small.length + rollups.length + vector.length
+  if (total === 0 && !memory.reason) return <></>
   const line = (kind: 'small' | 'rollup' | 'vector', key: string, title: string, reason?: string): JSX.Element => (
     <div key={key} className="flex items-start gap-1">
       <span style={{ color: kind === 'rollup' ? 'var(--accent)' : kind === 'vector' ? 'var(--warn)' : 'var(--muted)' }}>
@@ -785,46 +765,19 @@ function MemoryCard({ memory, onSearch }: { memory: MemoryContext; onSearch: () 
       {reason && <span className="shrink-0 text-[10px]" style={{ color: 'var(--muted)' }}>· {reason}</span>}
     </div>
   )
-  async function runSearch(): Promise<void> {
-    setSearching(true)
-    try {
-      setHits(await onSearch())
-    } finally {
-      setSearching(false)
-    }
-  }
   return (
     <div className="mt-1.5 rounded-lg border px-2.5 py-1.5 text-xs" style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}>
-      <div className="flex items-center gap-1">
-        <button className="flex min-w-0 flex-1 items-center gap-1" style={{ color: 'var(--muted)' }} onClick={() => setOpen((o) => !o)}>
-          {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          <ListFilter size={12} />
-          {t('chat.memoryCard', { n: total })}
-          {memory.reason && <span className="truncate" style={{ color: 'var(--warn)' }}>· {memory.reason}</span>}
-        </button>
-        <button className="btn !px-1.5 !py-0.5 text-[10px]" disabled={searching} onClick={() => void runSearch()}>
-          {t('chat.vectorSearch')}
-        </button>
-      </div>
+      <button className="flex w-full items-center gap-1" style={{ color: 'var(--muted)' }} onClick={() => setOpen((o) => !o)}>
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <ListFilter size={12} />
+        {t('chat.memoryCard', { n: total })}
+        {memory.reason && <span className="truncate" style={{ color: 'var(--warn)' }}>· {memory.reason}</span>}
+      </button>
       {open && (
         <div className="mt-1 space-y-0.5">
           {small.map((i) => line('small', i.key, i.title))}
           {rollups.map((i) => line('rollup', i.key, i.title, i.reason))}
           {vector.map((i) => line('vector', i.key, i.title, i.reason))}
-          {hits && (
-            <div className="mt-1 space-y-1 border-t pt-1" style={{ borderColor: 'var(--border)' }}>
-              {hits.length === 0 && <div style={{ color: 'var(--muted)' }}>{t('chat.vectorEmpty')}</div>}
-              {hits.map((h) => (
-                <div key={`${h.docId}-${h.index}`} className="rounded bg-[var(--panel3)] px-1.5 py-1">
-                  <div className="flex items-center gap-1">
-                    <span className="truncate font-medium">▸ {h.title} · #{h.index}</span>
-                    <span className="shrink-0" style={{ color: 'var(--muted)' }}>{h.score}</span>
-                  </div>
-                  <div className="mt-0.5 line-clamp-2" style={{ color: 'var(--muted)' }}>{h.text}</div>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       )}
     </div>

@@ -38,6 +38,7 @@ import { join } from 'path'
 import { getUserDataDir } from '../paths'
 import { computeSourceInfo, isSourceStale, SUMMARY_SCHEMA_VERSION } from '../summary-source'
 import { computeDefaultActive } from '../summary-relevance'
+import { logError } from './log.service'
 import { EVENTS } from '@shared/ipc'
 import { broadcast } from '../window'
 
@@ -71,7 +72,12 @@ function markDone(key: string): void {
 
 type Lang = 'zh' | 'en'
 
-function storyPrompt(lang: Lang): string {
+function storyPrompt(lang: Lang, bounded = false): string {
+  const cap = bounded
+    ? (lang === 'en'
+      ? `\nThis is a long text. To fit the output, LIMIT sizes strictly: at most 20 characters, at most 40 plot points, at most 30 foreshadowing items, at most 40 key settings, at most 40 key quotes. Keep only the MOST important ones; omit the rest.`
+      : `\n本文较长。为控制输出，请严格限制规模：人物最多 20 个、情节点最多 40 个、伏笔最多 30 条、关键设定最多 40 条、关键台词最多 40 条。只保留最重要的，其余省略。`)
+    : ''
   return lang === 'en'
     ? `You are a story decomposition assistant. Read the full story below and output EXACTLY ONE JSON object (nothing else — no code fences, no prose), with these fields:
 - "overview": the main plot in one paragraph, at most 200 words, as complete as possible
@@ -80,7 +86,7 @@ function storyPrompt(lang: Lang): string {
 - "foreshadowing": array, each with "planted" (what was set up) and "status" (exactly "resolved" or "unresolved")
 - "keySettings": array of key settings, each at most 40 words
 - "keyQuotes": array of key quotes
-Cover the entire text and do not omit important plot points. Leave a field empty ([] or "") when the information is absent — DO NOT invent. All content in English. Output valid JSON only.`
+Cover the entire text and do not omit important plot points. Leave a field empty ([] or "") when the information is absent — DO NOT invent. All content in English. Output valid JSON only.${cap}`
     : `你是故事拆解助手。请阅读下面的故事全文，输出恰好一个 JSON 对象（不要输出 JSON 以外的任何内容，不要用代码块包裹），字段如下：
 - "overview"：主线剧情总览，一段话，不超过 200 字，尽量完整
 - "characters"：人物数组，每项含 "name"（名字）、"aliases"（别名数组，无则空数组）、"role"（身份）、"goal"（目标，无则空字符串）
@@ -88,10 +94,15 @@ Cover the entire text and do not omit important plot points. Leave a field empty
 - "foreshadowing"：伏笔数组，每项含 "planted"（埋了什么）、"status"（只能取 resolved 或 unresolved）
 - "keySettings"：关键设定，字符串数组，每条不超过 40 字
 - "keyQuotes"：关键台词，字符串数组
-要求覆盖全文、不遗漏重要情节；信息不足的字段留空数组或空字符串，禁止编造。只输出合法 JSON。`
+要求覆盖全文、不遗漏重要情节；信息不足的字段留空数组或空字符串，禁止编造。只输出合法 JSON。${cap}`
 }
 
-function genericPrompt(lang: Lang): string {
+function genericPrompt(lang: Lang, bounded = false): string {
+  const cap = bounded
+    ? (lang === 'en'
+      ? `\nThis is a long text. To fit the output, LIMIT sizes strictly: at most 40 keyPoints and at most 40 keyTerms. Keep only the MOST important ones.`
+      : `\n本文较长。为控制输出，请严格限制规模：keyPoints 最多 40 条、keyTerms 最多 40 条。只保留最重要的。`)
+    : ''
   return lang === 'en'
     ? `You are a text decomposition assistant. Read the full text below and output EXACTLY ONE JSON object (nothing else — no code fences, no prose), with these fields:
 - "docType": the content type (one of: code/transcript/legal/table/narrative/email/encyclopedia/data/reference)
@@ -99,14 +110,14 @@ function genericPrompt(lang: Lang): string {
 - "keyPoints": key points, array of strings ordered by importance, each at most 80 words
 - "keyTerms": key terms/entities, array of strings, each at most 40 words
 - "structure": an overview of the structure/sections, at most 200 words
-Leave a field empty ([] or "") when absent — DO NOT invent. All content in English. Output valid JSON only.`
+Leave a field empty ([] or "") when absent — DO NOT invent. All content in English. Output valid JSON only.${cap}`
     : `你是文本拆解助手。请阅读下面的文本全文，输出恰好一个 JSON 对象（不要输出 JSON 以外的任何内容，不要用代码块包裹），字段如下：
 - "docType"：内容类型（只能取：代码/对话记录/法律条款/表格/叙事/邮件/百科/数据/参考）
 - "overview"：内容概述，一段话，不超过 200 字
 - "keyPoints"：核心要点，字符串数组，按重要性排列，每条不超过 80 字
 - "keyTerms"：关键术语/实体，字符串数组，每条不超过 40 字
 - "structure"：结构/章节概览，不超过 200 字
-信息不足的字段留空数组或空字符串，禁止编造。只输出合法 JSON。`
+信息不足的字段留空数组或空字符串，禁止编造。只输出合法 JSON。${cap}`
 }
 
 function classifyPrompt(lang: Lang): string {
@@ -314,7 +325,7 @@ async function callStoryDecomposition(content: string, cfg: ApiSettings): Promis
       const res = await client.chat.completions.create({
         model: cfg.model,
         messages: [
-          { role: 'system', content: storyPrompt(cfg.language) },
+          { role: 'system', content: storyPrompt(cfg.language, large) },
           { role: 'user', content: content || (cfg.language === 'en' ? '(empty document)' : '（空文档）') }
         ],
         temperature: 0.3,
@@ -342,7 +353,7 @@ async function callGenericDecomposition(content: string, cfg: ApiSettings): Prom
       const res = await client.chat.completions.create({
         model: cfg.model,
         messages: [
-          { role: 'system', content: genericPrompt(cfg.language) },
+          { role: 'system', content: genericPrompt(cfg.language, large) },
           { role: 'user', content: content || (cfg.language === 'en' ? '(empty content)' : '（空内容）') }
         ],
         temperature: 0.3,
@@ -485,7 +496,8 @@ export async function ensureDocSummary(projectId: string, docId: string, current
       const summary = await generateDocSummary(projectId, docId, currentContent, settings)
       await writeDocSummary(projectId, docId, summary)
       return summary
-    } catch {
+    } catch (err) {
+      logError('summary:doc', `文档摘要生成失败 docId=${docId}`, (err as Error).message)
       return null
     } finally {
       markDone(key)
@@ -500,7 +512,8 @@ export async function ensureDocSummary(projectId: string, docId: string, current
     const summary = await generateDocSummary(projectId, docId, currentContent, settings)
     await writeDocSummary(projectId, docId, summary)
     return summary
-  } catch {
+  } catch (err) {
+    logError('summary:doc', `文档摘要更新失败 docId=${docId}`, (err as Error).message)
     return existing
   } finally {
     markDone(key)

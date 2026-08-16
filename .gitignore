@@ -13,3 +13,6 @@ dist/
 
 # 对标研究参考仓库（不入库）
 research/
+
+# 本地嵌入模型（内置资产，不入库，随安装包 extraResources 分发）
+BAAI--bge-small-zh-v1.5/

@@ -29,6 +29,7 @@ import {
   ensureDocSummary
 } from './summary.service'
 import { recordUsage } from './usage.service'
+import { searchVectorIndex } from './vector.service'
 import {
   appendMessage,
   buildSnapshot,
@@ -542,24 +543,22 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
   const controller = new AbortController()
   controllers.set(req.requestId, controller)
 
-  // B 层：大摘要自动补充（两段式记忆菜单）。非重新生成、且项目存在大摘要时，模型先“点菜”再作答。
+  // 记忆规划：模型可自动补充大摘要（B 层）或发起向量检索（C 层），全程透明展示
   let finalMessages = built.messages
   if (!req.regenerate) {
-    const rollups = await readDocRollups(chat.projectId)
-    if (rollups.length > 0) {
+    const cfg = await loadConfig()
+    if (cfg.summaryEnabled) {
+      const rollups = await readDocRollups(chat.projectId)
       try {
-        const { needs, reason } = await decideRollups(client, settings, built.messages, rollups)
-        if (needs.length > 0) {
-          const label = settings.language === 'en' ? 'Docs' : '第'
-          const suffix = settings.language === 'en' ? '' : ' 篇'
-          for (const r of needs) {
-            finalMessages = [...finalMessages, { role: 'system', content: buildRollupBlock(r, settings.language) }]
-            built.memory.rollups.push({ kind: 'rollup', key: r.id, title: `${label} ${r.rangeLabel}${suffix}`, reason })
-          }
-          built.memory.reason = reason || undefined
+        const plan = await planMemory(client, settings, built.messages, rollups, chat.projectId)
+        if (plan.extraMsgs.length > 0) {
+          finalMessages = [...finalMessages, ...plan.extraMsgs]
+          built.memory.rollups.push(...plan.rollupItems)
+          built.memory.vector.push(...plan.vectorItems)
+          if (plan.reason) built.memory.reason = plan.reason
         }
       } catch {
-        /* 决策失败：不补充大摘要，直接作答，绝不卡住用户 */
+        /* 规划失败：不补充记忆，直接作答，绝不卡住用户 */
       }
     }
   }
@@ -662,48 +661,81 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// B 层两段式记忆菜单：模型先判断是否需要展开大摘要
+// 记忆规划：模型先判断是否需要补充大摘要或发起向量检索（透明展示）
 // ---------------------------------------------------------------------------
 
-function parseDecision(raw: string): { needs: string[]; reason: string } {
+function parseMemoryPlan(raw: string): { needs: string[]; vectorQuery: string; reason: string } {
   const s = raw.trim().replace(/```(?:json)?/gi, '').trim()
-  const attempt = (text: string): { needs: string[]; reason: string } | null => {
+  const attempt = (text: string): { needs: string[]; vectorQuery: string; reason: string } | null => {
     try {
-      const p = JSON.parse(text) as { needs?: unknown; reason?: unknown }
-      return { needs: Array.isArray(p.needs) ? (p.needs as unknown[]).map(String) : [], reason: String(p.reason ?? '') }
+      const p = JSON.parse(text) as { needs?: unknown; vectorQuery?: unknown; reason?: unknown }
+      return {
+        needs: Array.isArray(p.needs) ? (p.needs as unknown[]).map(String) : [],
+        vectorQuery: typeof p.vectorQuery === 'string' ? p.vectorQuery.trim() : '',
+        reason: String(p.reason ?? '')
+      }
     } catch {
       return null
     }
   }
-  return attempt(s) ?? attempt(s.match(/\{[\s\S]*\}/)?.[0] ?? '') ?? { needs: [], reason: '' }
+  return attempt(s) ?? attempt(s.match(/\{[\s\S]*\}/)?.[0] ?? '') ?? { needs: [], vectorQuery: '', reason: '' }
 }
 
-async function decideRollups(
+async function planMemory(
   client: OpenAI,
   settings: ApiSettings,
   messages: ChatCompletionMessageParam[],
-  rollups: DocRollup[]
-): Promise<{ needs: DocRollup[]; reason: string }> {
-  const catalog = buildRollupCatalogBlock(rollups, settings.language)
-  const instruction =
-    settings.language === 'en'
-      ? 'If you need more memory to answer the user, output JSON {"needs": ["id"...], "reason": "..."} with at most 5 ids. Otherwise output {"needs": [], "reason": ""}.'
-      : '如果你需要更多记忆才能回答用户，输出 JSON {"needs": ["id"...], "reason": "..."}，最多 5 个 id；否则输出 {"needs": [], "reason": ""}。'
-  const decisionMsgs: ChatCompletionMessageParam[] = [
-    ...messages,
-    { role: 'system', content: `${catalog}\n\n${instruction}` }
-  ]
+  rollups: DocRollup[],
+  projectId: string
+): Promise<{
+  extraMsgs: ChatCompletionMessageParam[]
+  rollupItems: MemoryContextItem[]
+  vectorItems: MemoryContextItem[]
+  reason: string
+}> {
+  const en = settings.language === 'en'
+  const catalog =
+    rollups.length > 0
+      ? buildRollupCatalogBlock(rollups, settings.language)
+      : en
+        ? 'Available document rollups: (none)'
+        : '可用的大摘要：无'
+  const instruction = en
+    ? 'If you need more memory to answer the user, output JSON {"needs": ["id"...], "vectorQuery": "..." or null, "reason": "..."} with at most 5 rollup ids and at most one vectorQuery (a short query to search the project\'s original text chunks; null if not needed). Otherwise output {"needs": [], "vectorQuery": null, "reason": ""}.'
+    : '如果你需要更多记忆才能回答用户，输出 JSON {"needs": ["id"...], "vectorQuery": "..." 或 null, "reason": "..."}，needs 最多 5 个 rollup id，vectorQuery 最多一个（用于检索项目原文分块的简短查询，不需要则 null）；否则输出 {"needs": [], "vectorQuery": null, "reason": ""}。'
+  const decisionMsgs: ChatCompletionMessageParam[] = [...messages, { role: 'system', content: `${catalog}\n\n${instruction}` }]
   const res = await client.chat.completions.create({
     model: settings.model,
     messages: decisionMsgs,
     temperature: 0,
-    max_tokens: 300
+    max_tokens: 400
   })
   if (res.usage) await recordUsage(res.usage, 'summary')
-  const d = parseDecision(res.choices[0]?.message?.content ?? '')
+  const d = parseMemoryPlan(res.choices[0]?.message?.content ?? '')
+
+  const extraMsgs: ChatCompletionMessageParam[] = []
+  const rollupItems: MemoryContextItem[] = []
+  const vectorItems: MemoryContextItem[] = []
+
   const byId = new Map(rollups.map((r) => [r.id, r]))
-  const needs = d.needs.slice(0, 5).map((id) => byId.get(id)).filter((r): r is DocRollup => !!r)
-  return { needs, reason: d.reason }
+  const label = en ? 'Docs' : '第'
+  const suffix = en ? '' : ' 篇'
+  for (const id of d.needs.slice(0, 5)) {
+    const r = byId.get(id)
+    if (!r) continue
+    extraMsgs.push({ role: 'system', content: buildRollupBlock(r, settings.language) })
+    rollupItems.push({ kind: 'rollup', key: r.id, title: `${label} ${r.rangeLabel}${suffix}`, reason: d.reason })
+  }
+
+  if (d.vectorQuery) {
+    const hits = await searchVectorIndex(projectId, d.vectorQuery, 5)
+    for (const h of hits) {
+      extraMsgs.push({ role: 'system', content: `${en ? '【Vector search hit: ' : '【向量检索命中：'}${h.title} #${h.index}】\n${h.text}` })
+      vectorItems.push({ kind: 'vector', key: `${h.docId}:${h.index}`, title: `${h.title} #${h.index}`, reason: d.reason })
+    }
+  }
+
+  return { extraMsgs, rollupItems, vectorItems, reason: d.reason }
 }
 
 // ---------------------------------------------------------------------------
