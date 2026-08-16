@@ -109,9 +109,13 @@ export async function buildVectorIndex(projectId: string): Promise<{ ok: boolean
   return { ok: true, chunkCount: chunks.length }
 }
 
-/** 余弦检索 top-k 原文分块 */
+/** 余弦检索 top-k 原文分块（无索引时自动构建） */
 export async function searchVectorIndex(projectId: string, query: string, topK = 5): Promise<VectorSearchHit[]> {
-  const idx = await readVectorIndex(projectId)
+  let idx = await readVectorIndex(projectId)
+  if (!idx || idx.chunks.length === 0) {
+    await buildVectorIndex(projectId)
+    idx = await readVectorIndex(projectId)
+  }
   if (!idx || idx.chunks.length === 0) return []
   const qv = embedText(query)
   const scored = idx.chunks

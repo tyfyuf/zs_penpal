@@ -109,6 +109,8 @@ const zh: Record<string, string> = {
   'chat.chatSummaryShort': '对话',
   'chat.resSummaryShort': '资源',
   'chat.memoryCard': '本次记忆（{n}）',
+  'chat.vectorSearch': '向量检索',
+  'chat.vectorEmpty': '未命中相关内容',
 
   'context.title': '上下文范围',
   'context.expandOnly': '仅可扩大',
@@ -362,6 +364,8 @@ const en: Record<string, string> = {
   'chat.chatSummaryShort': 'Chat',
   'chat.resSummaryShort': 'Res',
   'chat.memoryCard': 'Memory used ({n})',
+  'chat.vectorSearch': 'Vector search',
+  'chat.vectorEmpty': 'No related chunks found',
 
   'context.title': 'Context range',
   'context.expandOnly': 'Expand only',
