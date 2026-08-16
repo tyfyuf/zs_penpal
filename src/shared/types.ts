@@ -298,6 +298,17 @@ export interface VectorSearchHit {
   score: number
 }
 
+/** 一致性提示（纯规则扫描） */
+export type ConsistencyIssueKind = 'alias_conflict' | 'stale_summary'
+
+export interface ConsistencyIssue {
+  kind: ConsistencyIssueKind
+  severity: 'error' | 'advisory'
+  message: string
+  docId?: string
+  resourceId?: string
+}
+
 /** 摘要区（左侧栏）展示的项目摘要概览 */
 export interface ProjectSummariesOverview {
   docs: { docId: string; title: string; hasSummary: boolean; updatedAt?: string; generating: boolean }[]

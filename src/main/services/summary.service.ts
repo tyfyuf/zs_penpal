@@ -3,6 +3,7 @@ import type {
   ChatSummary,
   ChatSummaryInterval,
   ChatSummaryItem,
+  ConsistencyIssue,
   DistillResult,
   DocRollup,
   DocRollupOverview,
@@ -795,6 +796,77 @@ export async function checkResourceSummaryStale(projectId: string, resourceId: s
   } catch {
     return false
   }
+}
+
+/** 别名冲突检测：两个角色名字互为别名，或别名集合有交集（R1） */
+function findAliasConflicts(s: { characters: { name: string; aliases: string[] }[] }): { a: string; b: string; alias: string }[] {
+  const chars = Array.isArray(s.characters) ? s.characters : []
+  const conflicts: { a: string; b: string; alias: string }[] = []
+  for (let i = 0; i < chars.length; i++) {
+    for (let j = i + 1; j < chars.length; j++) {
+      const A = chars[i]
+      const B = chars[j]
+      const aName = (A.name ?? '').trim().toLowerCase()
+      const bName = (B.name ?? '').trim().toLowerCase()
+      const aAliases = new Set((A.aliases ?? []).map((x) => x.trim().toLowerCase()).filter(Boolean))
+      const bAliases = new Set((B.aliases ?? []).map((x) => x.trim().toLowerCase()).filter(Boolean))
+      if (aName && bAliases.has(aName)) {
+        conflicts.push({ a: A.name, b: B.name, alias: aName })
+      } else if (bName && aAliases.has(bName)) {
+        conflicts.push({ a: A.name, b: B.name, alias: bName })
+      } else {
+        for (const al of aAliases) {
+          if (bAliases.has(al)) {
+            conflicts.push({ a: A.name, b: B.name, alias: al })
+            break
+          }
+        }
+      }
+    }
+  }
+  return conflicts
+}
+
+/** 一致性扫描（纯规则）：R1 别名冲突（error）+ R4 摘要漂移（advisory） */
+export async function scanConsistency(projectId: string): Promise<ConsistencyIssue[]> {
+  const issues: ConsistencyIssue[] = []
+  const tree = (await buildSnapshot()).projects.find((p) => p.project.id === projectId)
+  if (!tree) return issues
+
+  // R1：文档摘要的别名冲突
+  for (const d of tree.docs) {
+    const s = await readDocSummary(projectId, d.id)
+    if (!s) continue
+    for (const c of findAliasConflicts(s)) {
+      issues.push({
+        kind: 'alias_conflict',
+        severity: 'error',
+        message: `「${c.a}」与「${c.b}」别名重叠（${c.alias}），疑似同一角色`,
+        docId: d.id
+      })
+    }
+  }
+  // R1：故事型资源摘要的别名冲突
+  for (const r of tree.resources) {
+    const s = await readResourceSummary(projectId, r.id)
+    if (s && s.type === 'story') {
+      for (const c of findAliasConflicts(s)) {
+        issues.push({
+          kind: 'alias_conflict',
+          severity: 'error',
+          message: `「${r.name}」中「${c.a}」与「${c.b}」别名重叠（${c.alias}）`,
+          resourceId: r.id
+        })
+      }
+    }
+  }
+  // R4：资源摘要漂移（待更新）
+  for (const r of tree.resources) {
+    if (await checkResourceSummaryStale(projectId, r.id)) {
+      issues.push({ kind: 'stale_summary', severity: 'advisory', message: `资源「${r.name}」摘要待更新`, resourceId: r.id })
+    }
+  }
+  return issues
 }
 
 export async function listProjectSummaries(projectId: string): Promise<ProjectSummariesOverview> {

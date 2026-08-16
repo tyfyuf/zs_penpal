@@ -8,6 +8,7 @@ import type {
   ChatMeta,
   ChatSummary,
   ConnectionTestResult,
+  ConsistencyIssue,
   ContextRange,
   DistillResult,
   DocMeta,
@@ -138,6 +139,7 @@ export const IPC = {
   summaryGenerateRollups: 'summary:generateRollups',
   summaryRegenerateRollup: 'summary:regenerateRollup',
   summaryGetRollup: 'summary:getRollup',
+  summaryScanConsistency: 'summary:scanConsistency',
   vectorBuild: 'vector:build',
   vectorSearch: 'vector:search',
   usageGet: 'usage:get',
@@ -231,6 +233,7 @@ export interface IpcApi {
   [IPC.summaryGenerateRollups]: { req: string; res: { ok: boolean; error?: string } }
   [IPC.summaryRegenerateRollup]: { req: { projectId: string; rollupId: string }; res: { ok: boolean; error?: string } }
   [IPC.summaryGetRollup]: { req: { projectId: string; rollupId: string }; res: DocRollup | null }
+  [IPC.summaryScanConsistency]: { req: string; res: ConsistencyIssue[] }
   [IPC.vectorBuild]: { req: string; res: { ok: boolean; error?: string; chunkCount?: number } }
   [IPC.vectorSearch]: { req: { projectId: string; query: string }; res: VectorSearchHit[] }
   [IPC.usageGet]: { req: void; res: UsageSnapshot }

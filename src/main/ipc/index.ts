@@ -55,6 +55,7 @@ import {
   regenerateDocRollup,
   regenerateDocSummary,
   retryPendingSummaries,
+  scanConsistency,
   searchProjectSummaries,
   undistillResource
 } from '../services/summary.service'
@@ -200,6 +201,7 @@ export function registerIpcHandlers(): void {
   handle(IPC.summaryGenerateRollups, (projectId) => generateDocRollups(projectId))
   handle(IPC.summaryRegenerateRollup, (req) => regenerateDocRollup(req.projectId, req.rollupId))
   handle(IPC.summaryGetRollup, (req) => getDocRollup(req.projectId, req.rollupId))
+  handle(IPC.summaryScanConsistency, (projectId) => scanConsistency(projectId))
   handle(IPC.vectorBuild, (projectId) => buildVectorIndex(projectId))
   handle(IPC.vectorSearch, (req) => searchVectorIndex(req.projectId, req.query))
 

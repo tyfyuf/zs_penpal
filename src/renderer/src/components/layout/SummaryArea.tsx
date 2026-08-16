@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Eye, FlaskConical, RefreshCw, Trash2 } from 'lucide-react'
-import type { ChatSummary, DocSummary, ProjectSummariesOverview, ResourceSummary } from '@shared/types'
+import type { ChatSummary, ConsistencyIssue, DocSummary, ProjectSummariesOverview, ResourceSummary } from '@shared/types'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
 import { useAppStore } from '../../store/app.store'
@@ -47,11 +47,13 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
   const [overview, setOverview] = useState<ProjectSummariesOverview | null>(null)
   const [preview, setPreview] = useState<{ title: string; text: string } | null>(null)
   const [busy, setBusy] = useState(false)
+  const [issues, setIssues] = useState<ConsistencyIssue[]>([])
   const summaryRevision = useAppStore((s) => s.summaryRevision)
 
   const load = useCallback(async (): Promise<void> => {
     try {
       setOverview(await api.invoke('summary:listProject', projectId))
+      setIssues(await api.invoke('summary:scanConsistency', projectId))
     } catch (err) {
       toast.error((err as Error).message)
     }
@@ -142,6 +144,18 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
 
   return (
     <div className="space-y-2 px-4 pb-2">
+      {issues.length > 0 && (
+        <>
+          <div className="text-[11px] font-medium" style={{ color: 'var(--muted)' }}>{t('summary.secConsistency')}</div>
+          {issues.map((iss, idx) => (
+            <div key={idx} className="flex items-start gap-1 text-[11px]" style={{ color: iss.severity === 'error' ? 'var(--danger)' : 'var(--warn)' }}>
+              <span>{iss.severity === 'error' ? '✕' : '!'}</span>
+              <span className="min-w-0 flex-1 break-words">{iss.message}</span>
+            </div>
+          ))}
+        </>
+      )}
+
       <div className="text-[11px] font-medium" style={{ color: 'var(--muted)' }}>{t('summary.secDocs')}</div>
       {overview.docs.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noDocs')}</div>}
       {overview.docs.map((d) => (
