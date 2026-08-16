@@ -11,6 +11,8 @@ import type {
   ContextRange,
   DistillResult,
   DocMeta,
+  DocRollup,
+  DocRollupOverview,
   DocSummary,
   ExportProjectOptions,
   ExternalFileResult,
@@ -131,6 +133,10 @@ export const IPC = {
   summaryQueueChat: 'summary:queueChat',
   summaryDefaultActive: 'summary:defaultActive',
   summarySearch: 'summary:search',
+  summaryListRollups: 'summary:listRollups',
+  summaryGenerateRollups: 'summary:generateRollups',
+  summaryRegenerateRollup: 'summary:regenerateRollup',
+  summaryGetRollup: 'summary:getRollup',
   usageGet: 'usage:get',
   gitEnsure: 'git:ensure',
   gitCommit: 'git:commit',
@@ -218,6 +224,10 @@ export interface IpcApi {
   [IPC.summaryQueueChat]: { req: string; res: void }
   [IPC.summaryDefaultActive]: { req: string; res: string[] }
   [IPC.summarySearch]: { req: { projectId: string; query: string }; res: SummarySearchResult[] }
+  [IPC.summaryListRollups]: { req: string; res: DocRollupOverview }
+  [IPC.summaryGenerateRollups]: { req: string; res: { ok: boolean; error?: string } }
+  [IPC.summaryRegenerateRollup]: { req: { projectId: string; rollupId: string }; res: { ok: boolean; error?: string } }
+  [IPC.summaryGetRollup]: { req: { projectId: string; rollupId: string }; res: DocRollup | null }
   [IPC.usageGet]: { req: void; res: UsageSnapshot }
   [IPC.gitEnsure]: { req: { consent: boolean }; res: { ok: boolean; reason?: string; path?: string } }
   [IPC.gitCommit]: { req: string; res: { ok: boolean; committed?: boolean; error?: string } }

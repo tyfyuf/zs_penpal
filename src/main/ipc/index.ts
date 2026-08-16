@@ -45,10 +45,14 @@ import { hasApiKey, setApiKey } from '../services/crypto.service'
 import { cancelStream, generateChatTitle, listModels, streamChat, testConnection } from '../services/api.service'
 import {
   distillResource,
+  generateDocRollups,
   getDefaultActiveKeys,
+  getDocRollup,
+  listDocRollups,
   listProjectSummaries,
   queueChatSummary,
   regenerateChatSummary,
+  regenerateDocRollup,
   regenerateDocSummary,
   retryPendingSummaries,
   searchProjectSummaries,
@@ -191,6 +195,10 @@ export function registerIpcHandlers(): void {
   })
   handle(IPC.summaryDefaultActive, (chatId) => getDefaultActiveKeys(chatId))
   handle(IPC.summarySearch, (req) => searchProjectSummaries(req.projectId, req.query))
+  handle(IPC.summaryListRollups, (projectId) => listDocRollups(projectId))
+  handle(IPC.summaryGenerateRollups, (projectId) => generateDocRollups(projectId))
+  handle(IPC.summaryRegenerateRollup, (req) => regenerateDocRollup(req.projectId, req.rollupId))
+  handle(IPC.summaryGetRollup, (req) => getDocRollup(req.projectId, req.rollupId))
 
   // 用量
   handle(IPC.usageGet, () => getSnapshot())

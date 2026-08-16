@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { History, RefreshCw } from 'lucide-react'
-import type { GitCommitInfo, UsageSnapshot } from '@shared/types'
+import type { DocRollup, DocRollupOverview, GitCommitInfo, UsageSnapshot } from '@shared/types'
 import { useAppStore } from '../../store/app.store'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
@@ -33,6 +33,58 @@ export default function SettingsPane(): JSX.Element {
   const [fetchingModels, setFetchingModels] = useState(false)
   const [gitAuthorName, setGitAuthorName] = useState(config?.gitAuthorName ?? '')
   const [gitAuthorEmail, setGitAuthorEmail] = useState(config?.gitAuthorEmail ?? '')
+  const [rollups, setRollups] = useState<Record<string, DocRollupOverview>>({})
+  const [rollupPreview, setRollupPreview] = useState<{ title: string; text: string } | null>(null)
+  const [rollupBusy, setRollupBusy] = useState(false)
+
+  useEffect(() => {
+    void api.invoke('crypto:hasApiKey', undefined).then(setHasKey)
+    void api.invoke('usage:get', undefined).then(setUsage)
+    void loadRollups()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  async function loadRollups(): Promise<void> {
+    const map: Record<string, DocRollupOverview> = {}
+    for (const p of workspace.projects) {
+      try {
+        map[p.project.id] = await api.invoke('summary:listRollups', p.project.id)
+      } catch {
+        /* ignore */
+      }
+    }
+    setRollups(map)
+  }
+
+  async function generateRollups(projectId: string): Promise<void> {
+    setRollupBusy(true)
+    try {
+      const res = await api.invoke('summary:generateRollups', projectId)
+      if (res.ok) toast.success(t('settings.rollupsGenerated'))
+      else toast.error(res.error ?? t('settings.rollupsFail'))
+      await loadRollups()
+    } finally {
+      setRollupBusy(false)
+    }
+  }
+
+  async function regenRollup(projectId: string, rollupId: string): Promise<void> {
+    setRollupBusy(true)
+    try {
+      const res = await api.invoke('summary:regenerateRollup', { projectId, rollupId })
+      if (res.ok) toast.success(t('settings.rollupsGenerated'))
+      else toast.error(res.error ?? t('settings.rollupsFail'))
+      await loadRollups()
+    } finally {
+      setRollupBusy(false)
+    }
+  }
+
+  async function previewRollup(projectId: string, rollupId: string, rangeLabel: string): Promise<void> {
+    const r = await api.invoke('summary:getRollup', { projectId, rollupId })
+    if (!r) return
+    setRollupPreview({ title: `${t('settings.rollups')} · ${rangeLabel}`, text: formatRollup(r) })
+  }
 
   useEffect(() => {
     void api.invoke('crypto:hasApiKey', undefined).then(setHasKey)
@@ -310,6 +362,55 @@ export default function SettingsPane(): JSX.Element {
           )}
         </Section>
 
+        <Section title={t('settings.rollups', { n: 10 })}>
+          <div className="space-y-3">
+            {workspace.projects.length === 0 && (
+              <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.rollupsEmpty')}</div>
+            )}
+            {workspace.projects.map((p) => {
+              const ov = rollups[p.project.id]
+              const docs = ov?.totalDocs ?? 0
+              const need = docs >= (ov?.threshold ?? 50)
+              return (
+                <div key={p.project.id} className="rounded border p-2" style={{ borderColor: 'var(--border)' }}>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">{p.project.name}</span>
+                    <span className="text-xs" style={{ color: 'var(--muted)' }}>
+                      {t('settings.rollupsDocCount', { n: docs })} · {t('settings.rollupsThreshold', { n: ov?.threshold ?? 50, b: ov?.batchSize ?? 10 })}
+                    </span>
+                    <span className="flex-1" />
+                    <button className="btn !py-1 text-xs" disabled={rollupBusy || !need} onClick={() => void generateRollups(p.project.id)}>
+                      {t('settings.rollupsGenerate')}
+                    </button>
+                  </div>
+                  {ov && ov.rollups.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {ov.rollups.map((r) => (
+                        <div key={r.id} className="flex items-center gap-2 text-xs">
+                          <span
+                            className="h-1.5 w-1.5 rounded-full"
+                            style={{ background: r.stale ? 'var(--warn)' : 'var(--ok)' }}
+                          />
+                          <span className="w-14">{t('settings.rollupsRange', { n: r.rangeLabel })}</span>
+                          <span style={{ color: 'var(--muted)' }}>{t('settings.rollupsDocs', { n: r.docCount })}</span>
+                          {r.stale && <span style={{ color: 'var(--warn)' }}>· {t('summary.stale')}</span>}
+                          <span className="flex-1" />
+                          <button className="btn !py-0.5 text-xs" onClick={() => void previewRollup(p.project.id, r.id, r.rangeLabel)}>
+                            {t('summary.preview')}
+                          </button>
+                          <button className="btn !py-0.5 text-xs" disabled={rollupBusy} onClick={() => void regenRollup(p.project.id, r.id)}>
+                            <RefreshCw size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </Section>
+
         <Section title={t('settings.version')}>
           <label className="flex items-center gap-2 text-sm">
             <input
@@ -408,6 +509,20 @@ export default function SettingsPane(): JSX.Element {
           </div>
         </Modal>
       )}
+
+      {rollupPreview && (
+        <Modal
+          title={rollupPreview.title}
+          onClose={() => setRollupPreview(null)}
+          footer={
+            <button className="btn" onClick={() => setRollupPreview(null)}>
+              {t('upload.close')}
+            </button>
+          }
+        >
+          <pre className="max-h-80 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed">{rollupPreview.text}</pre>
+        </Modal>
+      )}
     </div>
   )
 }
@@ -450,4 +565,10 @@ function InjCheck({ label, checked, onChange }: { label: string; checked: boolea
       {label}
     </label>
   )
+}
+
+function formatRollup(r: DocRollup): string {
+  const changes = (Array.isArray(r.stateChanges) ? r.stateChanges : []).map((s) => `- ${s}`).join('\n')
+  const causal = (Array.isArray(r.causality) ? r.causality : []).map((s) => `- ${s}`).join('\n')
+  return `总览：${r.overview || '（无）'}\n\n状态变化：\n${changes || '（无）'}\n\n因果/伏笔：\n${causal || '（无）'}`
 }

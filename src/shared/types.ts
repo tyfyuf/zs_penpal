@@ -224,6 +224,41 @@ export interface SummarySearchResult {
   updatedAt?: string
 }
 
+/** 大摘要：每 N 个写作文档聚合的整体摘要（三级新鲜度，写作文档 > 阈值时生成） */
+export interface DocRollup {
+  id: string
+  projectId: string
+  /** 覆盖文档 id（按创建时间升序） */
+  docIds: string[]
+  /** 展示用范围标签，如 "1-10" */
+  rangeLabel: string
+  /** 跨块总体叙事 */
+  overview: string
+  /** 跨块状态变化（人物/世界设定），写"什么变了" */
+  stateChanges: string[]
+  /** 因果链 / 伏笔账本 */
+  causality: string[]
+  schemaVersion: number
+  /** 成员文档源指纹（任一变化 → STALE） */
+  sourceFingerprints: Record<string, string>
+  updatedAt: string
+}
+
+/** 大摘要概览（设置页展示） */
+export interface DocRollupOverview {
+  rollups: {
+    id: string
+    rangeLabel: string
+    docCount: number
+    updatedAt?: string
+    stale: boolean
+    generating: boolean
+  }[]
+  totalDocs: number
+  threshold: number
+  batchSize: number
+}
+
 /** 摘要区（左侧栏）展示的项目摘要概览 */
 export interface ProjectSummariesOverview {
   docs: { docId: string; title: string; hasSummary: boolean; updatedAt?: string; generating: boolean }[]

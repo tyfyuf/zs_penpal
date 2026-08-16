@@ -3,6 +3,8 @@ import type {
   ChatSummary,
   ChatSummaryItem,
   DistillResult,
+  DocRollup,
+  DocRollupOverview,
   DocSummary,
   GenericResourceSummary,
   ProjectSummariesOverview,
@@ -19,11 +21,13 @@ import {
   getChat,
   readChatSummary,
   readDoc,
+  readDocRollups,
   readDocSummary,
   readResource,
   readResourceSummary,
   removeResourceSummary,
   writeChatSummary,
+  writeDocRollups,
   writeDocSummary,
   writeResourceSummary
 } from './file.service'
@@ -819,6 +823,178 @@ export async function searchProjectSummaries(projectId: string, query: string): 
   for (const r of tree.resources) push(`res:${r.id}`, 'res', r.name, await readResourceSummary(projectId, r.id))
 
   return results.slice(0, 20)
+}
+
+// ---------------------------------------------------------------------------
+// 大摘要（rollup）：写作文档 > ROLLUP_THRESHOLD 时，按创建时间每 ROLLUP_BATCH 个聚合成整体摘要。
+// 基于成员文档摘要生成（非全文，省 token）；成员摘要指纹任一变化 → STALE。
+// ---------------------------------------------------------------------------
+
+export const ROLLUP_THRESHOLD = 50
+export const ROLLUP_BATCH = 10
+
+function rollupPrompt(lang: Lang): string {
+  return lang === 'en'
+    ? `You are a story continuity editor. Below are summaries of several documents in chronological order. Distill the cross-document memory and output EXACTLY ONE JSON object (no code fences, no prose):
+- "overview": the overall arc of this block, one paragraph, at most 300 words
+- "stateChanges": key changes in character/world state (array of strings, each at most 80 words) — write WHAT CHANGED
+- "causality": cross-document cause-effect and foreshadowing ledger (array of strings, each at most 80 words) — write what was planted / how it advanced / whether it resolved
+Leave a field empty ([] or "") when absent — DO NOT invent. All content in English. Output valid JSON only.`
+    : `你是故事连续性编辑。下面是按时间顺序排列的若干文档摘要。请提炼这些文档跨块的总体记忆，输出恰好一个 JSON 对象（不要输出 JSON 以外的任何内容，不要用代码块包裹）：
+- "overview"：这段剧情的总体走向，一段话，不超过 300 字
+- "stateChanges"：人物状态/世界设定的关键变化，字符串数组，每条不超过 80 字——写"什么变了"
+- "causality"：跨篇因果链与伏笔账本，字符串数组，每条不超过 80 字——写"埋了什么/如何推进/是否回收"
+信息不足的字段留空数组或空字符串，禁止编造。只输出合法 JSON。`
+}
+
+function normalizeRollup(parsed: unknown): { overview: string; stateChanges: string[]; causality: string[] } {
+  const p = (parsed ?? {}) as Record<string, unknown>
+  const arr = (v: unknown): string[] => (Array.isArray(v) ? (v as unknown[]).map(String) : [])
+  return { overview: String(p.overview ?? ''), stateChanges: arr(p.stateChanges), causality: arr(p.causality) }
+}
+
+async function buildRollupForChunk(
+  projectId: string,
+  docs: { id: string }[],
+  rangeLabel: string,
+  settings: ApiSettings,
+  existingRollup: DocRollup | undefined,
+  force: boolean
+): Promise<DocRollup | null> {
+  const fingerprints: Record<string, string> = {}
+  const summaries: DocSummary[] = []
+  for (const d of docs) {
+    const s = await readDocSummary(projectId, d.id)
+    if (s) {
+      summaries.push(s)
+      fingerprints[d.id] = s.sourceFingerprint || ''
+    }
+  }
+  if (summaries.length !== docs.length) return null
+
+  // 成员未变且非强制 → 复用
+  if (!force && existingRollup && existingRollup.overview) {
+    let same = true
+    for (const [docId, fp] of Object.entries(fingerprints)) {
+      if (existingRollup.sourceFingerprints[docId] !== fp) {
+        same = false
+        break
+      }
+    }
+    if (same) return existingRollup
+  }
+
+  const content = summaries.map((s, i) => `【${i + 1}】\n${storyBlock(s, settings.language)}`).join('\n\n')
+  return enqueueLlm(async () => {
+    const client = makeClient(settings)
+    let parsed: { overview: string; stateChanges: string[]; causality: string[] } | null = null
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await client.chat.completions.create({
+        model: settings.model,
+        messages: [
+          { role: 'system', content: rollupPrompt(settings.language) },
+          { role: 'user', content: content }
+        ],
+        temperature: 0.3,
+        max_tokens: 2048
+      })
+      if (res.usage) await recordUsage(res.usage, 'summary')
+      parsed = normalizeRollup(parseJson(res.choices[0]?.message?.content ?? ''))
+      if (parsed.overview.trim()) break
+    }
+    if (!parsed || !parsed.overview.trim()) return null
+    return {
+      id: `${projectId}:${rangeLabel}`,
+      projectId,
+      docIds: docs.map((d) => d.id),
+      rangeLabel,
+      overview: parsed.overview,
+      stateChanges: parsed.stateChanges,
+      causality: parsed.causality,
+      schemaVersion: SUMMARY_SCHEMA_VERSION,
+      sourceFingerprints: fingerprints,
+      updatedAt: nowIso()
+    } as DocRollup
+  })
+}
+
+/** 生成/刷新项目大摘要（增量：成员未变的块复用） */
+export async function generateDocRollups(projectId: string): Promise<{ ok: boolean; error?: string }> {
+  const cfg = await loadConfig()
+  if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未开启' }
+  const settings = await loadApiSettings()
+  if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }
+  const tree = (await buildSnapshot()).projects.find((p) => p.project.id === projectId)
+  if (!tree) return { ok: false, error: '项目不存在' }
+
+  const docs = [...tree.docs].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  if (docs.length < ROLLUP_THRESHOLD) {
+    await writeDocRollups(projectId, [])
+    return { ok: true }
+  }
+
+  const existing = await readDocRollups(projectId)
+  const rollups: DocRollup[] = []
+  try {
+    for (let i = 0; i < docs.length; i += ROLLUP_BATCH) {
+      const group = docs.slice(i, i + ROLLUP_BATCH)
+      const rangeLabel = `${i + 1}-${Math.min(i + ROLLUP_BATCH, docs.length)}`
+      const existingRollup = existing.find((r) => r.rangeLabel === rangeLabel && r.docIds.length === group.length)
+      const rollup = await buildRollupForChunk(projectId, group, rangeLabel, settings, existingRollup, false)
+      if (rollup) rollups.push(rollup)
+    }
+    await writeDocRollups(projectId, rollups)
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: (err as Error).message }
+  }
+}
+
+/** 单条重新生成大摘要 */
+export async function regenerateDocRollup(projectId: string, rollupId: string): Promise<{ ok: boolean; error?: string }> {
+  const settings = await loadApiSettings()
+  if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }
+  const existing = await readDocRollups(projectId)
+  const target = existing.find((r) => r.id === rollupId)
+  if (!target) return { ok: false, error: '大摘要不存在' }
+  const tree = (await buildSnapshot()).projects.find((p) => p.project.id === projectId)
+  const docs = (tree?.docs ?? []).filter((d) => target.docIds.includes(d.id))
+  const rollup = await buildRollupForChunk(projectId, docs, target.rangeLabel, settings, target, true)
+  if (!rollup) return { ok: false, error: '生成失败：成员文档摘要不完整' }
+  const next = existing.map((r) => (r.id === rollupId ? rollup : r))
+  await writeDocRollups(projectId, next)
+  return { ok: true }
+}
+
+/** 读取单条大摘要（预览） */
+export async function getDocRollup(projectId: string, rollupId: string): Promise<DocRollup | null> {
+  const rollups = await readDocRollups(projectId)
+  return rollups.find((r) => r.id === rollupId) ?? null
+}
+
+/** 大摘要概览（设置页），含 STALE 检测 */
+export async function listDocRollups(projectId: string): Promise<DocRollupOverview> {
+  const tree = (await buildSnapshot()).projects.find((p) => p.project.id === projectId)
+  const totalDocs = tree?.docs.length ?? 0
+  const rollups = await readDocRollups(projectId)
+  const items = await Promise.all(
+    rollups.map(async (r) => {
+      let stale = false
+      for (const docId of r.docIds) {
+        const s = await readDocSummary(projectId, docId)
+        if (!s) {
+          stale = true
+          break
+        }
+        if ((s.sourceFingerprint || '') !== (r.sourceFingerprints[docId] ?? '')) {
+          stale = true
+          break
+        }
+      }
+      return { id: r.id, rangeLabel: r.rangeLabel, docCount: r.docIds.length, updatedAt: r.updatedAt, stale, generating: false }
+    })
+  )
+  return { rollups: items, totalDocs, threshold: ROLLUP_THRESHOLD, batchSize: ROLLUP_BATCH }
 }
 
 // ---------------------------------------------------------------------------

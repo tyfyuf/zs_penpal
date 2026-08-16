@@ -7,6 +7,7 @@ import type {
   ChatMeta,
   ChatSummary,
   DocMeta,
+  DocRollup,
   DocSummary,
   ProjectMeta,
   ProjectTree,
@@ -82,6 +83,9 @@ function chatSummaryPath(projectId: string, chatId: string): string {
 }
 function resourceSummaryPath(projectId: string, resourceId: string): string {
   return join(summariesDir(projectId), 'resources', `${resourceId}.json`)
+}
+function rollupsPath(projectId: string): string {
+  return join(summariesDir(projectId), 'rollups', `${projectId}.json`)
 }
 
 function resourcesDir(projectId: string): string {
@@ -619,6 +623,15 @@ export async function writeResourceSummary(projectId: string, resourceId: string
 
 export async function removeResourceSummary(projectId: string, resourceId: string): Promise<void> {
   await rm(resourceSummaryPath(projectId, resourceId), { force: true })
+}
+
+export async function readDocRollups(projectId: string): Promise<DocRollup[]> {
+  const data = await readJson<{ rollups: DocRollup[] }>(rollupsPath(projectId))
+  return Array.isArray(data?.rollups) ? data.rollups : []
+}
+
+export async function writeDocRollups(projectId: string, rollups: DocRollup[]): Promise<void> {
+  await atomicWriteJson(rollupsPath(projectId), { rollups })
 }
 
 // ---------------------------------------------------------------------------
