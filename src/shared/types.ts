@@ -426,6 +426,28 @@ export interface StreamDonePayload {
   /** 思维链（推理模型的 reasoning_content） */
   reasoning?: string
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+  /** 本次回答的记忆使用情况（透明展示） */
+  memory?: MemoryContext
+}
+
+/** 记忆使用明细（“本次记忆”卡） */
+export interface MemoryContextItem {
+  kind: 'doc' | 'chat' | 'res' | 'rollup' | 'vector' | 'fulltext'
+  key: string
+  title: string
+  /** 为何补充（模型自述缺什么） */
+  reason?: string
+}
+
+export interface MemoryContext {
+  /** 注入的小摘要（文档/对话/资源/全文） */
+  small: MemoryContextItem[]
+  /** B 层自动补充的大摘要 */
+  rollups: MemoryContextItem[]
+  /** C 层向量命中 */
+  vector: MemoryContextItem[]
+  /** 模型自述缺什么 */
+  reason?: string
 }
 
 export interface StreamChunkPayload {

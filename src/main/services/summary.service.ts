@@ -1127,3 +1127,24 @@ export function buildResourceSummaryBlock(s: ResourceSummary, name: string, lang
   }
   return `【资源摘要：${name}】\n类型：${s.docType || '未知'}\n概述：${s.overview || none}\n要点：\n${keyPoints.map((p) => `- ${p}`).join('\n') || none}\n术语：${keyTerms.join('、') || none}\n结构：${s.structure || none}`
 }
+
+/** 大摘要（rollup）注入块 */
+export function buildRollupBlock(r: DocRollup, lang: Lang = 'zh'): string {
+  const en = lang === 'en'
+  const none = en ? '(none)' : '（无）'
+  const changes = (Array.isArray(r.stateChanges) ? r.stateChanges : []).map((s) => `- ${s}`).join('\n')
+  const causal = (Array.isArray(r.causality) ? r.causality : []).map((s) => `- ${s}`).join('\n')
+  if (en) {
+    return `【Rollup: docs ${r.rangeLabel}】\nOverview: ${r.overview || none}\nState changes:\n${changes || none}\nCausality/foreshadowing:\n${causal || none}`
+  }
+  return `【大摘要：第 ${r.rangeLabel} 篇】\n总览：${r.overview || none}\n状态变化：\n${changes || none}\n因果/伏笔：\n${causal || none}`
+}
+
+/** 大摘要目录（供 B 两段式记忆菜单第一遍决策用） */
+export function buildRollupCatalogBlock(rollups: DocRollup[], lang: Lang = 'zh'): string {
+  const en = lang === 'en'
+  const lines = rollups.map((r) => `- id="${r.id}" ${r.rangeLabel}: ${r.overview.slice(0, 60)}`).join('\n')
+  return en
+    ? `Available document rollups (larger memory). If the injected summaries are not enough for the user's question, you may request to expand up to 5 of these. Respond with JSON only:\n${lines}`
+    : `可用的大摘要（更粗粒度的记忆）。如果已注入的小摘要不足以回答用户问题，你可以请求展开其中最多 5 个。只输出 JSON：\n${lines}`
+}

@@ -18,6 +18,7 @@ import type {
   ChatMessage,
   ChatMeta,
   ContextRange,
+  MemoryContext,
   ProjectSummariesOverview,
   StreamContextRange,
   SummarySearchResult
@@ -79,6 +80,8 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SummarySearchResult[]>([])
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 每次回答的记忆使用情况（透明展示），键 = assistant 消息 id */
+  const [memories, setMemories] = useState<Record<string, MemoryContext>>({})
   const newSummaryNotifiedRef = useRef(false)
   const pendingReasonRef = useRef<'context' | 'summary' | 'both' | null>(null)
   const pendingNewlyEnabledRef = useRef<string[]>([])
@@ -148,10 +151,12 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
         return
       }
       if (p.content) {
+        const id = `a-${p.requestId}`
         setMessages((m) => [
           ...m,
-          { id: `a-${p.requestId}`, role: 'assistant', content: p.content, createdAt: new Date().toISOString(), reasoning: p.reasoning }
+          { id, role: 'assistant', content: p.content, createdAt: new Date().toISOString(), reasoning: p.reasoning }
         ])
+        if (p.memory) setMemories((prev) => ({ ...prev, [id]: p.memory! }))
         if (sentRangeRef.current) {
           setLockedRange(sentRangeRef.current)
           void api.invoke('chat:patch', { chatId, patch: { lockedRange: sentRangeRef.current } })
@@ -487,6 +492,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
               )}
               {m.role === 'assistant' && m.reasoning && <ReasoningBlock reasoning={m.reasoning} />}
               {m.content}
+              {m.role === 'assistant' && memories[m.id] && <MemoryCard memory={memories[m.id]} />}
               {m.role === 'assistant' && (
                 <button
                   className="mt-1.5 flex items-center gap-1 text-xs opacity-60 hover:opacity-100"
@@ -713,6 +719,43 @@ function ReasoningBlock({ reasoning }: { reasoning: string }): JSX.Element {
       {open && (
         <div className="mt-1 whitespace-pre-wrap leading-relaxed" style={{ color: 'var(--muted)' }}>
           {reasoning}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** “本次记忆”卡：透明展示本次回答使用了哪些摘要/大摘要/向量命中 */
+function MemoryCard({ memory }: { memory: MemoryContext }): JSX.Element {
+  const [open, setOpen] = useState(true)
+  const t = useT()
+  const small = memory.small ?? []
+  const rollups = memory.rollups ?? []
+  const vector = memory.vector ?? []
+  const total = small.length + rollups.length + vector.length
+  if (total === 0 && !memory.reason) return <></>
+  const line = (kind: 'small' | 'rollup' | 'vector', key: string, title: string, reason?: string): JSX.Element => (
+    <div key={key} className="flex items-start gap-1">
+      <span style={{ color: kind === 'rollup' ? 'var(--accent)' : kind === 'vector' ? 'var(--warn)' : 'var(--muted)' }}>
+        {kind === 'rollup' ? '◈' : kind === 'vector' ? '▸' : '•'}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{title}</span>
+      {reason && <span className="shrink-0 text-[10px]" style={{ color: 'var(--muted)' }}>· {reason}</span>}
+    </div>
+  )
+  return (
+    <div className="mt-1.5 rounded-lg border px-2.5 py-1.5 text-xs" style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}>
+      <button className="flex w-full items-center gap-1" style={{ color: 'var(--muted)' }} onClick={() => setOpen((o) => !o)}>
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <ListFilter size={12} />
+        {t('chat.memoryCard', { n: total })}
+        {memory.reason && <span className="truncate" style={{ color: 'var(--warn)' }}>· {memory.reason}</span>}
+      </button>
+      {open && (
+        <div className="mt-1 space-y-0.5">
+          {small.map((i) => line('small', i.key, i.title))}
+          {rollups.map((i) => line('rollup', i.key, i.title, i.reason))}
+          {vector.map((i) => line('vector', i.key, i.title, i.reason))}
         </div>
       )}
     </div>

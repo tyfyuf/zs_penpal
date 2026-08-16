@@ -5,14 +5,17 @@ import type {
   ChatMessage,
   ChatMeta,
   ConnectionTestResult,
+  DocRollup,
   DocSummary,
+  MemoryContext,
+  MemoryContextItem,
   ProjectTree,
   StreamContextRange,
   StreamDonePayload,
   StreamRequest
 } from '@shared/types'
 import { EVENTS } from '@shared/ipc'
-import { loadApiSettings } from './api-settings'
+import { loadApiSettings, type ApiSettings } from './api-settings'
 import { loadConfig } from './config.service'
 import { estimateTokens } from './tokenizer'
 import { collectApplicableKeys, computeActiveKeys, selectDefaultKeys } from '../summary-relevance'
@@ -20,6 +23,8 @@ import {
   buildChatSummaryBlock,
   buildDocSummaryBlock,
   buildResourceSummaryBlock,
+  buildRollupBlock,
+  buildRollupCatalogBlock,
   ensureDocSummary
 } from './summary.service'
 import { recordUsage } from './usage.service'
@@ -29,6 +34,7 @@ import {
   getChat,
   readChatSummary,
   readDoc,
+  readDocRollups,
   readDocSummary,
   readResourceSummary,
   readSnapshot,
@@ -210,17 +216,19 @@ async function injectSummaries(
   docMsgs: ChatCompletionMessageParam[]
   chatMsgs: ChatCompletionMessageParam[]
   resourceMsgs: ChatCompletionMessageParam[]
+  items: MemoryContextItem[]
 }> {
   const docMsgs: ChatCompletionMessageParam[] = []
   const chatMsgs: ChatCompletionMessageParam[] = []
   const resourceMsgs: ChatCompletionMessageParam[] = []
+  const items: MemoryContextItem[] = []
 
   const cfg = await loadConfig()
-  if (!cfg.summaryEnabled) return { docMsgs, chatMsgs, resourceMsgs }
+  if (!cfg.summaryEnabled) return { docMsgs, chatMsgs, resourceMsgs, items }
   const lang = cfg.language ?? 'zh'
   const inj = cfg.summaryInjection
   const projectId = chat.projectId
-  if (!tree) return { docMsgs, chatMsgs, resourceMsgs }
+  if (!tree) return { docMsgs, chatMsgs, resourceMsgs, items }
 
   const kind = chat.kind
 
@@ -241,7 +249,11 @@ async function injectSummaries(
     } else {
       summary = await readDocSummary(projectId, docId)
     }
-    if (summary) docMsgs.push({ role: 'system', content: buildDocSummaryBlock(summary, lang) })
+    if (summary) {
+      const title = tree.docs.find((d) => d.id === docId)?.title ?? docId
+      docMsgs.push({ role: 'system', content: buildDocSummaryBlock(summary, lang) })
+      items.push({ kind: 'doc', key: `doc:${docId}`, title })
+    }
   }
 
   // 对话摘要
@@ -256,7 +268,11 @@ async function injectSummaries(
   for (const chatId of chatIds) {
     if (!activeKeys.has(`chat:${chatId}`)) continue
     const s = await readChatSummary(projectId, chatId)
-    if (s && (s.items.length > 0 || (s.compacted?.length ?? 0) > 0)) chatMsgs.push({ role: 'system', content: buildChatSummaryBlock(s, lang) })
+    if (s && (s.items.length > 0 || (s.compacted?.length ?? 0) > 0)) {
+      const title = tree.chats.find((c) => c.id === chatId)?.title ?? chatId
+      chatMsgs.push({ role: 'system', content: buildChatSummaryBlock(s, lang) })
+      items.push({ kind: 'chat', key: `chat:${chatId}`, title })
+    }
   }
 
   // 资源摘要
@@ -266,11 +282,14 @@ async function injectSummaries(
     for (const r of tree.resources) {
       if (!activeKeys.has(`res:${r.id}`)) continue
       const s = await readResourceSummary(projectId, r.id)
-      if (s) resourceMsgs.push({ role: 'system', content: buildResourceSummaryBlock(s, r.name, lang) })
+      if (s) {
+        resourceMsgs.push({ role: 'system', content: buildResourceSummaryBlock(s, r.name, lang) })
+        items.push({ kind: 'res', key: `res:${r.id}`, title: r.name })
+      }
     }
   }
 
-  return { docMsgs, chatMsgs, resourceMsgs }
+  return { docMsgs, chatMsgs, resourceMsgs, items }
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +378,7 @@ async function buildMessages(
   chat: ChatMeta,
   history: ChatMessage[],
   appendUser: boolean
-): Promise<ChatCompletionMessageParam[]> {
+): Promise<{ messages: ChatCompletionMessageParam[]; memory: MemoryContext }> {
   const cfg = await loadConfig()
   const settings = await loadApiSettings()
   const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
@@ -395,7 +414,7 @@ async function buildMessages(
   }
 
   // 摘要注入：文档摘要 > 资源快照 > 对话摘要 > 资源摘要（按优先级排列）
-  const { docMsgs, chatMsgs, resourceMsgs } = await injectSummaries(chat, docContent, tree, activeKeys)
+  const { docMsgs, chatMsgs, resourceMsgs, items } = await injectSummaries(chat, docContent, tree, activeKeys)
 
   const snapshotMsgs: ChatCompletionMessageParam[] = []
   const snapshotIds = req.snapshotIds ?? lastUserAttachments(history)
@@ -417,7 +436,9 @@ async function buildMessages(
     ? [{ role: 'user', content: req.userText }]
     : []
 
-  return applyBudget(systemMsgs, auxMsgs, historyMsgs, tailMsgs, settings.model, settings.contextLimit)
+  const messages = applyBudget(systemMsgs, auxMsgs, historyMsgs, tailMsgs, settings.model, settings.contextLimit)
+  const memory: MemoryContext = { small: items, rollups: [], vector: [] }
+  return { messages, memory }
 }
 
 // ---------------------------------------------------------------------------
@@ -486,6 +507,28 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
   const controller = new AbortController()
   controllers.set(req.requestId, controller)
 
+  // B 层：大摘要自动补充（两段式记忆菜单）。非重新生成、且项目存在大摘要时，模型先“点菜”再作答。
+  let finalMessages = built.messages
+  if (!req.regenerate) {
+    const rollups = await readDocRollups(chat.projectId)
+    if (rollups.length > 0) {
+      try {
+        const { needs, reason } = await decideRollups(client, settings, built.messages, rollups)
+        if (needs.length > 0) {
+          const label = settings.language === 'en' ? 'Docs' : '第'
+          const suffix = settings.language === 'en' ? '' : ' 篇'
+          for (const r of needs) {
+            finalMessages = [...finalMessages, { role: 'system', content: buildRollupBlock(r, settings.language) }]
+            built.memory.rollups.push({ kind: 'rollup', key: r.id, title: `${label} ${r.rangeLabel}${suffix}`, reason })
+          }
+          built.memory.reason = reason || undefined
+        }
+      } catch {
+        /* 决策失败：不补充大摘要，直接作答，绝不卡住用户 */
+      }
+    }
+  }
+
   let acc = ''
   let reasoning = ''
   let usage: UsageLike | undefined
@@ -495,7 +538,7 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
     const stream = await client.chat.completions.create(
       {
         model: settings.model,
-        messages: built,
+        messages: finalMessages,
         stream: true,
         stream_options: { include_usage: true }
       },
@@ -577,9 +620,55 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
       requestId: req.requestId,
       content: acc,
       reasoning: reasoning || undefined,
-      usage: usage ? { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, total_tokens: usage.total_tokens } : undefined
+      usage: usage ? { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, total_tokens: usage.total_tokens } : undefined,
+      memory: built.memory
     })
   }
+}
+
+// ---------------------------------------------------------------------------
+// B 层两段式记忆菜单：模型先判断是否需要展开大摘要
+// ---------------------------------------------------------------------------
+
+function parseDecision(raw: string): { needs: string[]; reason: string } {
+  const s = raw.trim().replace(/```(?:json)?/gi, '').trim()
+  const attempt = (text: string): { needs: string[]; reason: string } | null => {
+    try {
+      const p = JSON.parse(text) as { needs?: unknown; reason?: unknown }
+      return { needs: Array.isArray(p.needs) ? (p.needs as unknown[]).map(String) : [], reason: String(p.reason ?? '') }
+    } catch {
+      return null
+    }
+  }
+  return attempt(s) ?? attempt(s.match(/\{[\s\S]*\}/)?.[0] ?? '') ?? { needs: [], reason: '' }
+}
+
+async function decideRollups(
+  client: OpenAI,
+  settings: ApiSettings,
+  messages: ChatCompletionMessageParam[],
+  rollups: DocRollup[]
+): Promise<{ needs: DocRollup[]; reason: string }> {
+  const catalog = buildRollupCatalogBlock(rollups, settings.language)
+  const instruction =
+    settings.language === 'en'
+      ? 'If you need more memory to answer the user, output JSON {"needs": ["id"...], "reason": "..."} with at most 5 ids. Otherwise output {"needs": [], "reason": ""}.'
+      : '如果你需要更多记忆才能回答用户，输出 JSON {"needs": ["id"...], "reason": "..."}，最多 5 个 id；否则输出 {"needs": [], "reason": ""}。'
+  const decisionMsgs: ChatCompletionMessageParam[] = [
+    ...messages,
+    { role: 'system', content: `${catalog}\n\n${instruction}` }
+  ]
+  const res = await client.chat.completions.create({
+    model: settings.model,
+    messages: decisionMsgs,
+    temperature: 0,
+    max_tokens: 300
+  })
+  if (res.usage) await recordUsage(res.usage, 'summary')
+  const d = parseDecision(res.choices[0]?.message?.content ?? '')
+  const byId = new Map(rollups.map((r) => [r.id, r]))
+  const needs = d.needs.slice(0, 5).map((id) => byId.get(id)).filter((r): r is DocRollup => !!r)
+  return { needs, reason: d.reason }
 }
 
 // ---------------------------------------------------------------------------
