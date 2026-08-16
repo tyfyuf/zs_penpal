@@ -111,6 +111,8 @@ const zh: Record<string, string> = {
   'chat.memoryCard': '本次记忆（{n}）',
   'chat.vectorSearch': '向量检索',
   'chat.vectorEmpty': '未命中相关内容',
+  'chat.attachDoc': '附加关联文档到对话',
+  'chat.docFullTextOn': '关联文档全文已打开，无需上传',
 
   'context.title': '上下文范围',
   'context.expandOnly': '仅可扩大',
@@ -367,6 +369,8 @@ const en: Record<string, string> = {
   'chat.memoryCard': 'Memory used ({n})',
   'chat.vectorSearch': 'Vector search',
   'chat.vectorEmpty': 'No related chunks found',
+  'chat.attachDoc': 'Attach linked document',
+  'chat.docFullTextOn': 'Full text already enabled — no need to attach',
 
   'context.title': 'Context range',
   'context.expandOnly': 'Expand only',

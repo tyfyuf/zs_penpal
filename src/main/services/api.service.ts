@@ -2,6 +2,7 @@ import OpenAI from 'openai'
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
 import type {
   AppConfig,
+  ChatAttachment,
   ChatMessage,
   ChatMeta,
   ConnectionTestResult,
@@ -154,7 +155,17 @@ function lastUserAttachments(history: ChatMessage[]): string[] {
   for (let i = history.length - 1; i >= 0; i--) {
     const m = history[i]
     if (m.role === 'user' && m.attachments?.length) {
-      return m.attachments.map((a) => a.snapshotId)
+      return m.attachments.map((a) => a.snapshotId).filter((x): x is string => !!x)
+    }
+  }
+  return []
+}
+
+function lastUserDocAttachments(history: ChatMessage[]): string[] {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i]
+    if (m.role === 'user' && m.attachments?.length) {
+      return m.attachments.map((a) => a.docId).filter((x): x is string => !!x)
     }
   }
   return []
@@ -425,6 +436,22 @@ async function buildMessages(
     }
   }
 
+  // 附加文档：读当前内容一次性注入；与全文注入去重（同文档已全文注入则跳过）
+  const fullTextDocIds = new Set<string>()
+  if (chat.kind === 'doc' && chat.docId && cfg.summaryInjection.doc.fullText && activeKeys.has('fulltext')) {
+    fullTextDocIds.add(chat.docId)
+  }
+  const docIds = req.docIds ?? lastUserDocAttachments(history)
+  for (const docId of docIds) {
+    if (fullTextDocIds.has(docId)) continue
+    try {
+      const { doc, content } = await readDoc(docId)
+      snapshotMsgs.push({ role: 'system', content: `${en ? '【Attached document: ' : '【附加文档：'}${doc.title}】\n${content}` })
+    } catch {
+      /* 文档已删除等，跳过 */
+    }
+  }
+
   const auxMsgs: ChatCompletionMessageParam[] = [...docMsgs, ...snapshotMsgs, ...chatMsgs, ...resourceMsgs]
 
   // 历史
@@ -480,10 +507,18 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
     }
     historyForPrompt = lastAssistantIdx >= 0 ? messages.filter((_, i) => i !== lastAssistantIdx) : messages
   } else {
-    const attachments = []
+    const attachments: ChatAttachment[] = []
     for (const sid of req.snapshotIds ?? []) {
       const snap = await readSnapshot(chat.projectId, chat.id, sid)
       if (snap) attachments.push({ snapshotId: sid, name: snap.name })
+    }
+    for (const docId of req.docIds ?? []) {
+      try {
+        const { doc } = await readDoc(docId)
+        attachments.push({ docId, name: doc.title })
+      } catch {
+        /* 文档已删除等，跳过 */
+      }
     }
     await appendMessage(req.chatId, {
       id: req.userMessageId,

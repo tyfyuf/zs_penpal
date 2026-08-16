@@ -350,6 +350,19 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     }
   }
 
+  /** 附加关联文档（写作文档）到当前对话；与全文注入去重 */
+  function attachLinkedDoc(): void {
+    if (!chat?.docId) return
+    if (attachments.some((a) => a.docId === chat.docId)) return
+    const hasFullText = !!config?.summaryEnabled && !!config?.summaryInjection?.doc?.fullText && chat.kind === 'doc'
+    if (hasFullText) {
+      toast.info(t('chat.docFullTextOn'))
+      return
+    }
+    const title = docTitle ?? chat.docId
+    setAttachments((a) => [...a, { docId: chat.docId, name: title }])
+  }
+
   async function send(regenerate = false): Promise<void> {
     if (streaming) return
     if (!regenerate && !input.trim() && attachments.length === 0) return
@@ -395,7 +408,8 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       chatId,
       requestId,
       userText: regenerate ? '' : input,
-      snapshotIds: regenerate ? undefined : attachments.map((a) => a.snapshotId),
+      snapshotIds: regenerate ? undefined : attachments.map((a) => a.snapshotId).filter((x): x is string => !!x),
+      docIds: regenerate ? undefined : attachments.map((a) => a.docId).filter((x): x is string => !!x),
       contextRange: streamRange,
       regenerate,
       regenerateReason: regenerate ? pendingReasonRef.current ?? undefined : undefined,
@@ -656,24 +670,32 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       <div className="border-t p-3" style={{ borderColor: 'var(--border)' }}>
         {attachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1">
-            {attachments.map((a) => (
-              <span key={a.snapshotId} className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs" style={{ background: 'var(--panel3)' }}>
-                <FileText size={11} />
-                {a.name}
-                <button
-                  className="opacity-60 hover:opacity-100"
-                  onClick={() => setAttachments(attachments.filter((x) => x.snapshotId !== a.snapshotId))}
-                >
-                  ×
-                </button>
-              </span>
-            ))}
+            {attachments.map((a) => {
+              const key = a.snapshotId ?? a.docId ?? a.name
+              return (
+                <span key={key} className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs" style={{ background: 'var(--panel3)' }}>
+                  <FileText size={11} />
+                  {a.name}
+                  <button
+                    className="opacity-60 hover:opacity-100"
+                    onClick={() => setAttachments(attachments.filter((x) => (x.snapshotId ?? x.docId ?? x.name) !== key))}
+                  >
+                    ×
+                  </button>
+                </span>
+              )
+            })}
           </div>
         )}
         <div className="flex items-end gap-2">
           <button className="btn !px-2 !py-2" title={t('chat.upload')} onClick={() => setShowUpload(true)}>
             <Paperclip size={16} />
           </button>
+          {chat?.docId && (
+            <button className="btn !px-2 !py-2" title={t('chat.attachDoc')} onClick={attachLinkedDoc}>
+              <FileText size={16} />
+            </button>
+          )}
           <textarea
             className="input min-h-[40px] flex-1 resize-none"
             rows={1}

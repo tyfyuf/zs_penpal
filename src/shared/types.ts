@@ -75,7 +75,10 @@ export interface ResourceMeta {
 }
 
 export interface ChatAttachment {
-  snapshotId: string
+  /** 资源快照附件 */
+  snapshotId?: string
+  /** 附加文档（读当前内容） */
+  docId?: string
   name: string
 }
 
@@ -443,6 +446,8 @@ export interface StreamRequest {
   userText: string
   /** 本次上传的资源快照 ID（主进程据此读取对话内部快照） */
   snapshotIds?: string[]
+  /** 本次附加的写作文档 ID（读当前内容，主进程注入并做全文去重） */
+  docIds?: string[]
   /** 文档级上下文对话的上下文范围；项目级/文档级对话为空 */
   contextRange?: StreamContextRange
   /** 重新生成最近一条 AI 回答（PRD 6.6，替换最近回答并保留用户输入） */
