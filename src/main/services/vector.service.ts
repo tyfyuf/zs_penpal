@@ -11,6 +11,7 @@ import {
   type NeuralEmbedder
 } from './neural-embed.service'
 import { logVectorEvent } from './log.service'
+import { analyzeTextIntegrity } from './text-decoding.service'
 
 // ---------------------------------------------------------------------------
 // 本地向量检索（兜底层）：
@@ -21,7 +22,7 @@ import { logVectorEvent } from './log.service'
 
 const HASH_EMBED_DIM = 256
 const HASH_EMBED_MODEL = 'fnv-ngram-256'
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 const HASH_CHUNK_TARGET = 800
 const HASH_CHUNK_OVERLAP = 100
 const MAX_BOUNDARY_SCAN = 240
@@ -328,6 +329,8 @@ async function buildWithBackend(projectId: string, backend: EmbeddingBackend): P
   for (const doc of tree.docs) {
     try {
       const { content } = await readDoc(doc.id)
+      const integrity = analyzeTextIntegrity(content)
+      if (integrity.suspicious) continue
       const chunkCount = await appendSourceChunks(chunks, backend, {
         docId: doc.id,
         kind: 'doc',
@@ -342,7 +345,8 @@ async function buildWithBackend(projectId: string, backend: EmbeddingBackend): P
   }
   for (const resource of tree.resources) {
     try {
-      const { content, name } = await readResource(projectId, resource.id)
+      const { content, name, encoding } = await readResource(projectId, resource.id)
+      if (encoding.suspicious) continue
       const chunkCount = await appendSourceChunks(chunks, backend, {
         docId: resource.id,
         kind: 'res',
@@ -442,6 +446,11 @@ export async function getVectorIndexStatus(projectId: string): Promise<VectorInd
     let chunkCount = chunkCounts.get(doc.id) ?? 0
     try {
       const { content } = await readDoc(doc.id)
+      const integrity = analyzeTextIntegrity(content)
+      if (integrity.suspicious) {
+        files.push({ id: doc.id, kind: 'doc', title: doc.title, status: 'encoding-error', chunkCount: 0, issue: integrity.issue })
+        continue
+      }
       const source = sourceMap.get(doc.id)
       if (source) {
         chunkCount = source.chunkCount
@@ -459,7 +468,11 @@ export async function getVectorIndexStatus(projectId: string): Promise<VectorInd
     let status: VectorIndexFileStatus['status'] = 'not-indexed'
     let chunkCount = chunkCounts.get(resource.id) ?? 0
     try {
-      const { content, name } = await readResource(projectId, resource.id)
+      const { content, name, encoding } = await readResource(projectId, resource.id)
+      if (encoding.suspicious) {
+        files.push({ id: resource.id, kind: 'res', title: name, status: 'encoding-error', chunkCount: 0, issue: encoding.issue })
+        continue
+      }
       const source = sourceMap.get(resource.id)
       if (source) {
         chunkCount = source.chunkCount

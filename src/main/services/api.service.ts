@@ -41,12 +41,14 @@ import {
   readDoc,
   readDocRollups,
   readDocSummary,
+  readResource,
   readResourceSummary,
   readSnapshot,
   renameChat,
   replaceLastAssistantMessage
 } from './file.service'
 import { newId, nowIso } from '../util'
+import { analyzeTextIntegrity } from './text-decoding.service'
 import { broadcast } from '../window'
 
 // ---------------------------------------------------------------------------
@@ -603,10 +605,16 @@ async function injectSummaries(
   if (includeResources) {
     for (const r of tree.resources) {
       if (!activeKeys.has(`res:${r.id}`)) continue
-      const s = await readResourceSummary(projectId, r.id)
-      if (s) {
-        resourceMsgs.push({ role: 'system', content: buildResourceSummaryBlock(s, r.name, lang) })
-        items.push({ kind: 'res', key: `res:${r.id}`, title: r.name })
+      try {
+        const resource = await readResource(projectId, r.id)
+        if (resource.encoding.suspicious) continue
+        const summary = await readResourceSummary(projectId, r.id)
+        if (summary) {
+          resourceMsgs.push({ role: 'system', content: buildResourceSummaryBlock(summary, r.name, lang) })
+          items.push({ kind: 'res', key: `res:${r.id}`, title: r.name })
+        }
+      } catch {
+        // A broken resource must not block the whole conversation.
       }
     }
   }
@@ -668,11 +676,17 @@ async function buildRegenerateGuidance(
         if (s && (s.items.length > 0 || (s.compacted?.length ?? 0) > 0)) blocks.push(buildChatSummaryBlock(s, lang))
       } else if (key.startsWith('res:')) {
         const resId = key.slice(4)
-        const s = await readResourceSummary(chat.projectId, resId)
-        if (s) {
-          const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
-          const name = tree?.resources.find((r) => r.id === resId)?.name ?? (en ? 'resource' : '资源')
-          blocks.push(buildResourceSummaryBlock(s, name, lang))
+        try {
+          const resource = await readResource(chat.projectId, resId)
+          if (resource.encoding.suspicious) continue
+          const summary = await readResourceSummary(chat.projectId, resId)
+          if (summary) {
+            const tree = (await buildSnapshot()).projects.find((project) => project.project.id === chat.projectId)
+            const name = tree?.resources.find((resourceMeta) => resourceMeta.id === resId)?.name ?? (en ? 'resource' : '\u8d44\u6e90')
+            blocks.push(buildResourceSummaryBlock(summary, name, lang))
+          }
+        } catch {
+          // Deleted or unreadable resources are ignored for regenerated guidance.
         }
       }
     }
@@ -715,17 +729,24 @@ async function buildMessages(
   // 关联文档上下文（切片 或 全文）
   let docContent: string | null = null
   if (chat.kind === 'context' && chat.docId && req.contextRange) {
-    docContent = (await readDoc(req.contextRange.docId)).content
-    const slice = sliceContext(docContent, req.contextRange)
-    systemMsgs.push({ role: 'system', content: buildContextBlock(slice, lang) })
+    const content = (await readDoc(req.contextRange.docId)).content
+    if (!analyzeTextIntegrity(content).suspicious) {
+      docContent = content
+      const slice = sliceContext(docContent, req.contextRange)
+      systemMsgs.push({ role: 'system', content: buildContextBlock(slice, lang) })
+    }
   } else if (chat.kind === 'doc' && chat.docId) {
     // 文档级对话：读取全文用于触发摘要检测（PRD 7.2），并按配置注入全文
-    docContent = (await readDoc(chat.docId)).content
-    if (cfg.summaryEnabled) {
-      await ensureDocSummary(chat.projectId, chat.docId, docContent)
-    }
-    if (cfg.summaryInjection.doc.fullText && activeKeys.has('fulltext')) {
-      systemMsgs.push({ role: 'system', content: `${en ? '【Full text of linked document】' : '【关联文档全文】'}\n${docContent}` })
+    const content = (await readDoc(chat.docId)).content
+    if (!analyzeTextIntegrity(content).suspicious) {
+      docContent = content
+      if (cfg.summaryEnabled) {
+        await ensureDocSummary(chat.projectId, chat.docId, docContent)
+      }
+      if (cfg.summaryInjection.doc.fullText && activeKeys.has('fulltext')) {
+        const label = en ? '\u3010Full text of linked document\u3011' : '\u3010\u5173\u8054\u6587\u6863\u5168\u6587\u3011'
+        systemMsgs.push({ role: 'system', content: `${label}\n${docContent}` })
+      }
     }
   }
 
@@ -742,7 +763,7 @@ async function buildMessages(
   const snapshotIds = req.snapshotIds ?? lastUserAttachments(history)
   for (const sid of snapshotIds) {
     const snap = await readSnapshot(chat.projectId, chat.id, sid)
-    if (snap) {
+    if (snap && !analyzeTextIntegrity(snap.content).suspicious) {
       snapshotMsgs.push({ role: 'system', content: `${en ? '【Uploaded file: ' : '【用户上传文件：'}${snap.name}】\n${snap.content}` })
     }
   }
@@ -757,6 +778,7 @@ async function buildMessages(
     if (fullTextDocIds.has(docId)) continue
     try {
       const { doc, content } = await readDoc(docId)
+      if (analyzeTextIntegrity(content).suspicious) continue
       snapshotMsgs.push({ role: 'system', content: `${en ? '【Attached document: ' : '【附加文档：'}${doc.title}】\n${content}` })
     } catch {
       /* 文档已删除等，跳过 */

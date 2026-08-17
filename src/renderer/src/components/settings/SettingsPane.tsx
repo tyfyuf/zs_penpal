@@ -470,12 +470,18 @@ export default function SettingsPane(): JSX.Element {
                   {status && status.files.length > 0 ? (
                     <div className="mt-2 space-y-1">
                       {status.files.map((file) => {
-                        const color = file.status === 'indexed' ? 'var(--ok)' : file.status === 'stale' ? 'var(--warn)' : 'var(--muted)'
+                        const color = file.status === 'indexed'
+                          ? 'var(--ok)'
+                          : file.status === 'stale' || file.status === 'encoding-error'
+                            ? 'var(--warn)'
+                            : 'var(--muted)'
                         const label = file.status === 'indexed'
                           ? t('settings.vectorIndexIndexed')
                           : file.status === 'stale'
                             ? t('settings.vectorIndexStale')
-                            : t('settings.vectorIndexNotBuilt')
+                            : file.status === 'encoding-error'
+                              ? t('settings.vectorIndexEncodingError')
+                              : t('settings.vectorIndexNotBuilt')
                         return (
                           <div key={`${file.kind}:${file.id}`} className="flex items-center gap-2 text-xs">
                             <span className="h-1.5 w-1.5 rounded-full" style={{ background: color }} />

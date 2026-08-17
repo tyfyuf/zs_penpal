@@ -142,9 +142,9 @@ export default function Sidebar(): JSX.Element {
       toast.error(t('sidebar.badExt'))
       return
     }
-    const content = await file.text()
+    const data = new Uint8Array(await file.arrayBuffer())
     try {
-      await api.invoke('resource:upload', { projectId, name: file.name, content })
+      await api.invoke('resource:upload', { projectId, name: file.name, data })
       await refresh()
     } catch (err) {
       toast.error((err as Error).message)

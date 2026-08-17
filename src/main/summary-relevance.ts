@@ -1,5 +1,5 @@
 import type { AppConfig, ChatMeta, ProjectTree } from '@shared/types'
-import { readChatSummary, readDocSummary, readResourceSummary } from './services/file.service'
+import { readChatSummary, readDocSummary, readResource, readResourceSummary } from './services/file.service'
 
 // ---------------------------------------------------------------------------
 // 摘要注入的候选收集、相关度采样、激活键计算。
@@ -114,6 +114,13 @@ export async function selectDefaultKeys(chat: ChatMeta, applicable: string[]): P
     if (k === 'fulltext') continue
     const kind = summaryKeyKind(k)
     const id = k.slice(kind === 'doc' ? 4 : kind === 'chat' ? 5 : 4)
+    if (kind === 'res') {
+      try {
+        if ((await readResource(chat.projectId, id)).encoding.suspicious) continue
+      } catch {
+        continue
+      }
+    }
     const s =
       kind === 'doc'
         ? await readDocSummary(chat.projectId, id)

@@ -1,6 +1,6 @@
 import { join } from 'path'
 import { basename } from 'path'
-import { mkdir, readdir, readFile, rm } from 'fs/promises'
+import { mkdir, readdir, readFile, rm, writeFile } from 'fs/promises'
 import type {
   ChatKind,
   ChatMessage,
@@ -13,6 +13,7 @@ import type {
   ProjectTree,
   ResourceMeta,
   ResourceSummary,
+  TextEncodingInfo,
   UploadResult,
   VectorIndex,
   WorkspaceSnapshot
@@ -20,6 +21,7 @@ import type {
 import { getConfigCached } from './config.service'
 import { appendJsonl, atomicWrite, atomicWriteJson, newId, nowIso, readJson, readJsonl } from '../util'
 import { computeSourceInfo } from '../summary-source'
+import { assertTextIntegrity, decodeTextBuffer, readDecodedTextFile } from './text-decoding.service'
 
 // ---------------------------------------------------------------------------
 // 目录结构（依据 tech-stack 7.2，生命周期状态存于元数据 JSON，不依赖目录移动）
@@ -104,6 +106,10 @@ function resourceMetaPath(projectId: string, fileId: string): string {
 function resourceContentPath(projectId: string, fileId: string): string {
   return join(resourceDir(projectId, fileId), 'content')
 }
+function resourceSourcePath(projectId: string, fileId: string): string {
+  return join(resourceDir(projectId, fileId), 'source.bin')
+}
+
 
 // ---------------------------------------------------------------------------
 // 工作目录索引
@@ -214,8 +220,7 @@ async function getDocMeta(projectId: string, docId: string): Promise<DocMeta> {
 
 export async function readDoc(docId: string): Promise<{ doc: DocMeta; content: string }> {
   const doc = await findDocMeta(docId)
-  const { readFile } = await import('fs/promises')
-  const content = await readFile(docContentPath(doc.projectId, docId), 'utf8')
+  const { text: content } = await readDecodedTextFile(docContentPath(doc.projectId, docId))
   return { doc, content }
 }
 
@@ -468,17 +473,93 @@ export async function uploadResource(
 ): Promise<ResourceMeta> {
   const id = newId()
   const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : 'txt'
-  const meta: ResourceMeta = { id, projectId, name, ext, size: Buffer.byteLength(content, 'utf8'), createdAt: nowIso() }
+  const meta: ResourceMeta = {
+    id,
+    projectId,
+    name,
+    ext,
+    size: Buffer.byteLength(content, 'utf8'),
+    createdAt: nowIso(),
+    sourceEncoding: 'utf-8',
+    sourceEncodingConfidence: 100,
+    sourceHadBom: false
+  }
   await atomicWriteJson(resourceMetaPath(projectId, id), meta)
   await atomicWrite(resourceContentPath(projectId, id), content)
+  await invalidateVectorIndex(projectId)
   return meta
 }
 
-export async function readResource(projectId: string, resourceId: string): Promise<{ content: string; name: string }> {
-  const { readFile } = await import('fs/promises')
+export async function uploadResourceBytes(
+  projectId: string,
+  name: string,
+  data: Uint8Array,
+  encodingHint?: string
+): Promise<ResourceMeta> {
+  const decoded = decodeTextBuffer(data, encodingHint)
+  assertTextIntegrity(decoded.info, name)
+  const id = newId()
+  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : 'txt'
+  const meta: ResourceMeta = {
+    id,
+    projectId,
+    name,
+    ext,
+    size: Buffer.byteLength(decoded.text, 'utf8'),
+    createdAt: nowIso(),
+    sourceEncoding: decoded.info.encoding,
+    sourceEncodingConfidence: decoded.info.confidence,
+    sourceHadBom: decoded.info.hadBom
+  }
+  await atomicWriteJson(resourceMetaPath(projectId, id), meta)
+  await atomicWrite(resourceContentPath(projectId, id), decoded.text)
+  await writeFile(resourceSourcePath(projectId, id), Buffer.from(data))
+  await invalidateVectorIndex(projectId)
+  return meta
+}
+
+export async function readResource(projectId: string, resourceId: string): Promise<{
+  content: string
+  name: string
+  encoding: TextEncodingInfo
+}> {
   const meta = await readJson<ResourceMeta>(resourceMetaPath(projectId, resourceId))
-  const content = await readFile(resourceContentPath(projectId, resourceId), 'utf8')
-  return { content, name: meta?.name ?? resourceId }
+  const decoded = await readDecodedTextFile(resourceContentPath(projectId, resourceId))
+  return {
+    content: decoded.text,
+    name: meta?.name ?? resourceId,
+    encoding: {
+      ...decoded.info,
+      encoding: meta?.sourceEncoding ?? decoded.info.encoding,
+      confidence: meta?.sourceEncodingConfidence ?? decoded.info.confidence,
+      hadBom: meta?.sourceHadBom ?? decoded.info.hadBom
+    }
+  }
+}
+
+export async function replaceResourceBytes(
+  projectId: string,
+  resourceId: string,
+  data: Uint8Array,
+  encodingHint?: string
+): Promise<ResourceMeta> {
+  const current = await readJson<ResourceMeta>(resourceMetaPath(projectId, resourceId))
+  if (!current) throw new Error('resource not found')
+  const decoded = decodeTextBuffer(data, encodingHint)
+  assertTextIntegrity(decoded.info, current.name)
+  const next: ResourceMeta = {
+    ...current,
+    size: Buffer.byteLength(decoded.text, 'utf8'),
+    sourceEncoding: decoded.info.encoding,
+    sourceEncodingConfidence: decoded.info.confidence,
+    sourceHadBom: decoded.info.hadBom
+  }
+  await atomicWrite(resourceContentPath(projectId, resourceId), decoded.text)
+  await writeFile(resourceSourcePath(projectId, resourceId), Buffer.from(data))
+  await atomicWriteJson(resourceMetaPath(projectId, resourceId), next)
+  await rm(resourceSummaryPath(projectId, resourceId), { force: true })
+  await invalidateVectorIndex(projectId)
+  return next
 }
 
 export async function deleteResource(projectId: string, resourceId: string): Promise<void> {
@@ -505,9 +586,13 @@ export async function importExternalFile(filePath: string): Promise<{
   if (!['.txt', '.md', '.csv'].includes(ext)) {
     return { ok: false, error: '不支持的文件类型，仅支持 .txt / .md / .csv' }
   }
+  let bytes: Buffer
   let content: string
   try {
-    content = await readFile(filePath, 'utf8')
+    bytes = await readFile(filePath)
+    const decoded = decodeTextBuffer(bytes)
+    assertTextIntegrity(decoded.info, basename(filePath))
+    content = decoded.text
   } catch (err) {
     return { ok: false, error: `无法读取文件：${(err as Error).message}` }
   }
@@ -521,6 +606,10 @@ export async function importExternalFile(filePath: string): Promise<{
     const existing = resources.find((r) => r.name === name)
     if (existing) {
       const res = await readResource(p.id, existing.id)
+      if (res.encoding.suspicious) {
+        await replaceResourceBytes(p.id, existing.id, bytes)
+        return { ok: true, projectId: p.id, resourceId: existing.id, name, content, created: false }
+      }
       return { ok: true, projectId: p.id, resourceId: existing.id, name, content: res.content, created: false }
     }
   }
@@ -528,7 +617,7 @@ export async function importExternalFile(filePath: string): Promise<{
   // 新建项目并作为资源导入
   const base = name.replace(/\.[^.]+$/, '') || '导入文件'
   const project = await createProject(base)
-  const resource = await uploadResource(project.id, name, content)
+  const resource = await uploadResourceBytes(project.id, name, bytes)
   return { ok: true, projectId: project.id, resourceId: resource.id, name, content, created: true }
 }
 
@@ -547,7 +636,7 @@ interface SnapshotFile {
 export async function attachResourceSnapshot(
   chatId: string,
   projectId: string,
-  source: { mode: 'resource'; resourceId: string } | { mode: 'local'; name: string; content: string }
+  source: { mode: 'resource'; resourceId: string } | { mode: 'local'; name: string; data: Uint8Array; encodingHint?: string }
 ): Promise<UploadResult> {
   const chat = await getChatMeta(chatId)
   let resource: ResourceMeta
@@ -556,12 +645,14 @@ export async function attachResourceSnapshot(
   let resourceId: string | undefined
 
   if (source.mode === 'local') {
-    resource = await uploadResource(projectId, source.name, source.content)
-    content = source.content
-    name = source.name
+    resource = await uploadResourceBytes(projectId, source.name, source.data, source.encodingHint)
+    const uploaded = await readResource(projectId, resource.id)
+    content = uploaded.content
+    name = uploaded.name
     resourceId = resource.id
   } else {
     const res = await readResource(projectId, source.resourceId)
+    assertTextIntegrity(res.encoding, res.name)
     content = res.content
     name = res.name
     resource = (await readJson<ResourceMeta>(resourceMetaPath(projectId, source.resourceId)))!
@@ -644,6 +735,10 @@ export async function readVectorIndex(projectId: string): Promise<VectorIndex | 
 
 export async function writeVectorIndex(projectId: string, index: VectorIndex): Promise<void> {
   await atomicWriteJson(vectorIndexPath(projectId), index)
+}
+
+export async function invalidateVectorIndex(projectId: string): Promise<void> {
+  await rm(vectorIndexPath(projectId), { force: true })
 }
 
 // ---------------------------------------------------------------------------

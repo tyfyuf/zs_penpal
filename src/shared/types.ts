@@ -72,6 +72,24 @@ export interface ResourceMeta {
   ext: string
   size: number
   createdAt: string
+  /** Detected source encoding; internal content is always normalized to UTF-8. */
+  sourceEncoding?: string
+  sourceEncodingConfidence?: number
+  sourceHadBom?: boolean
+}
+
+export type TextIntegrityIssue = 'replacement-characters' | 'nul-characters' | 'control-characters' | 'mojibake'
+
+export interface TextEncodingInfo {
+  encoding: string
+  confidence: number
+  hadBom: boolean
+  suspicious: boolean
+  issue?: TextIntegrityIssue
+  replacementCount: number
+  nulCount: number
+  controlCount: number
+  mojibakeCount: number
 }
 
 export interface ChatAttachment {
@@ -311,7 +329,7 @@ export interface VectorSearchHit {
   score: number
 }
 
-export type VectorSourceStatus = 'indexed' | 'stale' | 'not-indexed'
+export type VectorSourceStatus = 'indexed' | 'stale' | 'not-indexed' | 'encoding-error'
 
 export interface VectorIndexFileStatus {
   id: string
@@ -319,6 +337,7 @@ export interface VectorIndexFileStatus {
   title: string
   status: VectorSourceStatus
   chunkCount: number
+  issue?: TextIntegrityIssue
 }
 
 export interface VectorIndexStatus {

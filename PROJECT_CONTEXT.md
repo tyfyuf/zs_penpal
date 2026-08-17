@@ -56,6 +56,7 @@
 | `<workspace>/<projectId>/summaries/docs/<docId>.json` | 文档摘要（故事拆解 + 源指纹） |
 | `<workspace>/<projectId>/summaries/chats/<chatId>.json` | 对话摘要（尾部逐条 + 历史压缩区间） |
 | `<workspace>/<projectId>/summaries/resources/<resId>.json` | 资源摘要（源指纹 + 故事/通用拆解） |
+| `<workspace>/<projectId>/resources/<resId>/source.bin` | Original bytes of an imported external resource; `content` is normalized to UTF-8 |
 | `<workspace>/<projectId>/summaries/rollups/<projectId>.json` | 大摘要（每 10 文档聚合，设置页管理） |
 | `<workspace>/<projectId>/summaries/vector-index/<projectId>.json` | 本地向量索引（原文分块嵌入） |
 | `<userData>/app-config.json` | 应用设置（含 `apiBaseUrl`、`model`、`contextLimit`、`language`、`summaryInjection`、`gitAuthor*`；**不含 Key**） |
@@ -83,6 +84,7 @@ D:\ds h-project\
 │  │  │  ├─ summary.service.ts     # 摘要/蒸馏/分类/大摘要 rollup/一致性扫描
 │  │  │  ├─ vector.service.ts      # 本地混合检索（BGE/特征哈希语义 + 轻量字面召回）
 │  │  │  ├─ neural-embed.service.ts # 本地 BGE 加载、tokenizer、批量推理与故障冷却
+│  │  │  ├─ text-decoding.service.ts # Encoding detection/decoding and corruption-integrity gate
 │  │  │  └─ …(tokenizer/usage/git/export/recovery/migration/config/log/crypto)
 │  │  ├─ summary-source.ts         # 源指纹/三级新鲜度工具（src/main 根）
 │  │  ├─ summary-relevance.ts      # 注入候选/相关度采样/激活键计算（主渲染共用）
@@ -280,6 +282,15 @@ export interface ChatMeta {
 - “本次记忆”逐次展示自动检索/工具检索的查询、结果和命中片段。
 - 实施说明与验收清单：`docs/host-rag-tool-loop-implementation-2026-08-17.md`。
 - 尚需真实设定集专名召回验收、DeepSeek/OpenAI/Qwen/GLM 工具兼容矩阵、混合阈值调优、工具能力持久化和低上下文预算裁剪。
+
+### 6.4.1 Text encoding compatibility P0 (implemented; UI acceptance still required)
+
+- **Root cause:** the old renderer used `File.text()`, which always decodes external files as UTF-8. GBK/GB18030, Big5 and UTF-16 files therefore acquired `U+FFFD` replacement characters before workspace persistence; summaries, distillation and indexes subsequently only received corrupted text.
+- **Import path:** renderer resource/local-attachment upload now sends `Uint8Array`; file-association import also reads bytes. `text-decoding.service.ts` applies BOM detection, strict UTF-8 validation, then `chardet` + `iconv-lite` decoding. Internal `content` is stored as UTF-8 while original bytes are retained in `source.bin` with detected encoding metadata.
+- **Isolation:** replacement characters, NUL/control characters and common mojibake patterns mark a resource as suspicious. It is rejected for distillation and chat snapshots, skipped by summary injection/default selection/search and vector indexing, and cannot block an entire chat or index build. Vector-index schema v3 forces old corrupt chunks out during rebuild; Settings reports the file as `encoding-error`.
+- **Repair:** Resource Viewer warns that the legacy content is excluded, and offers re-import of the original `.txt/.md/.csv`; repair removes the old resource summary and invalidates the index. Persisted `U+FFFD` content cannot be recovered by reverse decoding because its original bytes were already lost: the user must choose the source file again.
+- **Verified:** UTF-8, GB18030, Big5, Shift-JIS and BOM UTF-16LE decoding; corruption guard; `npm run typecheck`; `npm run build`.
+- **Known conservative boundary:** automatic detection is reliable for normal/long text samples, but a very short non-UTF-8 file can have low confidence. A future optional encoding picker in the re-import flow can address such cases without allowing suspicious text into LLM/context/index paths.
 
 ### 6.4 其他待办（原有）
 

@@ -233,6 +233,7 @@ const zh: Record<string, string> = {
   'settings.vectorIndexNotBuilt': '未生成',
   'settings.vectorIndexIndexed': '已索引',
   'settings.vectorIndexStale': '可能过期',
+  'settings.vectorIndexEncodingError': '编码异常，已跳过',
   'settings.vectorIndexChunks': '{n} 个分块',
   'settings.vectorIndexFileChunks': '{n} 块',
   'settings.vectorIndexUpdated': '更新时间：{date}',
@@ -292,7 +293,13 @@ const zh: Record<string, string> = {
   'distill.titleFail': '标题生成失败',
 
   'resource.readonly': '资源文件（只读）',
-  'resource.loading': '加载中…'
+  'resource.loading': '加载中…',
+  'resource.encoding': '源编码：{encoding}',
+  'resource.encodingWarning': '检测到疑似编码乱码',
+  'resource.encodingWarningHint': '该内容不会进入摘要、会话附件或向量索引。请重新选择原文件，应用会自动识别编码并覆盖此资源。',
+  'resource.reimport': '重新导入原文件',
+  'resource.reimporting': '正在重新导入…',
+  'resource.reimported': '资源已按正确编码重新导入；旧摘要和索引已失效'
 }
 
 const en: Record<string, string> = {
@@ -522,6 +529,7 @@ const en: Record<string, string> = {
   'settings.vectorIndexNotBuilt': 'Not indexed',
   'settings.vectorIndexIndexed': 'Indexed',
   'settings.vectorIndexStale': 'Possibly stale',
+  'settings.vectorIndexEncodingError': 'Encoding error; skipped',
   'settings.vectorIndexChunks': '{n} chunk(s)',
   'settings.vectorIndexFileChunks': '{n} chunk(s)',
   'settings.vectorIndexUpdated': 'Updated: {date}',
@@ -581,7 +589,13 @@ const en: Record<string, string> = {
   'distill.titleFail': 'Title generation failed',
 
   'resource.readonly': 'Resource file (read-only)',
-  'resource.loading': 'Loading…'
+  'resource.loading': 'Loading…',
+  'resource.encoding': 'Source encoding: {encoding}',
+  'resource.encodingWarning': 'Possible text-encoding corruption detected',
+  'resource.encodingWarningHint': 'This content is excluded from summaries, chat attachments, and vector indexes. Re-select the original file to auto-detect its encoding and replace this resource.',
+  'resource.reimport': 'Re-import original',
+  'resource.reimporting': 'Re-importing…',
+  'resource.reimported': 'Resource re-imported; the old summary and vector index were invalidated'
 }
 
 const dictionaries: Record<Locale, Record<string, string>> = { zh, en }

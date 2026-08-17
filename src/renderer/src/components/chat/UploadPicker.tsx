@@ -37,9 +37,9 @@ export default function UploadPicker({ chatId, projectId, onAttached, onClose }:
       toast.error(t('sidebar.badExt'))
       return
     }
-    const content = await file.text()
+    const data = new Uint8Array(await file.arrayBuffer())
     try {
-      const r = await api.invoke('chat:attachResource', { chatId, projectId, source: { mode: 'local', name: file.name, content } })
+      const r = await api.invoke('chat:attachResource', { chatId, projectId, source: { mode: 'local', name: file.name, data } })
       onAttached(r)
       onClose()
     } catch (err) {

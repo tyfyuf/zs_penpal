@@ -23,6 +23,7 @@ import type {
   RecoveryState,
   ResourceMeta,
   ResourceSummary,
+  TextEncodingInfo,
   StreamDonePayload,
   StreamRequest,
   SummarySearchResult,
@@ -57,10 +58,14 @@ export interface ChatGetResult {
   messages: ChatMessage[]
 }
 
-export interface ResourceUploadInput {
-  projectId: string
+export interface BinaryTextFileInput {
   name: string
-  content: string
+  data: Uint8Array
+  encodingHint?: string
+}
+
+export interface ResourceUploadInput extends BinaryTextFileInput {
+  projectId: string
 }
 
 export interface StreamChatInput extends StreamRequest {}
@@ -114,6 +119,7 @@ export const IPC = {
   resourceList: 'resource:list',
   resourceUpload: 'resource:upload',
   resourceRead: 'resource:read',
+  resourceReplace: 'resource:replace',
   resourceDelete: 'resource:delete',
   resourceDistill: 'resource:distill',
   resourceUndistill: 'resource:undistill',
@@ -184,7 +190,7 @@ export interface IpcApi {
     req: {
       chatId: string
       projectId: string
-      source: { mode: 'resource'; resourceId: string } | { mode: 'local'; name: string; content: string }
+      source: { mode: 'resource'; resourceId: string } | ({ mode: 'local' } & BinaryTextFileInput)
     }
     res: UploadResult
   }
@@ -202,7 +208,14 @@ export interface IpcApi {
   [IPC.chatGenerateTitle]: { req: string; res: { ok: boolean; title?: string; error?: string } }
   [IPC.resourceList]: { req: string; res: ResourceMeta[] }
   [IPC.resourceUpload]: { req: ResourceUploadInput; res: ResourceMeta }
-  [IPC.resourceRead]: { req: { resourceId: string; projectId: string }; res: { content: string; name: string } }
+  [IPC.resourceRead]: {
+    req: { resourceId: string; projectId: string }
+    res: { content: string; name: string; encoding: TextEncodingInfo }
+  }
+  [IPC.resourceReplace]: {
+    req: { resourceId: string; projectId: string; data: Uint8Array; encodingHint?: string }
+    res: ResourceMeta
+  }
   [IPC.resourceDelete]: { req: { resourceId: string; projectId: string }; res: void }
   [IPC.resourceDistill]: {
     req: { projectId: string; resourceId: string; type: 'story' | 'other'; force?: boolean }

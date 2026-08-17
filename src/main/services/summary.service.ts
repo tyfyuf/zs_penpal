@@ -40,6 +40,7 @@ import { logError } from './log.service'
 import { executeStructuredTask } from './structured-generation.service'
 import { EVENTS } from '@shared/ipc'
 import { broadcast } from '../window'
+import { analyzeTextIntegrity, assertTextIntegrity } from './text-decoding.service'
 
 // ---------------------------------------------------------------------------
 // 摘要生成状态（供摘要区显示“生成中”黄点，生成完毕转绿并解锁）
@@ -467,6 +468,7 @@ export function estimateChangedChars(prev: string, curr: string): number {
 }
 
 async function generateDocSummary(projectId: string, docId: string, content: string, cfg: ApiSettings): Promise<DocSummary> {
+  assertTextIntegrity(analyzeTextIntegrity(content), '\u6587\u6863')
   void projectId
   void docId
   const story = await callStoryDecomposition(content, cfg)
@@ -757,7 +759,9 @@ async function distillResourceInner(
 
   let content: string
   try {
-    content = (await readResource(projectId, resourceId)).content
+    const resource = await readResource(projectId, resourceId)
+    assertTextIntegrity(resource.encoding, resource.name)
+    content = resource.content
   } catch (err) {
     return { ok: false, error: (err as Error).message }
   }
@@ -813,7 +817,8 @@ export async function checkResourceSummaryStale(projectId: string, resourceId: s
   const s = await readResourceSummary(projectId, resourceId)
   if (!s) return false
   try {
-    const { content } = await readResource(projectId, resourceId)
+    const { content, encoding } = await readResource(projectId, resourceId)
+    if (encoding.suspicious) return true
     if (!s.sourceFingerprint) {
       const patched: ResourceSummary = { ...s, ...computeSourceInfo(content) }
       await writeResourceSummary(projectId, resourceId, patched)
@@ -875,6 +880,11 @@ export async function scanConsistency(projectId: string): Promise<ConsistencyIss
   }
   // R1：故事型资源摘要的别名冲突
   for (const r of tree.resources) {
+    try {
+      if ((await readResource(projectId, r.id)).encoding.suspicious) continue
+    } catch {
+      continue
+    }
     const s = await readResourceSummary(projectId, r.id)
     if (s && s.type === 'story') {
       for (const c of findAliasConflicts(s)) {
@@ -929,14 +939,18 @@ export async function listProjectSummaries(projectId: string): Promise<ProjectSu
   )
   const resources = await Promise.all(
     tree.resources.map(async (r) => {
-      const s = await readResourceSummary(projectId, r.id)
+      try {
+        if ((await readResource(projectId, r.id)).encoding.suspicious) return null
+      } catch {
+        return null
+      }
+      const summary = await readResourceSummary(projectId, r.id)
       const generating = isSummaryGenerating(`res:${r.id}`)
-      const stale = s ? await checkResourceSummaryStale(projectId, r.id) : false
-      return { resourceId: r.id, name: r.name, distilled: !!s, type: s?.type, updatedAt: s?.updatedAt, generating, stale }
+      const stale = summary ? await checkResourceSummaryStale(projectId, r.id) : false
+      return { resourceId: r.id, name: r.name, distilled: !!summary, type: summary?.type, updatedAt: summary?.updatedAt, generating, stale }
     })
   )
-  // 资源区只展示已蒸馏或正在蒸馏的资源（未蒸馏且未生成的隐藏，避免堆积）
-  return { docs, chats, resources: resources.filter((r) => r.distilled || r.generating) }
+  return { docs, chats, resources: resources.filter((resource): resource is NonNullable<typeof resource> => !!resource && (resource.distilled || resource.generating)) }
 }
 
 /** 该对话当前默认激活的注入键（相关度采样，供渲染层展示默认开启项并在首条消息冻结） */
@@ -989,7 +1003,14 @@ export async function searchProjectSummaries(projectId: string, query: string): 
 
   for (const d of tree.docs) push(`doc:${d.id}`, 'doc', d.title, await readDocSummary(projectId, d.id))
   for (const c of tree.chats) push(`chat:${c.id}`, 'chat', c.title, await readChatSummary(projectId, c.id))
-  for (const r of tree.resources) push(`res:${r.id}`, 'res', r.name, await readResourceSummary(projectId, r.id))
+  for (const r of tree.resources) {
+    try {
+      if ((await readResource(projectId, r.id)).encoding.suspicious) continue
+      push(`res:${r.id}`, 'res', r.name, await readResourceSummary(projectId, r.id))
+    } catch {
+      // Deleted or unreadable resources are excluded from summary search.
+    }
+  }
 
   return results.slice(0, 20)
 }

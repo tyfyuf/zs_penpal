@@ -30,6 +30,7 @@ import {
   readDocSummary,
   readResource,
   readResourceSummary,
+  replaceResourceBytes,
   renameChat,
   renameDoc,
   renameProject,
@@ -39,7 +40,7 @@ import {
   saveDoc,
   updateChatContext,
   updateChatMeta,
-  uploadResource
+  uploadResourceBytes
 } from '../services/file.service'
 import { hasApiKey, setApiKey } from '../services/crypto.service'
 import { cancelStream, generateChatTitle, listModels, streamChat, testConnection } from '../services/api.service'
@@ -147,8 +148,9 @@ export function registerIpcHandlers(): void {
 
   // 资源
   handle(IPC.resourceList, (projectId) => listResources(projectId))
-  handle(IPC.resourceUpload, (req) => uploadResource(req.projectId, req.name, req.content))
+  handle(IPC.resourceUpload, (req) => uploadResourceBytes(req.projectId, req.name, req.data, req.encodingHint))
   handle(IPC.resourceRead, (req) => readResource(req.projectId, req.resourceId))
+  handle(IPC.resourceReplace, (req) => replaceResourceBytes(req.projectId, req.resourceId, req.data, req.encodingHint))
   handle(IPC.resourceDelete, (req) => deleteResource(req.projectId, req.resourceId))
   handle(IPC.resourceDistill, (req) => distillResource(req.projectId, req.resourceId, req.type, req.force))
   handle(IPC.resourceUndistill, (req) => undistillResource(req.projectId, req.resourceId))
