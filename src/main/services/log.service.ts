@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readdir, rm, stat } from 'fs/promises'
+﻿import { appendFile, mkdir, readdir, rm, stat } from 'fs/promises'
 import { join } from 'path'
 import { format } from 'date-fns'
 import { getUserDataDir } from '../paths'
@@ -14,6 +14,10 @@ function todayPath(): string {
   return join(logsDir(), `errors-${format(new Date(), 'yyyy-MM-dd')}.log`)
 }
 
+function summaryAttemptsPath(): string {
+  return join(logsDir(), `summary-attempts-${format(new Date(), 'yyyy-MM-dd')}.jsonl`)
+}
+
 let queue: Promise<void> = Promise.resolve()
 
 export function logError(source: string, message: string, stack?: string): void {
@@ -24,6 +28,28 @@ export function logError(source: string, message: string, stack?: string): void 
       await appendFile(todayPath(), line, 'utf8')
     } catch {
       // 日志失败不抛出，避免影响业务
+    }
+  })
+}
+
+/** 结构化生成审计：不写 API Key、用户原文或模型返回全文，只保留可排障的尝试元数据。 */
+export function logStructuredGenerationAttempt(event: {
+  task: string
+  endpointKey: string
+  attempt: number
+  mode: string
+  compact: boolean
+  outcome: 'success' | 'failure'
+  durationMs: number
+  finishReason?: string | null
+  error?: string
+}): void {
+  queue = queue.then(async () => {
+    try {
+      await mkdir(logsDir(), { recursive: true })
+      await appendFile(summaryAttemptsPath(), `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`, 'utf8')
+    } catch {
+      // 日志不能影响摘要主流程
     }
   })
 }

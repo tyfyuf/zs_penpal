@@ -1,4 +1,3 @@
-import OpenAI from 'openai'
 import type {
   ChatSummary,
   ChatSummaryInterval,
@@ -16,7 +15,6 @@ import type {
 } from '@shared/types'
 import { loadApiSettings, type ApiSettings } from './api-settings'
 import { loadConfig } from './config.service'
-import { recordUsage } from './usage.service'
 import { estimateTokens } from './tokenizer'
 import {
   buildSnapshot,
@@ -39,6 +37,7 @@ import { getUserDataDir } from '../paths'
 import { computeSourceInfo, isSourceStale, SUMMARY_SCHEMA_VERSION } from '../summary-source'
 import { computeDefaultActive } from '../summary-relevance'
 import { logError } from './log.service'
+import { executeStructuredTask } from './structured-generation.service'
 import { EVENTS } from '@shared/ipc'
 import { broadcast } from '../window'
 
@@ -228,48 +227,69 @@ function parseJson<T>(raw: string): T | null {
   return null
 }
 
-function normalizeStory(parsed: unknown): StorySummary {
+const STORY_FUNCTIONS = new Set([
+  'advance', 'reveal', 'turn', 'foreshadow', 'resolve',
+  '\u63a8\u8fdb', '\u63ed\u793a', '\u8f6c\u6298', '\u94fa\u57ab', '\u6536\u675f'
+])
+const GENERIC_DOC_TYPES = new Set(['code', 'transcript', 'legal', 'table', 'narrative', 'email', 'encyclopedia', 'data', 'reference'])
+
+function cleanText(value: unknown, max = 1200): string {
+  return typeof value === 'string' ? value.trim().slice(0, max) : ''
+}
+
+function cleanStrings(value: unknown, maxItems: number, maxLength: number): string[] {
+  if (!Array.isArray(value)) return []
+  return value.map((item) => cleanText(item, maxLength)).filter(Boolean).slice(0, maxItems)
+}
+
+function normalizeStory(parsed: unknown, compact = false): StorySummary {
   const p = (parsed ?? {}) as Record<string, unknown>
   const chars = Array.isArray(p.characters) ? (p.characters as Record<string, unknown>[]) : []
   const plot = Array.isArray(p.plot) ? (p.plot as Record<string, unknown>[]) : []
   const fs = Array.isArray(p.foreshadowing) ? (p.foreshadowing as Record<string, unknown>[]) : []
+  const charLimit = compact ? 8 : 12
+  const plotLimit = compact ? 16 : 24
+  const otherLimit = compact ? 8 : 12
   return {
     type: 'story',
-    overview: String(p.overview ?? ''),
+    overview: cleanText(p.overview, 800),
     characters: chars.map((c) => ({
-      name: String(c.name ?? ''),
-      aliases: Array.isArray(c.aliases) ? (c.aliases as unknown[]).map(String) : [],
-      role: String(c.role ?? ''),
-      goal: String(c.goal ?? '')
-    })),
+      name: cleanText(c.name, 120), aliases: cleanStrings(c.aliases, 12, 120),
+      role: cleanText(c.role, 240), goal: cleanText(c.goal, 320)
+    })).filter((c) => c.name).slice(0, charLimit),
     plot: plot.map((pl, i) => ({
-      id: String(pl.id ?? `s${i + 1}`),
-      function: String(pl.function ?? ''),
-      summary: String(pl.summary ?? '')
-    })),
+      id: cleanText(pl.id, 80) || `s${i + 1}`,
+      function: cleanText(pl.function, 40), summary: cleanText(pl.summary, 480)
+    })).filter((pl) => pl.summary && STORY_FUNCTIONS.has(pl.function)).slice(0, plotLimit),
     foreshadowing: fs.map((f) => ({
-      planted: String(f.planted ?? ''),
+      planted: cleanText(f.planted, 360),
       status: f.status === 'resolved' ? ('resolved' as const) : ('unresolved' as const)
-    })),
-    keySettings: Array.isArray(p.keySettings) ? (p.keySettings as unknown[]).map(String) : [],
-    keyQuotes: Array.isArray(p.keyQuotes) ? (p.keyQuotes as unknown[]).map(String) : []
+    })).filter((f) => f.planted).slice(0, otherLimit),
+    keySettings: cleanStrings(p.keySettings, otherLimit, 240),
+    keyQuotes: cleanStrings(p.keyQuotes, compact ? 5 : 8, 320)
   }
 }
 
-function normalizeGeneric(parsed: unknown): GenericResourceSummary {
+function validStory(parsed: unknown, compact = false): StorySummary | null {
+  const summary = normalizeStory(parsed, compact)
+  return summary.overview ? summary : null
+}
+
+function normalizeGeneric(parsed: unknown, compact = false): GenericResourceSummary {
   const p = (parsed ?? {}) as Record<string, unknown>
+  const docType = cleanText(p.docType, 80)
   return {
-    type: 'other',
-    docType: String(p.docType ?? ''),
-    overview: String(p.overview ?? ''),
-    keyPoints: Array.isArray(p.keyPoints) ? (p.keyPoints as unknown[]).map(String) : [],
-    keyTerms: Array.isArray(p.keyTerms) ? (p.keyTerms as unknown[]).map(String) : [],
-    structure: String(p.structure ?? '')
+    type: 'other', docType: GENERIC_DOC_TYPES.has(docType) ? docType : 'reference',
+    overview: cleanText(p.overview, 800),
+    keyPoints: cleanStrings(p.keyPoints, compact ? 12 : 24, 480),
+    keyTerms: cleanStrings(p.keyTerms, compact ? 12 : 20, 240),
+    structure: cleanText(p.structure, 800)
   }
 }
 
-function makeClient(cfg: ApiSettings): OpenAI {
-  return new OpenAI({ baseURL: cfg.baseURL, apiKey: cfg.apiKey!, timeout: 180000, maxRetries: 0 })
+function validGeneric(parsed: unknown, compact = false): GenericResourceSummary | null {
+  const summary = normalizeGeneric(parsed, compact)
+  return summary.overview && summary.keyPoints.length > 0 ? summary : null
 }
 
 // ---------------------------------------------------------------------------
@@ -303,72 +323,51 @@ function estimateInputTokens(content: string, model: string): number {
   return estimateTokens(content, model)
 }
 
-function isStoryEmpty(s: StorySummary): boolean {
-  return !s.overview.trim() && s.characters.length === 0 && s.plot.length === 0
-}
-
-function isGenericEmpty(g: GenericResourceSummary): boolean {
-  return !g.overview.trim() && g.keyPoints.length === 0
-}
-
 async function callStoryDecomposition(content: string, cfg: ApiSettings): Promise<StorySummary> {
   const tokens = estimateInputTokens(content, cfg.model)
   const budget = inputBudget(cfg)
   if (tokens > budget) {
-    throw new Error('文档超出模型上下文预算（60%），请在设置中调大“模型上下文上限”或更换模型后重试')
+    throw new Error('Document exceeds the configured input-context budget (60%).')
   }
-  return enqueueLlm(async () => {
-    const client = makeClient(cfg)
-    const large = content.length > 20000
-    // 空结果 / 输出被截断时自动重试一次
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const res = await client.chat.completions.create({
-        model: cfg.model,
-        messages: [
-          { role: 'system', content: storyPrompt(cfg.language, large) },
-          { role: 'user', content: content || (cfg.language === 'en' ? '(empty document)' : '（空文档）') }
-        ],
-        temperature: 0.3,
-        max_tokens: large ? 8192 : 4096
-      })
-      if (res.usage) await recordUsage(res.usage, 'summary')
-      const summary = normalizeStory(parseJson(res.choices[0]?.message?.content ?? ''))
-      const truncated = res.choices[0]?.finish_reason === 'length'
-      if (!truncated && !isStoryEmpty(summary)) return summary
-    }
-    throw new Error('摘要生成不完整（内容为空或被截断），请重试')
-  })
+  const userContent = content || '(empty document)'
+  return enqueueLlm(() => executeStructuredTask({
+    task: 'story_decomposition', settings: cfg,
+    messages: [
+      { role: 'system', content: storyPrompt(cfg.language, true) },
+      { role: 'user', content: userContent }
+    ],
+    compactMessages: [
+      { role: 'system', content: `${storyPrompt(cfg.language, true)}\nUse half as many items as the stated limits. Prefer a closed valid result over exhaustive coverage.` },
+      { role: 'user', content: userContent }
+    ],
+    outputTokens: 4096, compactOutputTokens: 2048,
+    parseAndValidate: (raw) => validStory(parseJson(raw), false)
+  }))
 }
 
 async function callGenericDecomposition(content: string, cfg: ApiSettings): Promise<GenericResourceSummary> {
   const tokens = estimateInputTokens(content, cfg.model)
   const budget = inputBudget(cfg)
   if (tokens > budget) {
-    throw new Error('文档超出模型上下文预算（60%），请在设置中调大“模型上下文上限”或更换模型后重试')
+    throw new Error('Document exceeds the configured input-context budget (60%).')
   }
-  return enqueueLlm(async () => {
-    const client = makeClient(cfg)
-    const large = content.length > 20000
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const res = await client.chat.completions.create({
-        model: cfg.model,
-        messages: [
-          { role: 'system', content: genericPrompt(cfg.language, large) },
-          { role: 'user', content: content || (cfg.language === 'en' ? '(empty content)' : '（空内容）') }
-        ],
-        temperature: 0.3,
-        max_tokens: large ? 4096 : 2048
-      })
-      if (res.usage) await recordUsage(res.usage, 'summary')
-      const summary = normalizeGeneric(parseJson(res.choices[0]?.message?.content ?? ''))
-      const truncated = res.choices[0]?.finish_reason === 'length'
-      if (!truncated && !isGenericEmpty(summary)) return summary
-    }
-    throw new Error('摘要生成不完整（内容为空或被截断），请重试')
-  })
+  const userContent = content || '(empty content)'
+  return enqueueLlm(() => executeStructuredTask({
+    task: 'generic_decomposition', settings: cfg,
+    messages: [
+      { role: 'system', content: genericPrompt(cfg.language, true) },
+      { role: 'user', content: userContent }
+    ],
+    compactMessages: [
+      { role: 'system', content: `${genericPrompt(cfg.language, true)}\nUse half as many items as the stated limits. Prefer a closed valid result over exhaustive coverage.` },
+      { role: 'user', content: userContent }
+    ],
+    outputTokens: 3072, compactOutputTokens: 1536,
+    parseAndValidate: (raw) => validGeneric(parseJson(raw), false)
+  }))
 }
 
-/** 三段采样：头部/中部/尾部各取一段，避免只看开头导致误判 */
+/** Three-section sampling: beginning / middle / end avoids a head-only classification. */
 function sampleSections(content: string, per = 2000): string {
   if (content.length <= per * 3) return content
   const head = content.slice(0, per)
@@ -431,34 +430,30 @@ function heuristicClassify(content: string): ClassifyDecision | null {
 
 /** 模型结构化判定：三段采样 + JSON 输出（含置信度与理由） */
 async function classifyByLlm(content: string, cfg: ApiSettings): Promise<ClassifyDecision | null> {
-  return enqueueLlm(async () => {
-    const client = makeClient(cfg)
-    const res = await client.chat.completions.create({
-      model: cfg.model,
-      messages: [
-        { role: 'system', content: classifyPrompt(cfg.language) },
-        { role: 'user', content: sampleSections(content) }
-      ],
-      temperature: 0,
-      max_tokens: 256
-    })
-    if (res.usage) await recordUsage(res.usage, 'summary')
-    const parsed = parseJson<{ type?: string; confidence?: number; reasons?: unknown[] }>(
-      res.choices[0]?.message?.content ?? ''
-    )
-    if (!parsed) return null
-    const type: 'story' | 'other' = String(parsed.type ?? '').toLowerCase().includes('story') ? 'story' : 'other'
-    const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0
-    const reasons = Array.isArray(parsed.reasons) ? (parsed.reasons as unknown[]).map(String) : []
-    return { type, confidence, reasons }
-  })
+  return enqueueLlm(() => executeStructuredTask({
+    task: 'resource_classification', settings: cfg,
+    messages: [
+      { role: 'system', content: classifyPrompt(cfg.language) },
+      { role: 'user', content: sampleSections(content) }
+    ],
+    outputTokens: 256, compactOutputTokens: 192,
+    parseAndValidate: (raw) => {
+      const parsed = parseJson<{ type?: unknown; confidence?: unknown; reasons?: unknown }>(raw)
+      if (!parsed) return null
+      const typeText = String(parsed.type ?? '').toLowerCase()
+      const type = typeText === 'story' ? 'story' : typeText === 'other' ? 'other' : null
+      const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : Number(parsed.confidence)
+      if (!type || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) return null
+      return { type, confidence, reasons: cleanStrings(parsed.reasons, 4, 240) }
+    }
+  }))
 }
 
 // ---------------------------------------------------------------------------
-// 文档摘要（故事拆解）
+// Document summaries
 // ---------------------------------------------------------------------------
 
-/** 估算“增删改字符总量”（行级差异 + 长度差）；已由源指纹失效检测取代，保留仅供参考 */
+/** Estimate changed characters; retained for compatibility with historical callers. */
 export function estimateChangedChars(prev: string, curr: string): number {
   if (prev === curr) return 0
   const a = prev.split('\n')
@@ -583,10 +578,9 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
   const key = `chat:${chatId}`
   markGenerating(key)
   try {
-    const client = makeClient(cfg)
     // 尾部窗口：最近 CHAT_TAIL_WINDOW 条逐条摘要（增量：只重算尾部，不重算全量）
     const tailStart = Math.max(0, turns.length - CHAT_TAIL_WINDOW)
-    const items = await summarizeTurnItems(client, turns.slice(tailStart), cfg)
+    const items = await summarizeTurnItems(turns.slice(tailStart), cfg)
 
     // 历史压缩区间：消息数超阈值 或 对话 token 估算超输入预算 60% 时，把尾部窗口之前的旧消息按 CHAT_COMPACT_BATCH 聚合（增量追加）
     const dialogueTokens = estimateInputTokens(
@@ -603,7 +597,7 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
       const preTailEnd = tailStart - 1
       for (let s = lastCovered + 1; s <= preTailEnd; s += CHAT_COMPACT_BATCH) {
         const e = Math.min(s + CHAT_COMPACT_BATCH - 1, preTailEnd)
-        const summary = await summarizeInterval(client, turns.slice(s, e + 1), cfg)
+        const summary = await summarizeInterval(turns.slice(s, e + 1), cfg)
         if (summary) compacted.push({ startIndex: s, endIndex: e, summary, updatedAt: nowIso() })
       }
     }
@@ -622,75 +616,95 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
 }
 
 /** 逐条摘要（尾部窗口），与消息一一对齐 */
+function formatChatTurns(turns: { id?: string; role: string; content: string }[], maxPerMessage = 1800): string {
+  return turns.map((m, index) => {
+    const source = m.content ?? ''
+    const content = source.length > maxPerMessage
+      ? `${source.slice(0, maxPerMessage)}\n[This message was shortened only for the summary request; its id is still required.]`
+      : source
+    const id = m.id ?? `interval-${index + 1}`
+    const role = m.role === 'user' ? 'user' : 'assistant'
+    return `messageId: ${JSON.stringify(id)}\nrole: ${role}\ncontent:\n${content}`
+  }).join('\n\n---\n\n')
+}
+
+/** Strictly validate identity and role: never map model output back by position alone. */
 async function summarizeTurnItems(
-  client: OpenAI,
-  turns: { id: string; role: string; content: string }[],
-  cfg: ApiSettings
+  turns: { id: string; role: string; content: string }[], cfg: ApiSettings
 ): Promise<ChatSummaryItem[]> {
   if (turns.length === 0) return []
-  const dialogue = turns
-    .map((m, i) => `${i + 1}. ${m.role === 'user' ? '用户' : 'AI'}：${m.content}`)
-    .join('\n')
-    .slice(0, 12000)
-  const res = await client.chat.completions.create({
-    model: cfg.model,
+  return enqueueLlm(() => executeStructuredTask({
+    task: 'chat_turn_summary', settings: cfg,
     messages: [
-      { role: 'system', content: chatPrompt(cfg.language) },
-      { role: 'user', content: dialogue }
+      { role: 'system', content: `${chatPrompt(cfg.language)}\nEach object must include messageId.` },
+      { role: 'user', content: formatChatTurns(turns) }
     ],
-    temperature: 0.3,
-    max_tokens: 2048
-  })
-  if (res.usage) await recordUsage(res.usage, 'summary')
-  const parsed = parseJson<{ role: string; summary: string }[]>(res.choices[0]?.message?.content ?? '')
-  const rawItems = Array.isArray(parsed) ? parsed : []
-  return turns.map((t, i) => ({
-    messageId: t.id,
-    role: t.role === 'user' ? ('user' as const) : ('assistant' as const),
-    summary: rawItems[i] ? String(rawItems[i].summary ?? '') : ''
+    compactMessages: [
+      { role: 'system', content: `${chatPrompt(cfg.language)}\nEach object must include messageId. Prefer a short valid result.` },
+      { role: 'user', content: formatChatTurns(turns, 800) }
+    ],
+    outputTokens: 2048, compactOutputTokens: 1280,
+    parseAndValidate: (raw) => {
+      const parsed = parseJson<{ messageId?: unknown; role?: unknown; summary?: unknown }[]>(raw)
+      if (!Array.isArray(parsed) || parsed.length !== turns.length) return null
+      const byId = new Map<string, { messageId?: unknown; role?: unknown; summary?: unknown }>()
+      for (const item of parsed) {
+        const id = cleanText(item.messageId, 200)
+        if (!id || byId.has(id)) return null
+        byId.set(id, item)
+      }
+      const result: ChatSummaryItem[] = []
+      for (const turn of turns) {
+        const item = byId.get(turn.id)
+        const role = turn.role === 'user' ? 'user' : 'assistant'
+        const summary = cleanText(item?.summary, 300)
+        if (!item || item.role !== role || !summary) return null
+        result.push({ messageId: turn.id, role, summary })
+      }
+      return result
+    }
   }))
 }
 
-/** 区间摘要（历史压缩块）：进展/决策/待办 */
-async function summarizeInterval(client: OpenAI, turns: { role: string; content: string }[], cfg: ApiSettings): Promise<string> {
-  const dialogue = turns
-    .map((m, i) => `${i + 1}. ${m.role === 'user' ? '用户' : 'AI'}：${m.content}`)
-    .join('\n')
-    .slice(0, 12000)
-  const res = await client.chat.completions.create({
-    model: cfg.model,
+async function summarizeInterval(turns: { role: string; content: string }[], cfg: ApiSettings): Promise<string> {
+  return enqueueLlm(() => executeStructuredTask({
+    task: 'chat_interval_summary', settings: cfg,
     messages: [
       { role: 'system', content: chatIntervalPrompt(cfg.language) },
-      { role: 'user', content: dialogue }
+      { role: 'user', content: formatChatTurns(turns) }
     ],
-    temperature: 0.3,
-    max_tokens: 1024
-  })
-  if (res.usage) await recordUsage(res.usage, 'summary')
-  const parsed = parseJson<{ summary?: string }>(res.choices[0]?.message?.content ?? '')
-  return String(parsed?.summary ?? '').trim()
+    compactMessages: [
+      { role: 'system', content: `${chatIntervalPrompt(cfg.language)}\nPrefer a short valid result.` },
+      { role: 'user', content: formatChatTurns(turns, 800) }
+    ],
+    outputTokens: 1024, compactOutputTokens: 512,
+    parseAndValidate: (raw) => cleanText(parseJson<{ summary?: unknown }>(raw)?.summary, 1000) || null
+  }))
 }
 
-/** 关闭对话窗口后入队生成对话摘要（PRD 7.5）；force 用于手动重新生成 */
+async function runQueuedChatSummary(chatId: string, force: boolean, propagate: boolean): Promise<void> {
+  try {
+    await generateChatSummary(chatId, force)
+    pendingRetry.delete(chatId)
+    await persistRetry()
+  } catch (err) {
+    pendingRetry.add(chatId)
+    await persistRetry()
+    logError('summary:chat', `Chat summary generation failed chatId=${chatId}`, (err as Error).message)
+    if (propagate) throw err
+  }
+}
+
 export function queueChatSummary(chatId: string, force = false): Promise<void> {
-  return enqueue(async () => {
-    try {
-      await generateChatSummary(chatId, force)
-      pendingRetry.delete(chatId)
-      await persistRetry()
-    } catch {
-      pendingRetry.add(chatId)
-      await persistRetry()
-    }
-  })
+  return enqueue(() => runQueuedChatSummary(chatId, force, false))
 }
 
-/** 手动重新生成对话摘要（摘要区按钮） */
+/** Manual calls propagate failure; this fixes the historical false-success response. */
 export async function regenerateChatSummary(chatId: string): Promise<{ ok: boolean; error?: string }> {
   try {
     const cfg = await loadConfig()
-    if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未开启' }
-    await queueChatSummary(chatId, true)
+    if (!cfg.summaryEnabled) return { ok: false, error: 'Summary feature is disabled' }
+    await enqueue(() => runQueuedChatSummary(chatId, true, true))
     return { ok: true }
   } catch (err) {
     return { ok: false, error: (err as Error).message }
@@ -1002,10 +1016,14 @@ Leave a field empty ([] or "") when absent — DO NOT invent. All content in Eng
 信息不足的字段留空数组或空字符串，禁止编造。只输出合法 JSON。`
 }
 
-function normalizeRollup(parsed: unknown): { overview: string; stateChanges: string[]; causality: string[] } {
+function validRollup(parsed: unknown, compact = false): { overview: string; stateChanges: string[]; causality: string[] } | null {
   const p = (parsed ?? {}) as Record<string, unknown>
-  const arr = (v: unknown): string[] => (Array.isArray(v) ? (v as unknown[]).map(String) : [])
-  return { overview: String(p.overview ?? ''), stateChanges: arr(p.stateChanges), causality: arr(p.causality) }
+  const result = {
+    overview: cleanText(p.overview, 1200),
+    stateChanges: cleanStrings(p.stateChanges, compact ? 8 : 16, 480),
+    causality: cleanStrings(p.causality, compact ? 8 : 16, 480)
+  }
+  return result.overview ? result : null
 }
 
 async function buildRollupForChunk(
@@ -1019,58 +1037,43 @@ async function buildRollupForChunk(
   const fingerprints: Record<string, string> = {}
   const summaries: DocSummary[] = []
   for (const d of docs) {
-    const s = await readDocSummary(projectId, d.id)
-    if (s) {
-      summaries.push(s)
-      fingerprints[d.id] = s.sourceFingerprint || ''
+    const summary = await readDocSummary(projectId, d.id)
+    if (summary) {
+      summaries.push(summary)
+      fingerprints[d.id] = summary.sourceFingerprint || ''
     }
   }
   if (summaries.length !== docs.length) return null
 
-  // 成员未变且非强制 → 复用
   if (!force && existingRollup && existingRollup.overview) {
-    let same = true
-    for (const [docId, fp] of Object.entries(fingerprints)) {
-      if (existingRollup.sourceFingerprints[docId] !== fp) {
-        same = false
-        break
-      }
-    }
-    if (same) return existingRollup
+    const unchanged = Object.entries(fingerprints).every(([docId, fingerprint]) => existingRollup.sourceFingerprints[docId] === fingerprint)
+    if (unchanged) return existingRollup
   }
 
-  const content = summaries.map((s, i) => `【${i + 1}】\n${storyBlock(s, settings.language)}`).join('\n\n')
-  return enqueueLlm(async () => {
-    const client = makeClient(settings)
-    let parsed: { overview: string; stateChanges: string[]; causality: string[] } | null = null
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const res = await client.chat.completions.create({
-        model: settings.model,
-        messages: [
-          { role: 'system', content: rollupPrompt(settings.language) },
-          { role: 'user', content: content }
-        ],
-        temperature: 0.3,
-        max_tokens: 2048
-      })
-      if (res.usage) await recordUsage(res.usage, 'summary')
-      parsed = normalizeRollup(parseJson(res.choices[0]?.message?.content ?? ''))
-      if (parsed.overview.trim()) break
-    }
-    if (!parsed || !parsed.overview.trim()) return null
+  const content = summaries.map((summary, index) => `[#${index + 1}]\n${storyBlock(summary, settings.language)}`).join('\n\n')
+  try {
+    const parsed = await enqueueLlm(() => executeStructuredTask({
+      task: 'document_rollup', settings,
+      messages: [
+        { role: 'system', content: rollupPrompt(settings.language) },
+        { role: 'user', content }
+      ],
+      compactMessages: [
+        { role: 'system', content: `${rollupPrompt(settings.language)}\nUse at most 8 stateChanges and 8 causality items. Prefer a short valid result.` },
+        { role: 'user', content }
+      ],
+      outputTokens: 2048, compactOutputTokens: 1024,
+      parseAndValidate: (raw) => validRollup(parseJson(raw), false)
+    }))
     return {
-      id: `${projectId}:${rangeLabel}`,
-      projectId,
-      docIds: docs.map((d) => d.id),
-      rangeLabel,
-      overview: parsed.overview,
-      stateChanges: parsed.stateChanges,
-      causality: parsed.causality,
-      schemaVersion: SUMMARY_SCHEMA_VERSION,
-      sourceFingerprints: fingerprints,
-      updatedAt: nowIso()
+      id: `${projectId}:${rangeLabel}`, projectId, docIds: docs.map((d) => d.id), rangeLabel,
+      overview: parsed.overview, stateChanges: parsed.stateChanges, causality: parsed.causality,
+      schemaVersion: SUMMARY_SCHEMA_VERSION, sourceFingerprints: fingerprints, updatedAt: nowIso()
     } as DocRollup
-  })
+  } catch (err) {
+    logError('summary:rollup', `Rollup generation failed projectId=${projectId} range=${rangeLabel}`, (err as Error).message)
+    return null
+  }
 }
 
 /** 生成/刷新项目大摘要（增量：成员未变的块复用） */
@@ -1096,7 +1099,8 @@ export async function generateDocRollups(projectId: string): Promise<{ ok: boole
       const rangeLabel = `${i + 1}-${Math.min(i + ROLLUP_BATCH, docs.length)}`
       const existingRollup = existing.find((r) => r.rangeLabel === rangeLabel && r.docIds.length === group.length)
       const rollup = await buildRollupForChunk(projectId, group, rangeLabel, settings, existingRollup, false)
-      if (rollup) rollups.push(rollup)
+      if (!rollup) return { ok: false, error: `Rollup generation incomplete for group ${rangeLabel}` }
+      rollups.push(rollup)
     }
     await writeDocRollups(projectId, rollups)
     return { ok: true }
