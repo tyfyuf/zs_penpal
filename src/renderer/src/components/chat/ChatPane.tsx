@@ -770,6 +770,11 @@ function MemoryCard({ memory }: { memory: MemoryContext }): JSX.Element {
             {t('chat.vectorScore', { n: item.score.toFixed(3) })}
           </span>
         )}
+        {kind === 'vector' && item.source && (
+          <span className="shrink-0 text-[10px]" style={{ color: 'var(--muted)' }}>
+            · {t(item.source === 'tool' ? 'chat.vectorTool' : 'chat.vectorAutomatic')}
+          </span>
+        )}
         {item.reason && kind !== 'vector' && <span className="shrink-0 text-[10px]" style={{ color: 'var(--muted)' }}>· {item.reason}</span>}
       </div>
       {kind === 'vector' && item.preview && (
@@ -817,9 +822,21 @@ function MemoryCard({ memory }: { memory: MemoryContext }): JSX.Element {
             <div>
               <div className="mb-0.5 font-medium" style={{ color: 'var(--warn)' }}>{t('chat.vectorSearch')}</div>
               {trace && (
-                <div className="mb-0.5 text-[11px]" style={{ color: trace.outcome === 'failed' ? 'var(--danger)' : 'var(--muted)' }}>
-                  {t('chat.vectorSearchStatus', { status: vectorStatus })}
-                  {trace.query && <span> · {t('chat.vectorQuery', { q: trace.query })}</span>}
+                <div className="mb-0.5 space-y-0.5 text-[11px]" style={{ color: trace.outcome === 'failed' ? 'var(--danger)' : 'var(--muted)' }}>
+                  <div>{t('chat.vectorSearchStatus', { status: vectorStatus })}</div>
+                  {trace.attempts && trace.attempts.length > 0 ? trace.attempts.map((attempt, index) => {
+                    const status = attempt.outcome === 'hit'
+                      ? t('chat.vectorHit', { n: attempt.hitCount })
+                      : attempt.outcome === 'failed'
+                        ? t('chat.vectorFailed')
+                        : t('chat.vectorNoHit')
+                    return (
+                      <div key={`${attempt.source}:${attempt.query}:${index}`} className="pl-2">
+                        {t(attempt.source === 'tool' ? 'chat.vectorTool' : 'chat.vectorAutomatic')}
+                        {' · '}{t('chat.vectorQuery', { q: attempt.query })}{' · '}{status}
+                      </div>
+                    )
+                  }) : trace.query ? <div className="pl-2">{t('chat.vectorQuery', { q: trace.query })}</div> : null}
                 </div>
               )}
               {vector.map((i) => line(i, 'vector'))}

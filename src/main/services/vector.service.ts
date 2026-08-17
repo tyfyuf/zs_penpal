@@ -80,6 +80,64 @@ function cosine(a: number[], b: number[]): number {
   return sum
 }
 
+const QUERY_SCAFFOLDING = [
+  '\u8bf7\u5e2e\u6211', '\u9ebb\u70e6\u5e2e\u6211', '\u5e2e\u6211', '\u8bf7\u95ee', '\u67e5\u4e00\u4e0b', '\u67e5\u627e', '\u67e5\u8be2', '\u641c\u7d22',
+  '\u8d44\u6e90\u533a', '\u8bbe\u5b9a\u96c6', '\u539f\u6587\u4e2d', '\u539f\u6587\u91cc', '\u539f\u6587', '\u6587\u6863\u4e2d', '\u6587\u6863\u91cc', '\u6587\u6863',
+  '\u6709\u6ca1\u6709\u51fa\u73b0', '\u662f\u5426\u51fa\u73b0', '\u6709\u6ca1\u6709\u63d0\u5230', '\u662f\u5426\u63d0\u5230', '\u51fa\u73b0\u8fc7', '\u63d0\u5230\u8fc7',
+  '\u6709\u6ca1\u6709', '\u662f\u5426', '\u5173\u4e8e', '\u76f8\u5173\u7684', '\u5177\u4f53\u7684', '\u5177\u4f53', '\u662f\u4ec0\u4e48', '\u662f\u8c01', '\u4ec0\u4e48\u610f\u601d',
+  '\u8fd9\u4e2a', '\u90a3\u4e2a', '\u5185\u5bb9', '\u4fe1\u606f', '\u4e00\u4e0b', '\u8bf7', '\u5417', '\u5462'
+]
+
+function normalizeLexicalText(text: string): string {
+  return text.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '')
+}
+
+/**
+ * Extract proper nouns and literal terms without an external segmenter. Common
+ * question scaffolding is removed; semantic embedding still handles fuzzy intent.
+ */
+export function extractLexicalTerms(query: string): string[] {
+  const terms: string[] = []
+  for (const match of query.matchAll(/[\u201c\u0022\u300c\u300e]([^\u201d\u0022\u300d\u300f]{2,40})[\u201d\u0022\u300d\u300f]/g)) {
+    terms.push(match[1])
+  }
+  for (const match of query.matchAll(/[A-Za-z0-9][A-Za-z0-9_.-]{1,39}/g)) {
+    terms.push(match[0])
+  }
+
+  let cleaned = query.toLowerCase()
+  for (const phrase of QUERY_SCAFFOLDING) cleaned = cleaned.split(phrase).join(' ')
+  cleaned = cleaned.replace(/[\p{P}\p{S}\s]+/gu, ' ')
+  for (const run of cleaned.match(/[\p{Script=Han}]{2,40}/gu) ?? []) terms.push(run)
+
+  return [...new Set(terms.map(normalizeLexicalText).filter((term) => term.length >= 2))]
+}
+
+function lexicalSimilarity(query: string, text: string): number {
+  const normalizedText = normalizeLexicalText(text)
+  const normalizedQuery = normalizeLexicalText(query)
+  if (!normalizedText || !normalizedQuery) return 0
+  if (normalizedQuery.length >= 2 && normalizedText.includes(normalizedQuery)) return 1
+
+  const terms = extractLexicalTerms(query)
+  if (terms.length === 0) return 0
+  let matchedWeight = 0
+  let totalWeight = 0
+  for (const term of terms) {
+    const weight = Math.min(term.length, 16)
+    totalWeight += weight
+    if (normalizedText.includes(term)) matchedWeight += weight
+  }
+  return totalWeight > 0 ? matchedWeight / totalWeight : 0
+}
+
+function hybridScore(query: string, text: string, semanticScore: number): number {
+  const lexicalScore = lexicalSimilarity(query, text)
+  if (lexicalScore <= 0) return semanticScore
+  // Literal proper-name hits outrank fuzzy semantic-only hits.
+  return Math.max(semanticScore, 0.58 + lexicalScore * 0.32 + Math.max(semanticScore, 0) * 0.1)
+}
+
 /** 特征哈希路径沿用原有按段落分块：目标 800 字、重叠 100 字。 */
 export function chunkText(text: string, target = HASH_CHUNK_TARGET, overlap = HASH_CHUNK_OVERLAP): string[] {
   const trimmed = text.trim()
@@ -481,7 +539,10 @@ export async function searchVectorIndex(projectId: string, query: string, topK =
   }
 
   const hits = prepared.index.chunks
-    .map((chunk) => ({ chunk, score: cosine(queryVector, chunk.vector) }))
+    .map((chunk) => {
+      const semanticScore = cosine(queryVector, chunk.vector)
+      return { chunk, score: hybridScore(normalizedQuery, chunk.text, semanticScore) }
+    })
     .filter((item) => Number.isFinite(item.score) && item.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, topK)

@@ -10,7 +10,8 @@ import type {
   DocSummary,
   MemoryContext,
   MemoryContextItem,
-  VectorMemoryTrace,
+  VectorMemoryAttempt,
+  VectorSearchHit,
   ProjectTree,
   StreamContextRange,
   StreamDonePayload,
@@ -30,6 +31,7 @@ import {
   ensureDocSummary
 } from './summary.service'
 import { recordUsage } from './usage.service'
+import { executeStructuredTask } from './structured-generation.service'
 import { searchVectorIndex } from './vector.service'
 import {
   appendMessage,
@@ -89,6 +91,313 @@ const controllers = new Map<string, AbortController>()
 
 export function cancelStream(requestId: string): void {
   controllers.get(requestId)?.abort()
+}
+
+const LOW_SIGNAL_SEARCH_QUERIES = new Set([
+  '\u4f60\u597d', '\u55e8', '\u54c8\u55bd', '\u8c22\u8c22', '\u597d\u7684', '\u6536\u5230',
+  'hi', 'hello', 'thanks', 'thankyou', 'ok', 'okay'
+])
+
+function compactSearchQuery(text: string): string {
+  const query = text.trim()
+  if (query.length <= 600) return query
+  return `${query.slice(0, 180)}\n...\n${query.slice(-380)}`
+}
+
+function shouldAutoRetrieve(text: string): boolean {
+  const normalized = text.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '')
+  return normalized.length >= 2 && !LOW_SIGNAL_SEARCH_QUERIES.has(normalized)
+}
+
+function insertIntoSystemPrefix(
+  messages: ChatCompletionMessageParam[],
+  additions: ChatCompletionMessageParam[]
+): ChatCompletionMessageParam[] {
+  if (additions.length === 0) return messages
+  const firstConversationIndex = messages.findIndex((message) => message.role !== 'system')
+  if (firstConversationIndex < 0) return [...messages, ...additions]
+  return [
+    ...messages.slice(0, firstConversationIndex),
+    ...additions,
+    ...messages.slice(firstConversationIndex)
+  ]
+}
+
+function vectorHitBlock(hit: VectorSearchHit, lang: 'zh' | 'en', source: 'automatic' | 'tool'): string {
+  const sourceLabel = source === 'tool'
+    ? (lang === 'en' ? 'tool search' : '\u5de5\u5177\u68c0\u7d22')
+    : (lang === 'en' ? 'automatic search' : '\u81ea\u52a8\u68c0\u7d22')
+  return `${lang === 'en' ? '\u3010Project source hit' : '\u3010\u9879\u76ee\u539f\u6587\u547d\u4e2d'}\u00b7${sourceLabel}: ${hit.title} #${hit.index}\u3011\n${hit.text}`
+}
+
+async function retrieveProjectOriginals(
+  projectId: string,
+  query: string,
+  lang: 'zh' | 'en',
+  source: 'automatic' | 'tool',
+  reason = '',
+  topK = 5
+): Promise<{
+  messages: ChatCompletionMessageParam[]
+  items: MemoryContextItem[]
+  attempt: VectorMemoryAttempt
+  hits: VectorSearchHit[]
+}> {
+  const normalizedQuery = compactSearchQuery(query)
+  try {
+    const hits = await searchVectorIndex(projectId, normalizedQuery, Math.max(1, Math.min(topK, 5)))
+    return {
+      messages: hits.map((hit) => ({ role: 'system', content: vectorHitBlock(hit, lang, source) })),
+      items: hits.map((hit) => ({
+        kind: 'vector',
+        key: `${hit.docId}:${hit.index}`,
+        title: `${hit.title} #${hit.index}`,
+        reason,
+        preview: hit.text,
+        score: hit.score,
+        source
+      })),
+      attempt: {
+        source,
+        query: normalizedQuery,
+        outcome: hits.length > 0 ? 'hit' : 'empty',
+        hitCount: hits.length
+      },
+      hits
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return {
+      messages: [],
+      items: [],
+      attempt: { source, query: normalizedQuery, outcome: 'failed', hitCount: 0, error: message },
+      hits: []
+    }
+  }
+}
+
+function appendVectorAttempt(memory: MemoryContext, attempt: VectorMemoryAttempt, items: MemoryContextItem[]): void {
+  const attempts = [...(memory.vectorTrace?.attempts ?? []), attempt]
+  const existing = new Set(memory.vector.map((item) => item.key))
+  for (const item of items) {
+    if (!existing.has(item.key)) {
+      memory.vector.push(item)
+      existing.add(item.key)
+    }
+  }
+  const hitCount = memory.vector.length
+  const anyHit = attempts.some((item) => item.outcome === 'hit')
+  const anyNonFailure = attempts.some((item) => item.outcome !== 'failed')
+  const lastFailure = [...attempts].reverse().find((item) => item.outcome === 'failed')
+  memory.vectorTrace = {
+    attempted: attempts.length > 0,
+    outcome: anyHit ? 'hit' : anyNonFailure ? 'empty' : 'failed',
+    hitCount,
+    query: attempts[0]?.query,
+    error: !anyHit ? lastFailure?.error : undefined,
+    attempts
+  }
+}
+
+const MAX_SEARCH_TOOL_CALLS = 2
+const toolSupport = new Map<string, boolean>()
+
+interface PendingToolCall {
+  id: string
+  name: string
+  arguments: string
+}
+
+interface StreamToolDelta {
+  index?: number
+  id?: string
+  function?: { name?: string; arguments?: string }
+}
+
+const PROJECT_SEARCH_TOOL = {
+  type: 'function',
+  function: {
+    name: 'search_project_source',
+    description: 'Search indexed original project documents and resources. Use when supplied excerpts are insufficient, when the user asks for source details, or when a new keyword/name needs another lookup.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'A short, precise source-search query.' },
+        topK: { type: 'integer', minimum: 1, maximum: 5, description: 'Maximum source chunks to return.' }
+      },
+      required: ['query'],
+      additionalProperties: false
+    }
+  }
+} as const
+
+function toolSupportKey(settings: ApiSettings): string {
+  return `${settings.baseURL.trim().replace(/\/+$/, '').toLowerCase()}::${settings.model.trim().toLowerCase()}`
+}
+
+function isToolCompatibilityError(error: unknown): boolean {
+  const status = (error as { status?: number })?.status
+  const text = (error instanceof Error ? error.message : String(error)).toLowerCase()
+  return (status === 400 || status === 404 || status === 422) &&
+    /tools?|tool_choice|tool_calls?|functions?|function_call|unsupported|unknown parameter|unrecognized/.test(text)
+}
+
+function addUsage(total: UsageLike | undefined, next: UsageLike | undefined): UsageLike | undefined {
+  if (!next) return total
+  if (!total) return { ...next }
+  return {
+    prompt_tokens: total.prompt_tokens + next.prompt_tokens,
+    completion_tokens: total.completion_tokens + next.completion_tokens,
+    total_tokens: total.total_tokens + next.total_tokens
+  }
+}
+
+function parseSearchToolArguments(raw: string): { query: string; topK: number } | null {
+  try {
+    const value = JSON.parse(raw) as { query?: unknown; topK?: unknown }
+    if (typeof value.query !== 'string' || !value.query.trim()) return null
+    const requestedTopK = typeof value.topK === 'number' && Number.isFinite(value.topK) ? Math.round(value.topK) : 5
+    return { query: value.query.trim(), topK: Math.max(1, Math.min(requestedTopK, 5)) }
+  } catch {
+    return null
+  }
+}
+
+function toolResultContent(result: Awaited<ReturnType<typeof retrieveProjectOriginals>>): string {
+  return JSON.stringify({
+    query: result.attempt.query,
+    outcome: result.attempt.outcome,
+    hits: result.hits.map((hit) => ({
+      sourceType: hit.kind,
+      title: hit.title,
+      chunk: hit.index,
+      score: hit.score,
+      text: hit.text
+    }))
+  })
+}
+
+async function streamAnswerWithTools(options: {
+  client: OpenAI
+  settings: ApiSettings
+  messages: ChatCompletionMessageParam[]
+  projectId: string
+  memory: MemoryContext
+  controller: AbortController
+  chatId: string
+  requestId: string
+}): Promise<{ content: string; reasoning: string; usage?: UsageLike }> {
+  const { client, settings, projectId, memory, controller, chatId, requestId } = options
+  const supportKey = toolSupportKey(settings)
+  const capabilityInstruction: ChatCompletionMessageParam = {
+    role: 'system',
+    content: settings.language === 'en'
+      ? 'The host already performs one automatic project-source search. When the search_project_source tool is available, call it only if you need a different query or more precise original evidence. Never claim you lack source access before using supplied excerpts or the available tool.'
+      : '\u5bbf\u4e3b\u5df2\u81ea\u52a8\u6267\u884c\u4e00\u6b21\u9879\u76ee\u539f\u6587\u68c0\u7d22\u3002\u5982\u679c search_project_source \u5de5\u5177\u53ef\u7528\uff0c\u53ea\u5728\u9700\u8981\u6362\u68c0\u7d22\u8bcd\u6216\u8865\u5145\u66f4\u7cbe\u786e\u7684\u539f\u6587\u8bc1\u636e\u65f6\u8c03\u7528\u3002\u5728\u4f7f\u7528\u5df2\u63d0\u4f9b\u7684\u539f\u6587\u7247\u6bb5\u6216\u53ef\u7528\u5de5\u5177\u524d\uff0c\u4e0d\u5f97\u58f0\u79f0\u6ca1\u6709\u539f\u6587\u8bbf\u95ee\u6743\u9650\u3002'
+  }
+  const conversation: ChatCompletionMessageParam[] = [capabilityInstruction, ...options.messages]
+  let content = ''
+  let reasoning = ''
+  let usage: UsageLike | undefined
+  let executedToolCalls = 0
+
+  while (true) {
+    const useTools = toolSupport.get(supportKey) !== false && executedToolCalls < MAX_SEARCH_TOOL_CALLS
+    const pending = new Map<number, PendingToolCall>()
+    let roundContent = ''
+
+    try {
+      const stream = await client.chat.completions.create(
+        {
+          model: settings.model,
+          messages: conversation,
+          stream: true,
+          stream_options: { include_usage: true },
+          ...(useTools ? { tools: [PROJECT_SEARCH_TOOL], tool_choice: 'auto' as const } : {})
+        },
+        { signal: controller.signal }
+      )
+
+      for await (const chunk of stream) {
+        const choice = chunk.choices?.[0] as
+          | {
+              delta?: {
+                content?: string
+                reasoning_content?: string
+                reasoning?: string
+                tool_calls?: StreamToolDelta[]
+              }
+            }
+          | undefined
+        const deltaText = choice?.delta?.content
+        if (deltaText) {
+          roundContent += deltaText
+          content += deltaText
+          broadcast(EVENTS.streamChunk, { chatId, requestId, delta: deltaText })
+        }
+        const reasoningDelta = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning
+        if (reasoningDelta) {
+          reasoning += reasoningDelta
+          broadcast(EVENTS.streamChunk, { chatId, requestId, delta: '', reasoningDelta })
+        }
+        for (const delta of choice?.delta?.tool_calls ?? []) {
+          const index = delta.index ?? 0
+          const current = pending.get(index) ?? { id: '', name: '', arguments: '' }
+          if (delta.id) current.id = delta.id
+          if (delta.function?.name) {
+            current.name = current.name
+              ? (current.name.endsWith(delta.function.name) ? current.name : current.name + delta.function.name)
+              : delta.function.name
+          }
+          if (delta.function?.arguments) current.arguments += delta.function.arguments
+          pending.set(index, current)
+        }
+        usage = addUsage(usage, chunk.usage as UsageLike | undefined)
+      }
+      if (useTools) toolSupport.set(supportKey, true)
+    } catch (error) {
+      if (useTools && isToolCompatibilityError(error)) {
+        toolSupport.set(supportKey, false)
+        continue
+      }
+      throw error
+    }
+
+    if (controller.signal.aborted) return { content, reasoning, usage }
+    const calls = [...pending.values()].filter((call) => call.name || call.arguments)
+    if (calls.length === 0 || !useTools) return { content, reasoning, usage }
+
+    const remainingToolCalls = MAX_SEARCH_TOOL_CALLS - executedToolCalls
+    const assistantToolCalls = calls.slice(0, remainingToolCalls).map((call, index) => ({
+      id: call.id || `search_project_source_${executedToolCalls}_${index}`,
+      type: 'function' as const,
+      function: { name: call.name || 'search_project_source', arguments: call.arguments }
+    }))
+    conversation.push({
+      role: 'assistant',
+      content: roundContent || null,
+      tool_calls: assistantToolCalls
+    } as ChatCompletionMessageParam)
+
+    for (const call of assistantToolCalls) {
+      let resultContent: string
+      if (call.function.name !== 'search_project_source') {
+        resultContent = JSON.stringify({ outcome: 'failed', error: 'Unknown tool.' })
+      } else {
+        const args = parseSearchToolArguments(call.function.arguments)
+        if (!args) {
+          resultContent = JSON.stringify({ outcome: 'failed', error: 'Invalid tool arguments.' })
+        } else {
+          const result = await retrieveProjectOriginals(projectId, args.query, settings.language, 'tool', '', args.topK)
+          appendVectorAttempt(memory, result.attempt, result.items)
+          resultContent = toolResultContent(result)
+        }
+      }
+      conversation.push({ role: 'tool', tool_call_id: call.id, content: resultContent } as ChatCompletionMessageParam)
+      executedToolCalls++
+      if (executedToolCalls >= MAX_SEARCH_TOOL_CALLS) break
+    }
+  }
 }
 
 function makeClient(baseURL: string, apiKey: string): OpenAI {
@@ -544,30 +853,40 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
   const controller = new AbortController()
   controllers.set(req.requestId, controller)
 
-  // 记忆规划：模型可自动补充大摘要（B 层）或发起向量检索（C 层），全程透明展示
+  // C-layer retrieval starts in the host. It never depends on summary settings,
+  // regenerate mode, or whether a model follows a planning prompt.
   let finalMessages = built.messages
+  if (shouldAutoRetrieve(req.userText)) {
+    const automatic = await retrieveProjectOriginals(chat.projectId, req.userText, settings.language, 'automatic')
+    finalMessages = insertIntoSystemPrefix(finalMessages, automatic.messages)
+    appendVectorAttempt(built.memory, automatic.attempt, automatic.items)
+  } else {
+    built.memory.vectorTrace = { attempted: false, outcome: 'skipped', hitCount: 0, attempts: [] }
+  }
+
+  // B-layer planning only expands rollups. Original-source retrieval is handled
+  // independently by the host and the bounded search tool loop.
   if (!req.regenerate) {
     const cfg = await loadConfig()
     if (cfg.summaryEnabled) {
       const rollups = await readDocRollups(chat.projectId)
       try {
-        const plan = await planMemory(client, settings, built.messages, rollups, chat.projectId)
-        if (plan.extraMsgs.length > 0) finalMessages = [...finalMessages, ...plan.extraMsgs]
+        const plan = await planMemory(settings, built.messages, rollups)
+        finalMessages = insertIntoSystemPrefix(finalMessages, plan.extraMsgs)
         built.memory.rollups.push(...plan.rollupItems)
-        built.memory.vector.push(...plan.vectorItems)
-        built.memory.vectorTrace = plan.vectorTrace
         if (plan.reason) built.memory.reason = plan.reason
-      } catch (error) {
-        built.memory.vectorTrace = {
-          attempted: false,
-          outcome: 'failed',
-          hitCount: 0,
-          error: error instanceof Error ? error.message : String(error)
-        }
-        /* 规划失败：不补充记忆，直接作答，绝不卡住用户 */
+      } catch {
+        // Rollup planning failure must not discard host retrieval or block the answer.
       }
     }
   }
+
+  finalMessages = insertIntoSystemPrefix(finalMessages, [{
+    role: 'system',
+    content: settings.language === 'en'
+      ? 'Project original-text excerpts, when present above, were retrieved by the host application. Use them as source evidence. If retrieval returned nothing, say that no relevant excerpt was found; do not claim that you lack permission to access project sources.'
+      : '\u4e0a\u65b9\u5982\u6709\u9879\u76ee\u539f\u6587\u7247\u6bb5\uff0c\u5b83\u4eec\u7531\u5bbf\u4e3b\u7a0b\u5e8f\u68c0\u7d22\u5e76\u53ef\u4f5c\u4e3a\u4f5c\u7b54\u8bc1\u636e\u3002\u82e5\u672a\u547d\u4e2d\uff0c\u5e94\u8bf4\u660e\u672c\u6b21\u68c0\u7d22\u672a\u627e\u5230\u76f8\u5173\u539f\u6587\uff0c\u4e0d\u8981\u58f0\u79f0\u6ca1\u6709\u8bbf\u95ee\u9879\u76ee\u539f\u6587\u7684\u6743\u9650\u3002'
+  }])
 
   let acc = ''
   let reasoning = ''
@@ -575,33 +894,19 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
   let failed = false
 
   try {
-    const stream = await client.chat.completions.create(
-      {
-        model: settings.model,
-        messages: finalMessages,
-        stream: true,
-        stream_options: { include_usage: true }
-      },
-      { signal: controller.signal }
-    )
-
-    for await (const chunk of stream) {
-      const choice = chunk.choices?.[0] as
-        | { delta?: { content?: string; reasoning_content?: string; reasoning?: string } }
-        | undefined
-      const deltaText = choice?.delta?.content
-      if (deltaText) {
-        acc += deltaText
-        broadcast(EVENTS.streamChunk, { chatId: req.chatId, requestId: req.requestId, delta: deltaText })
-      }
-      const rDelta = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning
-      if (rDelta) {
-        reasoning += rDelta
-        broadcast(EVENTS.streamChunk, { chatId: req.chatId, requestId: req.requestId, delta: '', reasoningDelta: rDelta })
-      }
-      const u = chunk.usage as UsageLike | undefined
-      if (u) usage = u
-    }
+    const result = await streamAnswerWithTools({
+      client,
+      settings,
+      messages: finalMessages,
+      projectId: chat.projectId,
+      memory: built.memory,
+      controller,
+      chatId: req.chatId,
+      requestId: req.requestId
+    })
+    acc = result.content
+    reasoning = result.reasoning
+    usage = result.usage
 
     if (controller.signal.aborted) {
       broadcast(EVENTS.streamDone, {
@@ -669,104 +974,86 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
 // ---------------------------------------------------------------------------
 // 记忆规划：模型先判断是否需要补充大摘要或发起向量检索（透明展示）
 // ---------------------------------------------------------------------------
+// Rollup planning (B layer). C-layer source search is host-controlled elsewhere.
+// ---------------------------------------------------------------------------
 
-function parseMemoryPlan(raw: string): { needs: string[]; vectorQuery: string; reason: string } {
-  const s = raw.trim().replace(/```(?:json)?/gi, '').trim()
-  const attempt = (text: string): { needs: string[]; vectorQuery: string; reason: string } | null => {
+function parseRollupPlan(raw: string): { needs: string[]; reason: string } | null {
+  const cleaned = raw.trim().replace(/```(?:json)?/gi, '').trim()
+  const candidates = [cleaned, cleaned.match(/\{[\s\S]*\}/)?.[0] ?? '']
+  for (const candidate of candidates) {
     try {
-      const p = JSON.parse(text) as { needs?: unknown; vectorQuery?: unknown; reason?: unknown }
+      const value = JSON.parse(candidate) as { needs?: unknown; reason?: unknown }
+      if (!Array.isArray(value.needs)) continue
       return {
-        needs: Array.isArray(p.needs) ? (p.needs as unknown[]).map(String) : [],
-        vectorQuery: typeof p.vectorQuery === 'string' ? p.vectorQuery.trim() : '',
-        reason: String(p.reason ?? '')
+        needs: value.needs.filter((item): item is string => typeof item === 'string').slice(0, 5),
+        reason: typeof value.reason === 'string' ? value.reason.trim() : ''
       }
     } catch {
-      return null
+      // Try the next candidate.
     }
   }
-  return attempt(s) ?? attempt(s.match(/\{[\s\S]*\}/)?.[0] ?? '') ?? { needs: [], vectorQuery: '', reason: '' }
+  return null
 }
 
 async function planMemory(
-  client: OpenAI,
   settings: ApiSettings,
   messages: ChatCompletionMessageParam[],
-  rollups: DocRollup[],
-  projectId: string
+  rollups: DocRollup[]
 ): Promise<{
   extraMsgs: ChatCompletionMessageParam[]
   rollupItems: MemoryContextItem[]
-  vectorItems: MemoryContextItem[]
-  vectorTrace: VectorMemoryTrace
   reason: string
 }> {
+  if (rollups.length === 0) return { extraMsgs: [], rollupItems: [], reason: '' }
   const en = settings.language === 'en'
-  const catalog =
-    rollups.length > 0
-      ? buildRollupCatalogBlock(rollups, settings.language)
-      : en
-        ? 'Available document rollups: (none)'
-        : '可用的大摘要：无'
+  const catalog = buildRollupCatalogBlock(rollups, settings.language)
+  const latestUser = [...messages].reverse().find((message) => message.role === 'user')
+  const userText = typeof latestUser?.content === 'string' ? latestUser.content : ''
   const instruction = en
-    ? 'Decide whether the current summaries are sufficient. If the user asks about a concrete fact, detail, exception, wording, source, setting, or other information that may only exist in the project\'s original documents/resources, you MUST set vectorQuery to a short, precise search query even if a summary contains a broad description. Use null only when original text is not needed. Output JSON {"needs": ["id"...], "vectorQuery": "..." or null, "reason": "..."} with at most 5 rollup ids and one vectorQuery. Otherwise output {"needs": [], "vectorQuery": null, "reason": ""}.'
-    : '先判断现有摘要是否足够。如果用户询问具体事实、细节、例外、原文措辞、出处、设定或其他可能只存在于项目文档/资源原文中的信息，即使摘要有概括，也必须设置 vectorQuery 为简短而具体的检索词；只有不需要原文时才可使用 null。输出 JSON {"needs": ["id"...], "vectorQuery": "..." 或 null, "reason": "..."}，needs 最多 5 个、vectorQuery 最多一个；否则输出 {"needs": [], "vectorQuery": null, "reason": ""}。'
-  const decisionMsgs: ChatCompletionMessageParam[] = [...messages, { role: 'system', content: `${catalog}\n\n${instruction}` }]
-  const res = await client.chat.completions.create({
-    model: settings.model,
-    messages: decisionMsgs,
-    temperature: 0,
-    max_tokens: 400
+    ? 'Select document rollups only when they add useful broader context for the current request. Output JSON only: {"needs":["id"],"reason":"short reason"}. Use at most 5 valid ids; use an empty array when no rollup is needed.'
+    : '\u53ea\u5728\u5f53\u524d\u8bf7\u6c42\u9700\u8981\u66f4\u5e7f\u7684\u6587\u6863\u80cc\u666f\u65f6\u9009\u62e9\u5927\u6458\u8981\u3002\u4ec5\u8f93\u51fa JSON\uff1a{"needs":["id"],"reason":"\u7b80\u77ed\u7406\u7531"}\u3002needs \u6700\u591a 5 \u4e2a\u4e14\u5fc5\u987b\u662f\u76ee\u5f55\u4e2d\u7684 id\uff1b\u4e0d\u9700\u8981\u65f6\u8f93\u51fa\u7a7a\u6570\u7ec4\u3002'
+  const decision = await executeStructuredTask({
+    task: 'memory_rollup_plan',
+    settings,
+    messages: [
+      { role: 'system', content: instruction },
+      { role: 'user', content: `${catalog}\n\n${en ? 'Current request' : '\u5f53\u524d\u8bf7\u6c42'}:\n${userText}` }
+    ],
+    outputTokens: 300,
+    compactOutputTokens: 220,
+    parseAndValidate: parseRollupPlan,
+    jsonSchema: {
+      type: 'object',
+      properties: {
+        needs: { type: 'array', items: { type: 'string' }, maxItems: 5 },
+        reason: { type: 'string' }
+      },
+      required: ['needs', 'reason'],
+      additionalProperties: false
+    }
   })
-  if (res.usage) await recordUsage(res.usage, 'summary')
-  const d = parseMemoryPlan(res.choices[0]?.message?.content ?? '')
 
   const extraMsgs: ChatCompletionMessageParam[] = []
   const rollupItems: MemoryContextItem[] = []
-  const vectorItems: MemoryContextItem[] = []
-  let vectorTrace: VectorMemoryTrace = { attempted: false, outcome: 'skipped', hitCount: 0 }
-
-  const byId = new Map(rollups.map((r) => [r.id, r]))
-  const label = en ? 'Docs' : '第'
-  const suffix = en ? '' : ' 篇'
-  for (const id of d.needs.slice(0, 5)) {
-    const r = byId.get(id)
-    if (!r) continue
-    extraMsgs.push({ role: 'system', content: buildRollupBlock(r, settings.language) })
-    rollupItems.push({ kind: 'rollup', key: r.id, title: `${label} ${r.rangeLabel}${suffix}`, reason: d.reason })
+  const byId = new Map(rollups.map((rollup) => [rollup.id, rollup]))
+  const label = en ? 'Docs' : '\u7b2c'
+  const suffix = en ? '' : ' \u7bc7'
+  for (const id of decision.needs) {
+    const rollup = byId.get(id)
+    if (!rollup) continue
+    extraMsgs.push({ role: 'system', content: buildRollupBlock(rollup, settings.language) })
+    rollupItems.push({
+      kind: 'rollup',
+      key: rollup.id,
+      title: `${label} ${rollup.rangeLabel}${suffix}`,
+      reason: decision.reason
+    })
   }
-
-  if (d.vectorQuery) {
-    vectorTrace = { attempted: true, outcome: 'empty', hitCount: 0, query: d.vectorQuery }
-    try {
-      const hits = await searchVectorIndex(projectId, d.vectorQuery, 5)
-      vectorTrace = { attempted: true, outcome: hits.length > 0 ? 'hit' : 'empty', hitCount: hits.length, query: d.vectorQuery }
-      for (const h of hits) {
-        extraMsgs.push({ role: 'system', content: `${en ? '【Vector search hit: ' : '【向量检索命中：'}${h.title} #${h.index}】\n${h.text}` })
-        vectorItems.push({
-          kind: 'vector',
-          key: `${h.docId}:${h.index}`,
-          title: `${h.title} #${h.index}`,
-          reason: d.reason,
-          preview: h.text,
-          score: h.score
-        })
-      }
-    } catch (error) {
-      vectorTrace = {
-        attempted: true,
-        outcome: 'failed',
-        hitCount: 0,
-        query: d.vectorQuery,
-        error: error instanceof Error ? error.message : String(error)
-      }
-    }
-  }
-
-  return { extraMsgs, rollupItems, vectorItems, vectorTrace, reason: d.reason }
+  return { extraMsgs, rollupItems, reason: decision.reason }
 }
 
 // ---------------------------------------------------------------------------
-// 自动生成对话标题
+// Automatic chat-title generation
 // ---------------------------------------------------------------------------
 
 export async function generateChatTitle(chatId: string): Promise<{ ok: boolean; title?: string; error?: string }> {

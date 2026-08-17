@@ -513,6 +513,16 @@ export interface MemoryContextItem {
   preview?: string
   /** 向量相似度分数，仅 vector 项使用。 */
   score?: number
+  /** Retrieval origin: host automatic search or model tool call. */
+  source?: 'automatic' | 'tool'
+}
+
+export interface VectorMemoryAttempt {
+  source: 'automatic' | 'tool'
+  query: string
+  outcome: 'hit' | 'empty' | 'failed'
+  hitCount: number
+  error?: string
 }
 
 export interface VectorMemoryTrace {
@@ -521,6 +531,8 @@ export interface VectorMemoryTrace {
   hitCount: number
   query?: string
   error?: string
+  /** Per-attempt trace for automatic and tool-initiated searches in this turn. */
+  attempts?: VectorMemoryAttempt[]
 }
 
 export interface MemoryContext {

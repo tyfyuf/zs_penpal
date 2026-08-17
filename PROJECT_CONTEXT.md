@@ -79,9 +79,9 @@ D:\ds h-project\
 │  ├─ main/              # Electron 主进程
 │  │  ├─ services/       # 业务服务层
 │  │  │  ├─ file.service.ts        # 文件仓库（含摘要/大摘要/向量索引读写与旧格式迁移）
-│  │  │  ├─ api.service.ts         # 对话组装/注入管线/记忆规划(B+C)/预算裁剪/流式
+│  │  │  ├─ api.service.ts         # 对话组装/宿主原文检索/大摘要规划/工具循环/预算裁剪/流式
 │  │  │  ├─ summary.service.ts     # 摘要/蒸馏/分类/大摘要 rollup/一致性扫描
-│  │  │  ├─ vector.service.ts      # 本地向量索引/检索（BGE 优先，特征哈希兜底）
+│  │  │  ├─ vector.service.ts      # 本地混合检索（BGE/特征哈希语义 + 轻量字面召回）
 │  │  │  ├─ neural-embed.service.ts # 本地 BGE 加载、tokenizer、批量推理与故障冷却
 │  │  │  └─ …(tokenizer/usage/git/export/recovery/migration/config/log/crypto)
 │  │  ├─ summary-source.ts         # 源指纹/三级新鲜度工具（src/main 根）
@@ -224,9 +224,10 @@ export interface ChatMeta {
   - [x] P1′ 注入：**内容相关度采样**（实体重叠+新鲜度，每类型默认最相关 10 条，替代“全部注入”）；默认激活集（`summary:defaultActive`）；注入面板**搜索框**（`summary:search` 手动激活）；首条消息冻结 = (默认采样 ∪ pending) − disabled
   - [x] P2′ 大摘要 rollup：写作文档 >50 时每 10 篇聚合成整体摘要（状态变化/因果/伏笔账本），设置页按项目管理（预览/单条重生成/无移除），三级新鲜度
   - [x] P2′ 聊天小摘要增量：尾部窗口 20 条逐条 + 历史区间压缩（触发：消息数 >40 或对话 token 估算 >60% 预算），每 10 条一个压缩区间，增量维护
-  - [x] P7 B 记忆菜单：回答前一次小决策调用，模型可自动请求展开大摘要（`needs`）或发起向量检索（`vectorQuery`），失败兜底直接作答
-  - [x] P7 透明“本次记忆”卡：每次回答展示注入的小摘要 + 补充的大摘要 + 向量命中 + 模型自述缺口（`streamDone.memory`）
-  - [x] P6 本地向量检索：BGE-small-zh-v1.5 FP32 ONNX（CLS + L2，512 维）优先，精确 tokenizer 分块（480 token/重叠 48）；模型故障时整库回退 char 1–3-gram 特征哈希（256 维），索引 schema v2 自动处理后端/维度迁移
+  - [x] P7 B 记忆菜单：仅在存在大摘要且摘要开启时，通过 provider-neutral 结构化任务选择需要展开的 rollup（`needs`）；规划失败不阻断回答
+  - [x] P7/C 宿主驱动原文检索：每个有效问题先由主进程自动检索，独立于摘要开关和重新生成；支持 tools 的模型可在最多 2 次有界工具循环中补充查询，不支持 tools 的端点自动降级
+  - [x] P6 本地混合检索：BGE-small-zh-v1.5 FP32 ONNX（CLS + L2，512 维）优先，精确 tokenizer 分块（480 token/重叠 48）；模型故障时整库回退 char 1–3-gram 特征哈希（256 维）；专名/原文措辞字面分数与语义分数融合
+  - [x] P7 透明“本次记忆”卡：展示小摘要、大摘要、自动检索/工具检索的逐次查询、命中数、来源、相似度和原文预览（`streamDone.memory`）
   - [x] P4 一致性扫描：R1 别名冲突（error）+ R4 摘要漂移（advisory），摘要区“一致性提示”分组展示（`summary:scanConsistency`）
   - [x] 侧边栏瘦身：归档/回收站/项目回收站迁到设置页“归档与回收站”按项目管理
   - [x] 附件去重：写作文档“附加到对话”（读当前内容）+ 与全文注入去重（`ChatAttachment.docId` / `StreamRequest.docIds`，“关联文档全文已打开，无需上传”提示）
@@ -271,7 +272,16 @@ export interface ChatMeta {
 - 仍可继续增强但不属于当前故障修复：超长文档分级提取、能力覆盖 UI/状态历史、更多供应商真实端点回归矩阵。
 - 完整证据与方案：`docs/summary-distillation-failure-root-cause-and-solution-2026-08-17.md`。
 
-### 6.3 其他待办（原有）
+### 6.3 宿主驱动原文检索（已实施，待真实端点验收）
+
+- 首次检索改为宿主自动执行，不再依赖模型输出 `vectorQuery`；关闭摘要、重新生成和无工具模型均可检索。
+- 检索升级为字面专名/原文措辞 + 神经/哈希语义的混合排序。
+- 支持 Function Calling 的端点获得 `search_project_source`，单次回答最多 2 次工具检索；明确的工具参数兼容错误会自动重试不带 tools。
+- “本次记忆”逐次展示自动检索/工具检索的查询、结果和命中片段。
+- 实施说明与验收清单：`docs/host-rag-tool-loop-implementation-2026-08-17.md`。
+- 尚需真实设定集专名召回验收、DeepSeek/OpenAI/Qwen/GLM 工具兼容矩阵、混合阈值调优、工具能力持久化和低上下文预算裁剪。
+
+### 6.4 其他待办（原有）
 
 1. **应用图标**：当前用默认 Electron 图标；在 `build/icon.ico` 放置图标并在 `electron-builder.yml` 配置。
 2. **代码签名**：`win.signAndEditExecutable=false`；有证书后恢复并配置 `CSC_LINK`。
@@ -279,10 +289,10 @@ export interface ChatMeta {
 4. **多模型支持**：PRD 限定单模型；已预留扩展点 `summary.modelOverride`。
 5. （可选）非推理模型的“提示式思考”开关（当前 CoT 仅展示模型原生 reasoning_content）。
 
-### 6.4 已知边界 / 未修复项（出现路径）
+### 6.5 已知边界 / 未修复项（出现路径）
 
-- **向量索引 freshness 未跟踪源变更**：索引会在缺失、schema、嵌入模型或维度不一致时自动重建，但文档/资源正文修改后不会自动失效；未来可记录源指纹并增量或全量重建。
-- **记忆规划每次消息多一次小 LLM 调用**（`max_tokens 400`，temperature 0），成本/延迟增加（用户接受）。
+- **向量索引尚未自动刷新**：索引已记录每个文档/资源的源指纹，设置页会显示 indexed/stale/not-indexed 并可手动重建；正文修改后尚不会自动或增量刷新。
+- **大摘要规划仍可能增加一次 LLM 调用**：仅在摘要开启、非重新生成且项目存在 rollup 时执行 provider-neutral 结构化任务；无 rollup 时零调用。
 - **中文模型 token 估算为近似**：DeepSeek/GLM/Qwen 按 ~1.1 token/字（`estimateInputTokens`），可能边界误判（可调大上下文上限）。
 - **旧版本摘要格式**：三字段版/单标签版读取时按无效丢弃并重新生成；v1 带全文快照版读取时自动迁移为指纹（`file.service.ts readDocSummary`）。
 - **重新生成“上一版回答”仅在内存**：不持久化，重开窗口后对照块消失。
@@ -309,15 +319,17 @@ export interface ChatMeta {
 6. `applyBudget` → 预算裁剪顺序（从低到高丢）：历史 → 资源摘要 → 对话摘要 → 快照/附加 → 文档摘要 → 最后截断上下文块。输入预算 = `contextLimit * 0.8`。
 7. 附加文档去重：同文档已全文注入则跳过附件（`fullTextDocIds` 集合）。
 
-### 7.2 记忆规划（B 大摘要 + C 向量，三层记忆的第二三层，自动触发）
+### 7.2 B 大摘要规划 + C 宿主检索/工具循环
 
-`api.service.ts planMemory`（`streamChatInner` 中，非重新生成且 `summaryEnabled` 时）：
+`api.service.ts streamChatInner / planMemory / streamAnswerWithTools`：
 
-1. 把可用大摘要目录（`buildRollupCatalogBlock`）+ 指令附到消息尾部，模型输出 JSON `{needs: [rollupId...], vectorQuery: "..."或null, reason: "..."}`（`parseMemoryPlan`，失败兜底：不补充直接作答）。
-2. `needs`（最多 5 个）→ 展开对应 rollup 块，记入 `memory.rollups`。
-3. `vectorQuery` → `searchVectorIndex(projectId, vectorQuery, 5)` → 注入命中分块（带来源头），记入 `memory.vector`。
-4. `reason` → `memory.reason`（模型自述缺口）。
-5. 全部随 `streamDone.memory` 返回渲染层，由“本次记忆”卡透明展示。
+1. **C 首次检索由宿主执行**：除问候/感谢等低信号输入外，主进程以当前用户问题调用 `searchVectorIndex(projectId, query, 5)`；与 `summaryEnabled`、重新生成和模型规划能力无关。
+2. **混合召回**：`vector.service.ts` 同时计算嵌入语义分数和轻量字面分数；引号短语、英文/数字专名、去除提问脚手架后的中文词段可提升精确原文命中排序。
+3. **B 层只选大摘要**：仅在非重新生成、摘要开启且存在 rollup 时，`planMemory` 通过 `executeStructuredTask(memory_rollup_plan)` 输出 `{needs, reason}`；最多展开 5 个 rollup。
+4. **有界工具循环**：最终回答请求声明 `search_project_source`。支持 tools 的模型可换查询补检索，最多执行 2 次；工具结果作为 `role: tool` 回传。
+5. **兼容降级**：端点对 tools/tool_choice/tool_calls/function 参数返回明确 400/404/422 兼容错误时，按 `baseURL + model` 在本进程标记不支持并自动重试无工具请求；宿主首次检索结果仍保留。
+6. **透明返回**：自动/工具查询均写入 `memory.vectorTrace.attempts`，命中块按 `docId:index` 去重后写入 `memory.vector`，随 `streamDone.memory` 在“本次记忆”卡展示。
+7. **失败隔离**：索引/检索/大摘要规划失败均不得阻断最终聊天请求；模型不得在已有宿主片段或工具可用时声称没有原文访问权限。
 
 ### 7.3 注入开关的“冻结/锁定/pending”状态机（渲染层 ChatPane）
 
@@ -381,7 +393,7 @@ export interface ChatMeta {
 | --- | --- | --- |
 | 本地嵌入真实语料验收 | BGE/回退/打包链路已接通并通过隔离烟测 | 用实际小说项目比较语义命中；据结果决定是否调分块、查询指令、阈值或模型 |
 | 摘要/蒸馏 P0 后续 | 兼容层已实施，当前用户回归正常 | 需要时继续做超长文档分级提取、能力覆盖 UI 和更多供应商回归 |
-| 向量索引 freshness | 后端/schema/维度变化会重建；正文修改尚不触发失效 | 增加源指纹与保存后增量/防抖重建 |
+| 向量索引自动刷新 | 已有源指纹、逐文件状态和手动重建；正文修改可显示 stale | 增加保存后增量/防抖重建 |
 | 无应用图标 / 无签名 | 默认图标；`signAndEditExecutable=false` | 图标与证书就绪后补齐 |
 | 主进程错误文案中文 | 界面 i18n 完成 | 计划在语言设置完善时统一 |
 | 单模型限制 | 摘要复用主模型；留 `summary.modelOverride` | 多模型需求出现时升级 |
@@ -390,7 +402,10 @@ export interface ChatMeta {
 | “上一版回答”对照不持久化 | 仅内存 | 如需历史对照，给 ChatMessage 增加 prevContent |
 | 沙箱缓存目录占用仓库空间 | 三个缓存目录 | 已 gitignore；仓库迁移可删除后重装 |
 | 旧摘要格式只读不迁移 | 三字段/单标签版丢弃重生成；快照版自动迁移指纹 | 无进一步迁移计划 |
-| 记忆规划额外 LLM 调用 | 每消息一次小调用 | 用户已接受；未来可加“有 rollup/索引才规划”开关 |
+| 大摘要规划额外 LLM 调用 | 仅存在 rollup 时每个非重新生成消息一次结构化调用 | 可增加用户开关或规则优先，继续降低延迟 |
+| 工具能力缓存 | 当前按 baseURL + model 仅保存在进程内 | 持久化能力状态并提供重新探测入口 |
+| 混合召回阈值 | 当前返回 top-k 正分结果，未设最低相关性阈值 | 用真实设定集调分并增加低相关性抑制/多样性重排 |
+| 检索片段预算 | 自动检索在主预算裁剪后追加，低上下文上限可能偏紧 | 增加检索专用 token 预算和截断策略 |
 
 ---
 
@@ -412,6 +427,8 @@ export interface ChatMeta {
 ## 11. 近期提交记录（本会话）
 
 ```
+62ccb0c feat: expose vector index and retrieval traces
+61eebf7 feat: bundle local neural embeddings
 1b235ef fix: harden summary structured generation
 eecf1d6 保留新窗口现状报告: 摘要/蒸馏生成机制梳理
 a4423a6 重写交接文档: 三层记忆架构新变化+摘要遗留问题+模型待接线+交接要点
