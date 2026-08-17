@@ -1,5 +1,5 @@
 import { resolve } from 'path'
-import { defineConfig } from 'electron-vite'
+import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
@@ -9,7 +9,12 @@ export default defineConfig({
       alias: {
         '@shared': resolve('src/shared')
       }
-    }
+    },
+    plugins: [
+      externalizeDepsPlugin({
+        include: ['@huggingface/transformers', 'onnxruntime-node', 'onnxruntime-web']
+      })
+    ]
   },
   preload: {
     resolve: {

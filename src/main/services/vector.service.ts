@@ -1,20 +1,47 @@
 import type { VectorChunk, VectorIndex, VectorSearchHit } from '@shared/types'
 import { buildSnapshot, readDoc, readResource, readVectorIndex, writeVectorIndex } from './file.service'
 import { nowIso } from '../util'
+import {
+  getNeuralEmbedder,
+  NEURAL_EMBED_DIM,
+  NEURAL_EMBED_MODEL,
+  NEURAL_MAX_CONTENT_TOKENS,
+  NEURAL_OVERLAP_TOKENS,
+  type NeuralEmbedder
+} from './neural-embed.service'
+import { logVectorEvent } from './log.service'
 
 // ---------------------------------------------------------------------------
 // 本地向量检索（兜底层）：
-// - 嵌入：char 1..3-gram 特征哈希（hashing trick）→ 256 维有符号向量，L2 归一化。
-//   零依赖、离线、确定性、无 API 成本、无模型权重下载（沙箱阻断 HuggingFace，无法用神经模型）。
-// - 存储：项目内 summaries/vector-index/<id>.json（纯文件，符合隐私红线）。
-// - 检索：余弦相似度 top-k，命中返回原文分块。
+// - 首选：bge-small-zh-v1.5 ONNX，CLS pooling + L2 normalize，512 维。
+// - 兜底：char 1..3-gram 特征哈希，256 维；模型缺失/加载/推理失败时绝不阻断对话。
+// - 索引：同一索引只允许一种嵌入后端；模型、schema 或维度变化会原子全量重建。
 // ---------------------------------------------------------------------------
 
-const EMBED_DIM = 256
-const EMBED_MODEL = 'fnv-ngram-256'
-const SCHEMA_VERSION = 1
-const CHUNK_TARGET = 800
-const CHUNK_OVERLAP = 100
+const HASH_EMBED_DIM = 256
+const HASH_EMBED_MODEL = 'fnv-ngram-256'
+const SCHEMA_VERSION = 2
+const HASH_CHUNK_TARGET = 800
+const HASH_CHUNK_OVERLAP = 100
+const MAX_BOUNDARY_SCAN = 240
+
+interface EmbeddingBackend {
+  id: string
+  dimension: number
+  kind: 'neural' | 'hash'
+  chunk(text: string): string[]
+  embedDocuments(texts: string[]): Promise<number[][]>
+  embedQuery(query: string): Promise<number[]>
+}
+
+export interface VectorBuildResult {
+  ok: boolean
+  error?: string
+  chunkCount?: number
+  embedModel?: string
+}
+
+const buildPromises = new Map<string, Promise<VectorBuildResult>>()
 
 function fnv1a(str: string): number {
   let h = 0x811c9dc5
@@ -25,35 +52,35 @@ function fnv1a(str: string): number {
   return h >>> 0
 }
 
-/** 特征哈希嵌入：char n-gram → 有符号桶 */
+/** 特征哈希嵌入：char n-gram → 有符号桶。保留导出，供回归测试使用。 */
 export function embedText(text: string): number[] {
-  const v = new Float64Array(EMBED_DIM)
+  const v = new Float64Array(HASH_EMBED_DIM)
   const t = text.toLowerCase()
   for (let n = 1; n <= 3; n++) {
     for (let i = 0; i <= t.length - n; i++) {
       const h = fnv1a(t.slice(i, i + n))
-      const bucket = h % EMBED_DIM
+      const bucket = h % HASH_EMBED_DIM
       const sign = ((h >>> 31) & 1) === 0 ? 1 : -1
       v[bucket] += sign
     }
   }
   let norm = 0
-  for (let i = 0; i < EMBED_DIM; i++) norm += v[i] * v[i]
+  for (let i = 0; i < HASH_EMBED_DIM; i++) norm += v[i] * v[i]
   norm = Math.sqrt(norm) || 1
-  const out = new Array<number>(EMBED_DIM)
-  for (let i = 0; i < EMBED_DIM; i++) out[i] = v[i] / norm
+  const out = new Array<number>(HASH_EMBED_DIM)
+  for (let i = 0; i < HASH_EMBED_DIM; i++) out[i] = v[i] / norm
   return out
 }
 
 function cosine(a: number[], b: number[]): number {
-  let s = 0
-  const n = Math.min(a.length, b.length)
-  for (let i = 0; i < n; i++) s += a[i] * b[i]
-  return s
+  if (a.length !== b.length) return Number.NEGATIVE_INFINITY
+  let sum = 0
+  for (let i = 0; i < a.length; i++) sum += a[i] * b[i]
+  return sum
 }
 
-/** 按段落合并 + 硬切，目标 800 字、重叠 100 字 */
-export function chunkText(text: string, target = CHUNK_TARGET, overlap = CHUNK_OVERLAP): string[] {
+/** 特征哈希路径沿用原有按段落分块：目标 800 字、重叠 100 字。 */
+export function chunkText(text: string, target = HASH_CHUNK_TARGET, overlap = HASH_CHUNK_OVERLAP): string[] {
   const trimmed = text.trim()
   if (!trimmed) return []
   if (trimmed.length <= target) return [trimmed]
@@ -83,52 +110,324 @@ export function chunkText(text: string, target = CHUNK_TARGET, overlap = CHUNK_O
   return chunks
 }
 
-/** 构建项目向量索引（嵌原文分块，全量重建——特征哈希零成本，CPU 即可） */
-export async function buildVectorIndex(projectId: string): Promise<{ ok: boolean; error?: string; chunkCount?: number }> {
-  const tree = (await buildSnapshot()).projects.find((p) => p.project.id === projectId)
-  if (!tree) return { ok: false, error: '项目不存在' }
-  const chunks: VectorChunk[] = []
-  for (const d of tree.docs) {
-    try {
-      const { content } = await readDoc(d.id)
-      chunkText(content).forEach((t, i) => chunks.push({ docId: d.id, kind: 'doc', title: d.title, index: i, text: t, vector: embedText(t) }))
-    } catch {
-      /* 读取失败跳过 */
+function findMaxTokenEnd(
+  source: string,
+  start: number,
+  maxTokens: number,
+  countTokens: (text: string) => number
+): number {
+  let high = Math.min(source.length, start + 2048)
+  while (high < source.length && countTokens(source.slice(start, high)) <= maxTokens) {
+    const width = high - start
+    high = Math.min(source.length, start + width * 2)
+  }
+  if (high === source.length && countTokens(source.slice(start, high)) <= maxTokens) return high
+
+  let low = start + 1
+  let best = low
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2)
+    if (countTokens(source.slice(start, mid)) <= maxTokens) {
+      best = mid
+      low = mid + 1
+    } else {
+      high = mid - 1
     }
   }
-  for (const r of tree.resources) {
-    try {
-      const { content, name } = await readResource(projectId, r.id)
-      chunkText(content).forEach((t, i) => chunks.push({ docId: r.id, kind: 'res', title: name, index: i, text: t, vector: embedText(t) }))
-    } catch {
-      /* 读取失败跳过 */
-    }
-  }
-  const index: VectorIndex = { schemaVersion: SCHEMA_VERSION, embedModel: EMBED_MODEL, chunks, updatedAt: nowIso() }
-  await writeVectorIndex(projectId, index)
-  return { ok: true, chunkCount: chunks.length }
+  return Math.max(best, start + 1)
 }
 
-/** 余弦检索 top-k 原文分块（无索引时自动构建） */
-export async function searchVectorIndex(projectId: string, query: string, topK = 5): Promise<VectorSearchHit[]> {
-  let idx = await readVectorIndex(projectId)
-  if (!idx || idx.chunks.length === 0) {
-    await buildVectorIndex(projectId)
-    idx = await readVectorIndex(projectId)
+function preferNaturalBoundary(source: string, start: number, hardEnd: number): number {
+  if (hardEnd >= source.length) return hardEnd
+  const min = Math.max(start + 1, hardEnd - Math.min(MAX_BOUNDARY_SCAN, Math.floor((hardEnd - start) * 0.3)))
+  for (let i = hardEnd - 1; i >= min; i--) {
+    if (/\n|[。！？!?；;]/.test(source[i])) return i + 1
   }
-  if (!idx || idx.chunks.length === 0) return []
-  const qv = embedText(query)
-  const scored = idx.chunks
-    .map((c) => ({ c, score: cosine(qv, c.vector) }))
+  return hardEnd
+}
+
+function findOverlapStart(
+  source: string,
+  chunkStart: number,
+  chunkEnd: number,
+  overlapTokens: number,
+  countTokens: (text: string) => number
+): number {
+  let low = chunkStart
+  let high = chunkEnd
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2)
+    if (countTokens(source.slice(mid, chunkEnd)) > overlapTokens) low = mid + 1
+    else high = mid
+  }
+  return low
+}
+
+/** 使用 BGE 自己的 tokenizer 限制块大小，并始终返回原文子串。 */
+export function chunkTextByTokens(
+  text: string,
+  countTokens: (text: string) => number,
+  maxTokens = NEURAL_MAX_CONTENT_TOKENS,
+  overlapTokens = NEURAL_OVERLAP_TOKENS
+): string[] {
+  const source = text.trim()
+  if (!source) return []
+  if (countTokens(source) <= maxTokens) return [source]
+
+  const chunks: string[] = []
+  let cursor = 0
+  while (cursor < source.length) {
+    const hardEnd = findMaxTokenEnd(source, cursor, maxTokens, countTokens)
+    const end = preferNaturalBoundary(source, cursor, hardEnd)
+    const chunk = source.slice(cursor, end).trim()
+    if (chunk) chunks.push(chunk)
+    if (end >= source.length) break
+
+    const overlapStart = findOverlapStart(source, cursor, end, overlapTokens, countTokens)
+    cursor = overlapStart > cursor && overlapStart < end ? overlapStart : end
+    while (cursor < source.length && /\s/.test(source[cursor])) cursor++
+  }
+  return chunks
+}
+
+const HASH_BACKEND: EmbeddingBackend = {
+  id: HASH_EMBED_MODEL,
+  dimension: HASH_EMBED_DIM,
+  kind: 'hash',
+  chunk: chunkText,
+  async embedDocuments(texts: string[]): Promise<number[][]> {
+    return texts.map(embedText)
+  },
+  async embedQuery(query: string): Promise<number[]> {
+    return embedText(query)
+  }
+}
+
+function neuralBackend(embedder: NeuralEmbedder): EmbeddingBackend {
+  return {
+    id: embedder.id,
+    dimension: embedder.dimension,
+    kind: 'neural',
+    chunk: (text) => chunkTextByTokens(text, (value) => embedder.countTokens(value)),
+    embedDocuments: (texts) => embedder.embedDocuments(texts),
+    embedQuery: (query) => embedder.embedQuery(query)
+  }
+}
+
+async function preferredBackend(): Promise<EmbeddingBackend> {
+  const embedder = await getNeuralEmbedder()
+  return embedder ? neuralBackend(embedder) : HASH_BACKEND
+}
+
+function indexMatchesBackend(index: VectorIndex | null, backend: EmbeddingBackend): index is VectorIndex {
+  return Boolean(
+    index &&
+      index.schemaVersion === SCHEMA_VERSION &&
+      index.embedModel === backend.id &&
+      Array.isArray(index.chunks) &&
+      index.chunks.every((chunk) => Array.isArray(chunk.vector) && chunk.vector.length === backend.dimension)
+  )
+}
+
+async function appendSourceChunks(
+  target: VectorChunk[],
+  backend: EmbeddingBackend,
+  source: { docId: string; kind: 'doc' | 'res'; title: string; content: string }
+): Promise<void> {
+  const texts = backend.chunk(source.content)
+  if (texts.length === 0) return
+  const vectors = await backend.embedDocuments(texts)
+  if (vectors.length !== texts.length) throw new Error('嵌入结果数量与文本分块数量不一致')
+  for (let i = 0; i < texts.length; i++) {
+    const vector = vectors[i]
+    if (!vector || vector.length !== backend.dimension) {
+      throw new Error(`嵌入维度不一致：${source.title} #${i}`)
+    }
+    target.push({
+      docId: source.docId,
+      kind: source.kind,
+      title: source.title,
+      index: i,
+      text: texts[i],
+      vector
+    })
+  }
+}
+
+async function buildWithBackend(projectId: string, backend: EmbeddingBackend): Promise<VectorBuildResult> {
+  const startedAt = Date.now()
+  const tree = (await buildSnapshot()).projects.find((project) => project.project.id === projectId)
+  if (!tree) return { ok: false, error: '项目不存在' }
+
+  const chunks: VectorChunk[] = []
+  for (const doc of tree.docs) {
+    try {
+      const { content } = await readDoc(doc.id)
+      await appendSourceChunks(chunks, backend, {
+        docId: doc.id,
+        kind: 'doc',
+        title: doc.title,
+        content
+      })
+    } catch (error) {
+      if (backend.kind === 'neural') throw error
+      // 单个源文件读取失败时跳过；不让损坏文件阻止其余索引构建。
+    }
+  }
+  for (const resource of tree.resources) {
+    try {
+      const { content, name } = await readResource(projectId, resource.id)
+      await appendSourceChunks(chunks, backend, {
+        docId: resource.id,
+        kind: 'res',
+        title: name,
+        content
+      })
+    } catch (error) {
+      if (backend.kind === 'neural') throw error
+      // 同上，特征哈希兜底路径跳过无法读取的单个资源。
+    }
+  }
+
+  const index: VectorIndex = {
+    schemaVersion: SCHEMA_VERSION,
+    embedModel: backend.id,
+    chunks,
+    updatedAt: nowIso()
+  }
+  await writeVectorIndex(projectId, index)
+  logVectorEvent({
+    stage: 'build',
+    backend: backend.id,
+    outcome: 'success',
+    durationMs: Date.now() - startedAt,
+    chunkCount: chunks.length
+  })
+  return { ok: true, chunkCount: chunks.length, embedModel: backend.id }
+}
+
+async function buildWithFallback(projectId: string, initialBackend: EmbeddingBackend): Promise<VectorBuildResult> {
+  try {
+    return await buildWithBackend(projectId, initialBackend)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    logVectorEvent({
+      stage: 'build',
+      backend: initialBackend.id,
+      outcome: 'failure',
+      reason
+    })
+    if (initialBackend.kind === 'hash') return { ok: false, error: reason }
+    const fallbackReason = `神经索引构建失败，改用特征哈希：${reason}`
+    try {
+      const result = await buildWithBackend(projectId, HASH_BACKEND)
+      logVectorEvent({
+        stage: 'fallback',
+        backend: HASH_EMBED_MODEL,
+        outcome: result.ok ? 'success' : 'failure',
+        reason: result.ok ? fallbackReason : result.error ?? fallbackReason
+      })
+      return result
+    } catch (fallbackError) {
+      const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+      logVectorEvent({
+        stage: 'fallback',
+        backend: HASH_EMBED_MODEL,
+        outcome: 'failure',
+        reason: fallbackMessage
+      })
+      return { ok: false, error: fallbackMessage }
+    }
+  }
+}
+
+function runBuild(projectId: string, backend: EmbeddingBackend): Promise<VectorBuildResult> {
+  const existing = buildPromises.get(projectId)
+  if (existing) return existing
+  const promise = buildWithFallback(projectId, backend).finally(() => {
+    if (buildPromises.get(projectId) === promise) buildPromises.delete(projectId)
+  })
+  buildPromises.set(projectId, promise)
+  return promise
+}
+
+/** 构建项目向量索引；首选神经嵌入，任意模型故障时从头以特征哈希重建。 */
+export async function buildVectorIndex(projectId: string): Promise<VectorBuildResult> {
+  return runBuild(projectId, await preferredBackend())
+}
+
+async function backendForIndex(index: VectorIndex): Promise<EmbeddingBackend | null> {
+  if (index.embedModel === HASH_EMBED_MODEL) return HASH_BACKEND
+  if (index.embedModel !== NEURAL_EMBED_MODEL) return null
+  const embedder = await getNeuralEmbedder()
+  return embedder ? neuralBackend(embedder) : null
+}
+
+async function ensureSearchIndex(projectId: string): Promise<{ index: VectorIndex; backend: EmbeddingBackend } | null> {
+  const preferred = await preferredBackend()
+  let index = await readVectorIndex(projectId)
+  if (!indexMatchesBackend(index, preferred)) {
+    const result = await runBuild(projectId, preferred)
+    if (!result.ok) return null
+    index = await readVectorIndex(projectId)
+  }
+  if (!index || index.chunks.length === 0) return null
+
+  let backend = await backendForIndex(index)
+  if (!backend || !indexMatchesBackend(index, backend)) {
+    const result = await runBuild(projectId, HASH_BACKEND)
+    if (!result.ok) return null
+    index = await readVectorIndex(projectId)
+    backend = index ? await backendForIndex(index) : null
+  }
+  return index && backend && indexMatchesBackend(index, backend) ? { index, backend } : null
+}
+
+/** 余弦检索 top-k 原文分块；神经查询失败时原子切换为特征哈希索引。 */
+export async function searchVectorIndex(projectId: string, query: string, topK = 5): Promise<VectorSearchHit[]> {
+  const normalizedQuery = query.trim()
+  if (!normalizedQuery || topK <= 0) return []
+  let prepared = await ensureSearchIndex(projectId)
+  if (!prepared) return []
+
+  let queryVector: number[]
+  try {
+    queryVector = await prepared.backend.embedQuery(normalizedQuery)
+  } catch (error) {
+    if (prepared.backend.kind === 'hash') return []
+    const reason = error instanceof Error ? error.message : String(error)
+    logVectorEvent({
+      stage: 'search',
+      backend: prepared.backend.id,
+      outcome: 'failure',
+      reason
+    })
+    const result = await runBuild(projectId, HASH_BACKEND)
+    if (!result.ok) return []
+    const index = await readVectorIndex(projectId)
+    if (!index || !indexMatchesBackend(index, HASH_BACKEND)) return []
+    prepared = { index, backend: HASH_BACKEND }
+    queryVector = await HASH_BACKEND.embedQuery(normalizedQuery)
+  }
+
+  const hits = prepared.index.chunks
+    .map((chunk) => ({ chunk, score: cosine(queryVector, chunk.vector) }))
+    .filter((item) => Number.isFinite(item.score) && item.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, topK)
-    .filter((x) => x.score > 0)
-  return scored.map((x) => ({
-    docId: x.c.docId,
-    kind: x.c.kind,
-    title: x.c.title,
-    index: x.c.index,
-    text: x.c.text.slice(0, 1000),
-    score: Math.round(x.score * 1000) / 1000
+
+  logVectorEvent({
+    stage: 'search',
+    backend: prepared.backend.id,
+    outcome: 'success',
+    chunkCount: prepared.index.chunks.length
+  })
+  return hits.map(({ chunk, score }) => ({
+    docId: chunk.docId,
+    kind: chunk.kind,
+    title: chunk.title,
+    index: chunk.index,
+    text: chunk.text.slice(0, 1000),
+    score: Math.round(score * 1000) / 1000
   }))
 }

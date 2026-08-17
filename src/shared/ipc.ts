@@ -234,7 +234,10 @@ export interface IpcApi {
   [IPC.summaryRegenerateRollup]: { req: { projectId: string; rollupId: string }; res: { ok: boolean; error?: string } }
   [IPC.summaryGetRollup]: { req: { projectId: string; rollupId: string }; res: DocRollup | null }
   [IPC.summaryScanConsistency]: { req: string; res: ConsistencyIssue[] }
-  [IPC.vectorBuild]: { req: string; res: { ok: boolean; error?: string; chunkCount?: number } }
+  [IPC.vectorBuild]: {
+    req: string
+    res: { ok: boolean; error?: string; chunkCount?: number; embedModel?: string }
+  }
   [IPC.vectorSearch]: { req: { projectId: string; query: string }; res: VectorSearchHit[] }
   [IPC.usageGet]: { req: void; res: UsageSnapshot }
   [IPC.gitEnsure]: { req: { consent: boolean }; res: { ok: boolean; reason?: string; path?: string } }

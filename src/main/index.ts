@@ -8,6 +8,7 @@ import { commitAllProjects } from './services/git.service'
 import { waitForSummaryQueue } from './services/summary.service'
 import { clearRecovery } from './services/recovery.service'
 import { initErrorLog, logError } from './services/log.service'
+import { disposeNeuralEmbedder } from './services/neural-embed.service'
 
 const ALLOWED_EXT = ['.txt', '.md', '.csv']
 
@@ -88,6 +89,7 @@ if (!gotLock) {
       } catch {
         // 关闭阶段错误不阻塞退出
       } finally {
+        await disposeNeuralEmbedder()
         await clearRecovery()
         app.exit(0)
       }

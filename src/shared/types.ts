@@ -275,7 +275,7 @@ export interface DocRollupOverview {
   batchSize: number
 }
 
-/** 向量索引分块（嵌原文，本地特征哈希） */
+/** 向量索引分块（嵌原文；BGE 512 维或特征哈希 256 维，由 embedModel 区分） */
 export interface VectorChunk {
   docId: string
   kind: 'doc' | 'res'

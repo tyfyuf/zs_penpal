@@ -11,11 +11,12 @@ dist/
 .electron-cache/
 .electron-builder-cache/
 
-# �Ա��о��ο��ֿ⣨����⣩
+# 对标研究参考仓库（体积大，不入库）
 research/
 
-# ����Ƕ��ģ�ͣ������ʲ�������⣬�氲װ�� extraResources �ַ���
+# 原始嵌入模型与 ONNX 产物（大体积资产，不入库；安装包通过 extraResources 分发）
 BAAI--bge-small-zh-v1.5/
-
-# ONNX ģ���������ת���ű����ɣ�����⣬�氲װ���ַ���
 models/
+
+# 用户提供的问题复现材料，仅限本地分析，禁止入库
+失败文档/

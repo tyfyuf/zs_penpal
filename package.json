@@ -12,8 +12,9 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "dist": "electron-vite build && electron-builder --win",
-    "dist:dir": "electron-vite build && electron-builder --win --dir"
+    "dist": "npm run verify:embedding-model && electron-vite build && electron-builder --win",
+    "dist:dir": "npm run verify:embedding-model && electron-vite build && electron-builder --win --dir",
+    "verify:embedding-model": "node scripts/verify-embedding-model.mjs"
   },
   "devDependencies": {
     "@codemirror/commands": "^6.6.0",

@@ -18,6 +18,10 @@ function summaryAttemptsPath(): string {
   return join(logsDir(), `summary-attempts-${format(new Date(), 'yyyy-MM-dd')}.jsonl`)
 }
 
+function vectorEventsPath(): string {
+  return join(logsDir(), `vector-events-${format(new Date(), 'yyyy-MM-dd')}.jsonl`)
+}
+
 let queue: Promise<void> = Promise.resolve()
 
 export function logError(source: string, message: string, stack?: string): void {
@@ -50,6 +54,30 @@ export function logStructuredGenerationAttempt(event: {
       await appendFile(summaryAttemptsPath(), `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`, 'utf8')
     } catch {
       // 日志不能影响摘要主流程
+    }
+  })
+}
+
+/** 向量嵌入审计：不记录项目 ID、查询文本、文档原文或向量，只记录后端状态和性能元数据。 */
+export function logVectorEvent(event: {
+  stage: 'load' | 'build' | 'search' | 'fallback' | 'dispose'
+  backend: string
+  outcome: 'success' | 'failure'
+  durationMs?: number
+  chunkCount?: number
+  reason?: string
+}): void {
+  queue = queue.then(async () => {
+    try {
+      await mkdir(logsDir(), { recursive: true })
+      const safeReason = event.reason?.replace(/\s+/g, ' ').slice(0, 500)
+      await appendFile(
+        vectorEventsPath(),
+        `${JSON.stringify({ at: new Date().toISOString(), ...event, reason: safeReason })}\n`,
+        'utf8'
+      )
+    } catch {
+      // 日志不能影响向量检索主流程
     }
   })
 }

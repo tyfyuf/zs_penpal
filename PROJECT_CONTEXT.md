@@ -36,7 +36,7 @@
 | 图表 | Recharts | 2.15.4 |
 | 图标 | lucide-react | 0.454.0 |
 | 日期 | date-fns | 4.4.0 |
-| 本地嵌入（**未接线**，见 §6.1） | @huggingface/transformers（Transformers.js） | 已安装；ONNX 已转换并通过 Node 烟测，Electron 接线/打包待办 |
+| 本地嵌入 | Transformers.js + ONNX Runtime Node + BGE-small-zh-v1.5 | @huggingface/transformers 4.2.0 / onnxruntime-node 1.24.3；Windows x64 CPU，512 维 |
 
 **注意**：本项目运行时**不涉及 Python**；`scripts/convert_bge_onnx.py` 是**一次性转换脚本**（需 Python + optimum），只在本机执行一次产出 ONNX，运行时仍为 TS/Node。
 
@@ -62,7 +62,9 @@
 | `<userData>/api-key.enc` | API Key，Electron safeStorage（Windows DPAPI）加密 |
 | `<userData>/usage/<YYYY-MM>.json`、`lifetime.json` | Token 用量 |
 | `<userData>/recovery.json`、`summary-retry.json` | 恢复标记/摘要重试 |
-| `<userData>/logs/errors-<YYYY-MM-DD>.log` | 错误日志（保留 7 天；主进程/IPC 与自动文档摘要会写入；手动文档、资源蒸馏、聊天摘要路径仍有缺口，见 §6.2） |
+| `<userData>/logs/errors-<YYYY-MM-DD>.log` | 通用错误日志（保留 7 天） |
+| `<userData>/logs/summary-attempts-<YYYY-MM-DD>.jsonl` | 摘要/蒸馏结构化生成逐次审计 |
+| `<userData>/logs/vector-events-<YYYY-MM-DD>.jsonl` | 本地嵌入 load/build/search/fallback/dispose 元数据日志；不记录项目 ID、查询、原文或向量 |
 
 “连接字符串格式”等价物：OpenAI 兼容 `{ baseURL, apiKey, model, contextLimit }`，其中 `apiKey` 只存于 `<userData>/api-key.enc`（DPAPI 密文），占位符示例：`sk-****`。
 
@@ -79,7 +81,8 @@ D:\ds h-project\
 │  │  │  ├─ file.service.ts        # 文件仓库（含摘要/大摘要/向量索引读写与旧格式迁移）
 │  │  │  ├─ api.service.ts         # 对话组装/注入管线/记忆规划(B+C)/预算裁剪/流式
 │  │  │  ├─ summary.service.ts     # 摘要/蒸馏/分类/大摘要 rollup/一致性扫描
-│  │  │  ├─ vector.service.ts      # 本地向量检索（特征哈希嵌入+余弦）
+│  │  │  ├─ vector.service.ts      # 本地向量索引/检索（BGE 优先，特征哈希兜底）
+│  │  │  ├─ neural-embed.service.ts # 本地 BGE 加载、tokenizer、批量推理与故障冷却
 │  │  │  └─ …(tokenizer/usage/git/export/recovery/migration/config/log/crypto)
 │  │  ├─ summary-source.ts         # 源指纹/三级新鲜度工具（src/main 根）
 │  │  ├─ summary-relevance.ts      # 注入候选/相关度采样/激活键计算（主渲染共用）
@@ -223,7 +226,7 @@ export interface ChatMeta {
   - [x] P2′ 聊天小摘要增量：尾部窗口 20 条逐条 + 历史区间压缩（触发：消息数 >40 或对话 token 估算 >60% 预算），每 10 条一个压缩区间，增量维护
   - [x] P7 B 记忆菜单：回答前一次小决策调用，模型可自动请求展开大摘要（`needs`）或发起向量检索（`vectorQuery`），失败兜底直接作答
   - [x] P7 透明“本次记忆”卡：每次回答展示注入的小摘要 + 补充的大摘要 + 向量命中 + 模型自述缺口（`streamDone.memory`）
-  - [x] P6 本地向量检索：char 1–3-gram 特征哈希嵌入（256 维）→ 原文分块（800 字/重叠 100）→ 余弦 top-5，索引存 `summaries/vector-index/`，无索引自动构建（`vector:build`/`vector:search`）
+  - [x] P6 本地向量检索：BGE-small-zh-v1.5 FP32 ONNX（CLS + L2，512 维）优先，精确 tokenizer 分块（480 token/重叠 48）；模型故障时整库回退 char 1–3-gram 特征哈希（256 维），索引 schema v2 自动处理后端/维度迁移
   - [x] P4 一致性扫描：R1 别名冲突（error）+ R4 摘要漂移（advisory），摘要区“一致性提示”分组展示（`summary:scanConsistency`）
   - [x] 侧边栏瘦身：归档/回收站/项目回收站迁到设置页“归档与回收站”按项目管理
   - [x] 附件去重：写作文档“附加到对话”（读当前内容）+ 与全文注入去重（`ChatAttachment.docId` / `StreamRequest.docIds`，“关联文档全文已打开，无需上传”提示）
@@ -246,31 +249,26 @@ export interface ChatMeta {
 
 ## 6. 待办事项与已知问题
 
-### 6.1 本地嵌入模型（最优先待办）⚠️
+### 6.1 本地嵌入模型（已接线，待真实语料验收）
 
-现状：向量检索目前用**特征哈希嵌入**（`vector.service.ts`，零依赖但只有字面/实体重叠，语义召回弱）。用户已提供 `BAAI--bge-small-zh-v1.5`（PyTorch 权重，位于仓库根 `BAAI--bge-small-zh-v1.5/`，**已 gitignore**）。
+2026-08-17 已完成 Windows x64 CPU 版内置语义嵌入接线：
 
-**已核实状态**：
-- `@huggingface/transformers@4.2.0` 已安装；运行时只使用 ONNX，不读取 PyTorch 权重。
-- `models/bge-small-zh-onnx/model.onnx` 已存在（约 94.8 MB），tokenizer/config 齐全；`hidden_size=512`、`max_position_embeddings=512`、CLS pooling 配置已确认。
-- 2026-08-17 已完成 Node 烟测：绝对模型目录 + `{ dtype:'fp32', subfolder:'' }` + `{ pooling:'cls', normalize:true }` 输出 `[1,512]` 且 L2≈1。
-- 原交接中的相对路径 `models/bge-small-zh-onnx` 不可直接使用；当前目录布局还必须显式 `subfolder:''`，否则 Transformers.js 会寻找 `onnx/model.onnx`。
-- feature-extraction pipeline 会 `truncation:true`；800 字块通常不崩，但会静默截断，神经路径应改为 token-aware chunking（或先降到约 350–450 中文字符）。
-- `electron.vite.config.ts` 尚未外部化依赖，`electron-builder.yml` 尚未配置 `extraResources`；Electron dev/安装包仍需实机验证。
-- Transformers.js 的 Node 导出默认使用 `onnxruntime-node`；“强制 onnxruntime-web/WASM”不是已核实必选项。优先验证 node 运行时外部化/打包，失败后再评估 WASM。
+- `neural-embed.service.ts` 在 Electron 主进程动态加载 `@huggingface/transformers`，仅允许本地模型；开发环境读取 `<repo>/models/bge-small-zh-onnx/`，安装包读取 `process.resourcesPath/models/bge-small-zh-onnx/`。
+- 模型为 `bge-small-zh-v1.5` FP32 ONNX，CLS pooling + L2 normalize，512 维；查询加官方中文检索指令，文档块不加指令；batch size 4。
+- 神经路径使用模型 tokenizer 分块：内容上限 480 token、重叠 48 token，优先句末/换行边界并保留原文子串；特征哈希路径继续使用 800 字/重叠 100 字。
+- 向量索引升级为 schema v2；记录 `embedModel`，后端/schema/维度不一致时全量重建。同一索引绝不混用 512 维神经向量与 256 维哈希向量。
+- 模型缺失、加载失败、推理失败或输出形状异常时，废弃神经构建中间结果并从头使用 `fnv-ngram-256`；对话与记忆规划不得因此崩溃。失败后 30 秒冷却，应用退出时主动释放 pipeline。
+- `electron-vite` 已外部化 Transformers.js 与 ONNX Runtime；builder 通过 `extraResources` 分发六个模型文件，原生 `.node`/DLL 解包，裁掉非 Windows x64、DirectML 和 ORT Web WASM 等无关资产。模型权重仍不进入 Git/asar。
+- 打包前运行 `npm run verify:embedding-model`，校验必要文件、配置值及 model/tokenizer SHA-256；第三方许可说明见 `THIRD_PARTY_NOTICES.md`。
+- 本地验证通过：Node 推理、Electron 33.4.11 原生推理、裁剪后 `app.asar` + `resources` 推理、schema v1→v2 重建、并发 SingleFlight、模型缺失哈希回退、恢复模型后重建、空项目稳定索引、实际语义查询。`dist/win-unpacked` 约 427.7 MiB；正式 `npm run dist` 已成功生成 NSIS 安装器（约 135.0 MiB）。
 
-**待办链**：
-1. 写 `neural-embed` 模块：动态 import、绝对模型路径、CLS + normalize、所有失败回退特征哈希。
-2. 神经路径 token-aware 分块；切换 `embedModel` 时重建旧索引。
-3. electron-vite 外部化 + builder `extraResources`（模型不进 asar、不进 Git）。
-4. Electron dev、安装包、离线、模型缺失四组实机验证。
+尚未完成且不阻塞本轮接线的事项：真实用户语料召回质量验收；文档/资源修改后的索引 freshness 自动更新；完整 NSIS 安装/卸载与低配机器内存耗时验收；非 Windows x64 平台适配。详见 `docs/neural-embedding-implementation-2026-08-17.md`。
 
-### 6.2 摘要/蒸馏仍存在失败问题（根因已于 2026-08-17 定位，待用户确认实施）
+### 6.2 摘要/蒸馏兼容性 P0（已实施并完成当前回归）
 
-- 高置信主触发因素：DeepSeek V4 默认开启思考模式，而现有摘要固定 `max_tokens=4096/8192`；该预算同时包含思考链与最终 JSON。代码未关闭 thinking、未记录 reasoning token，容易得到 `finish_reason=length`、半截 JSON 或空可见内容；历史请求缺少逐次日志，需在修复后用 A/B 回归量化确认。
-- 共同原因：普通文档数组无数量上限；长文档上限仍过大；失败后以完全相同参数重试；schema/语义校验过弱。
-- 本次两份样本不超过用户配置的 100 万 token 上下文，输入超窗不是本次主因。
-- 手动文档/资源失败未完整落日志；聊天手动重生成会吞异常并可能假成功。
+- 2026-08-17 已提交 `1b235ef fix: harden summary structured generation`：统一 structured-task 执行器、端点/模型能力自适应、结构化输出降级、reasoning 控制、严格校验、自适应重试和逐次日志。
+- 用户已确认摘要/蒸馏系统当前运转正常；此前“硝烟粉笔灰”稳定失败与“龙常剧情书”概率失败样本用于根因验证，失败文档目录已 gitignore，禁止入库。
+- 仍可继续增强但不属于当前故障修复：超长文档分级提取、能力覆盖 UI/状态历史、更多供应商真实端点回归矩阵。
 - 完整证据与方案：`docs/summary-distillation-failure-root-cause-and-solution-2026-08-17.md`。
 
 ### 6.3 其他待办（原有）
@@ -283,7 +281,7 @@ export interface ChatMeta {
 
 ### 6.4 已知边界 / 未修复项（出现路径）
 
-- **向量索引无自动重建**：`searchVectorIndex` 只在无索引时构建，不跟踪文档变更（文档改了索引不刷新；属兜底层，可接受，未来可加“doc 保存后重建对应块”）。
+- **向量索引 freshness 未跟踪源变更**：索引会在缺失、schema、嵌入模型或维度不一致时自动重建，但文档/资源正文修改后不会自动失效；未来可记录源指纹并增量或全量重建。
 - **记忆规划每次消息多一次小 LLM 调用**（`max_tokens 400`，temperature 0），成本/延迟增加（用户接受）。
 - **中文模型 token 估算为近似**：DeepSeek/GLM/Qwen 按 ~1.1 token/字（`estimateInputTokens`），可能边界误判（可调大上下文上限）。
 - **旧版本摘要格式**：三字段版/单标签版读取时按无效丢弃并重新生成；v1 带全文快照版读取时自动迁移为指纹（`file.service.ts readDocSummary`）。
@@ -292,7 +290,6 @@ export interface ChatMeta {
 - **dev 模式关命令行窗口会强杀进程**：自动提交可能丢失；请用窗口 × 正常关闭或“立即提交”按钮。
 - **Windows 上 rename 覆盖已存在目录会 EPERM**：迁移已修复（先移除空目标+重试）；其他同类操作需沿用 `renameDirAtomically` 模式。
 - **日志中曾出现 `[git:commit] Author identity unknown`**（运行中构建观察，未深查）：`ensureCommitIdentity` 已存在，若复现先确认用户机器跑的是新构建（`out/` 需重新 build）。
-- **`@huggingface/transformers` 已装但未接线**：当前不影响构建（未被 import）；接线前勿静态 import（会触发打包原生模块问题）。
 
 ---
 
@@ -368,7 +365,7 @@ export interface ChatMeta {
 - 所有文件写入用 `atomicWrite`；所有异步 LLM 调用设超时（180s）且 `maxRetries: 0`。
 - 渲染层不直接接触 Node/网络：一律走 `window.api`（preload 白名单）。
 - **潜规则**：
-  - 禁止任何第三方分析/统计 SDK；**安装包只允许包含 `out/**` 与 `package.json`**（打包后必须 `asar list` 核验无用户数据——隐私红线）。接线本地模型时，模型文件走 electron-builder `extraResources`，**不进 asar、不入 git**。
+  - 禁止任何第三方分析/统计 SDK；安装包应用代码白名单为 `out/**`、`package.json`、第三方许可说明及生产依赖，模型只走 `extraResources`；打包后必须核验无用户数据。模型/缓存/复现文档**不进 asar、不入 Git**。
   - AI 侧不提供任何“写回编辑器/一键应用”的 IPC（PRD 0.2 边界）。
   - API Key 明文不出主进程；渲染层只问 `hasApiKey`。
   - 提示词/摘要输出语言跟随 `config.language`；界面文案一律走 `src/renderer/src/i18n`（禁止硬编码中文）。
@@ -382,9 +379,9 @@ export interface ChatMeta {
 
 | 债务 | 现状 | 计划 |
 | --- | --- | --- |
-| 本地嵌入未接线 | 特征哈希仍在用；ONNX 已转换且 Node 烟测通过；Electron 未接线 | 绝对路径 + `subfolder:''` 接线 neural embed、失败回退、token-aware 分块、外部化与安装包实测（§6.1） |
-| 摘要/蒸馏仍有失败 | 通用根因已定位：缺少端点/模型能力协商，固定 completion、输出协议膨胀、重试/校验/日志不完整；V4 默认 thinking 是当前样本触发因素 | 先讨论并确认 P0：统一 structured-task 执行器、capability profile/provider adapter、结构化能力降级、reasoning 最小化、严格 schema、自适应重试、逐次日志；再做长文档分级提取 |
-| 向量索引无自动重建 | 只在无索引时构建 | 文档保存后重建对应块（低优先） |
+| 本地嵌入真实语料验收 | BGE/回退/打包链路已接通并通过隔离烟测 | 用实际小说项目比较语义命中；据结果决定是否调分块、查询指令、阈值或模型 |
+| 摘要/蒸馏 P0 后续 | 兼容层已实施，当前用户回归正常 | 需要时继续做超长文档分级提取、能力覆盖 UI 和更多供应商回归 |
+| 向量索引 freshness | 后端/schema/维度变化会重建；正文修改尚不触发失效 | 增加源指纹与保存后增量/防抖重建 |
 | 无应用图标 / 无签名 | 默认图标；`signAndEditExecutable=false` | 图标与证书就绪后补齐 |
 | 主进程错误文案中文 | 界面 i18n 完成 | 计划在语言设置完善时统一 |
 | 单模型限制 | 摘要复用主模型；留 `summary.modelOverride` | 多模型需求出现时升级 |
@@ -403,10 +400,10 @@ export interface ChatMeta {
 2. **对标研究驱动重构**：精读 OpenFic（会话压缩/区间摘要/惰性失效/分层注入）与 NeuroBook（事件溯源/分层记忆/矛盾规则化）源码，提取为改进方案；研究仓库在 `research/`（**已 gitignore，不入库**）。
 3. **受限网络/沙箱环境作战手册**：npmmirror 镜像、`electron_config_cache` 重定向、`--foreground-scripts`、构建提权跑 esbuild、关闭签名绕 winCodeSign 问题；**模型权重类资产在沙箱内无法获取，需用户机器配合**。
 4. **Electron 踩坑清单**：渲染层 `window.prompt` 不支持；`simple-git customBinary` 开 `unsafe.allowUnsafeCustomBinary`；空仓库 `git log` 需捕获；`fs.rename` 覆盖目录 EPERM；dev 主进程改动必须重启；`safeStorage` 存 Key；**原生/WASM 依赖（onnxruntime）不能直接打包，需外部化或走 WASM**。
-5. **隐私打包红线**：`files` 白名单只放 `out/**`+`package.json`，打包后 `asar list` 核验；模型/缓存一律 gitignore + extraResources。
+5. **隐私打包红线**：应用代码使用 builder 白名单，生产依赖由 builder 收集；模型只通过 `extraResources` 分发。打包后核验 asar/resources 无用户数据，模型/缓存/复现文档一律 gitignore。
 6. **LLM 工程技巧**：OpenAI-compatible 不是统一能力契约；结构化任务应通过 capability profile + provider adapter 选择 JSON Schema/JSON mode/prompt-only 与 reasoning 策略。继续保留预算分档、三段采样分类、全局串行队列、中文模型 token 近似估算、决策调用与作答分离。“有界 prompt”只能作为中长文档的临时减压手段；超长文档仍需 token-aware 分级提取，截断 JSON 不应靠补括号冒充完整结果。
 7. **状态机落库**：UI 锁定规则（冻结/锁定/pending、只能扩大）必须持久化到 meta 并主/渲染双端共用同一判定（`summary-relevance.ts`），否则重开失效或两端不一致。
-8. **错误可观测性**：目标是所有 IPC 异常与摘要/蒸馏尝试都写结构化日志；当前自动文档摘要已接入，手动文档、资源、聊天等路径仍需补齐逐次 finish/reasoning/validation 信息。
+8. **错误可观测性**：IPC/通用异常、摘要结构化生成逐次尝试、向量 load/build/search/fallback/dispose 分开落日志；审计日志禁止记录用户原文、查询和向量。
 9. **透明可信**：LLM 读取记忆的行为（注入/大摘要/向量命中/自述缺口）以“本次记忆”卡全量展示，作者对“AI 记错来源”零容忍，透明是信任根基。
 10. **增量优先**：聊天摘要只重算尾部、压缩区间只追加；大摘要只重生成变更块；全部基于源指纹判定，避免全量重算的线性成本。
 
@@ -415,6 +412,7 @@ export interface ChatMeta {
 ## 11. 近期提交记录（本会话）
 
 ```
+1b235ef fix: harden summary structured generation
 eecf1d6 保留新窗口现状报告: 摘要/蒸馏生成机制梳理
 a4423a6 重写交接文档: 三层记忆架构新变化+摘要遗留问题+模型待接线+交接要点
 9d501e3 加 bge 转 onnx 脚本
@@ -432,8 +430,8 @@ c170da5 P1 注入搜索框 + 默认激活集冻结修复
 6a4de51 P0+P3+P1核心: 源指纹/新鲜度、生成协议、相关度采样
 ```
 
-> 交接提醒：`research/`（对标仓库）、`BAAI--bge-small-zh-v1.5/`（模型权重）、`models/`（ONNX 输出）、各缓存目录均已 gitignore，**不要**将其加入 Git。
+> 交接提醒：`research/`、`BAAI--bge-small-zh-v1.5/`、`models/`、`失败文档/`、各缓存与构建输出均已 gitignore，**不要**将其加入 Git。
 
 ## 2026-08-17 implementation handoff: summary/distillation P0
 
-The proposed provider-neutral structured generation compatibility layer has now been implemented. See `docs/summary-distillation-failure-root-cause-and-solution-2026-08-17.md` for scope and verification. The remaining follow-ups are hierarchical long-document extraction, capability override UI/status history, and (separately) the bundled neural embedding work. Do not start the embedding/ONNX work until explicitly requested.
+The provider-neutral structured generation compatibility layer is implemented and currently passes user regression. The bundled neural embedding work was subsequently authorized and implemented on 2026-08-17; see §6.1 and `docs/neural-embedding-implementation-2026-08-17.md`.

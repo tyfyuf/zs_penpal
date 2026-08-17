@@ -6,8 +6,50 @@ directories:
 files:
   - out/**/*
   - package.json
+  - THIRD_PARTY_NOTICES.md
+  # Transformers.js 的 Node 导出会依赖 ORT Web 的模块入口，但 CPU 路径不会加载 WASM；剔除发布无关资产。
+  - '!node_modules/@huggingface/transformers/src/**/*'
+  - '!node_modules/@huggingface/transformers/types/**/*'
+  - '!node_modules/@huggingface/transformers/dist/transformers.js'
+  - '!node_modules/@huggingface/transformers/dist/transformers.min.js'
+  - '!node_modules/@huggingface/transformers/dist/transformers.web.js'
+  - '!node_modules/@huggingface/transformers/dist/transformers.web.min.js'
+  - '!node_modules/@huggingface/transformers/dist/ort-wasm-*'
+  - '!node_modules/onnxruntime-web/dist/*.wasm'
+  - '!node_modules/onnxruntime-web/dist/*.map'
+  - '!node_modules/onnxruntime-web/dist/ort.js'
+  - '!node_modules/onnxruntime-web/dist/ort.mjs'
+  - '!node_modules/onnxruntime-web/dist/ort.all.js'
+  - '!node_modules/onnxruntime-web/dist/ort.all.mjs'
+  - '!node_modules/onnxruntime-web/dist/ort.webgl.js'
+  - '!node_modules/onnxruntime-web/dist/ort.webgl.mjs'
+  - '!node_modules/onnxruntime-web/dist/ort.webgpu.js'
+  - '!node_modules/onnxruntime-web/dist/ort.webgpu.mjs'
+  - '!node_modules/onnxruntime-web/dist/ort.jspi.js'
+  - '!node_modules/onnxruntime-web/dist/ort.jspi.mjs'
+  - '!node_modules/onnxruntime-web/dist/ort.wasm.js'
+  - '!node_modules/onnxruntime-web/dist/ort.wasm.mjs'
+  # 首发仅构建 Windows x64 CPU 版本，不携带其他平台、ARM64 或 DirectML/CUDA 运行库。
+  - '!node_modules/onnxruntime-node/bin/napi-v6/darwin/**/*'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/linux/**/*'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**/*'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/DirectML.dll'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxcompiler.dll'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxil.dll'
+extraResources:
+  - from: models/bge-small-zh-onnx
+    to: models/bge-small-zh-onnx
+    filter:
+      - model.onnx
+      - config.json
+      - tokenizer.json
+      - tokenizer_config.json
+      - special_tokens_map.json
+      - vocab.txt
 asarUnpack:
-  - resources/**
+  - node_modules/onnxruntime-node/**/*
+  - node_modules/sharp/**/*
+  - node_modules/@img/**/*
 win:
   target:
     - target: nsis
