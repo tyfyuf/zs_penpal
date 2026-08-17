@@ -1,4 +1,5 @@
-import type { VectorChunk, VectorIndex, VectorSearchHit } from '@shared/types'
+import type { VectorChunk, VectorIndex, VectorIndexFileStatus, VectorIndexStatus, VectorIndexSource, VectorSearchHit } from '@shared/types'
+import { createHash } from 'node:crypto'
 import { buildSnapshot, readDoc, readResource, readVectorIndex, writeVectorIndex } from './file.service'
 import { nowIso } from '../util'
 import {
@@ -233,9 +234,9 @@ async function appendSourceChunks(
   target: VectorChunk[],
   backend: EmbeddingBackend,
   source: { docId: string; kind: 'doc' | 'res'; title: string; content: string }
-): Promise<void> {
+): Promise<number> {
   const texts = backend.chunk(source.content)
-  if (texts.length === 0) return
+  if (texts.length === 0) return 0
   const vectors = await backend.embedDocuments(texts)
   if (vectors.length !== texts.length) throw new Error('嵌入结果数量与文本分块数量不一致')
   for (let i = 0; i < texts.length; i++) {
@@ -252,6 +253,11 @@ async function appendSourceChunks(
       vector
     })
   }
+  return texts.length
+}
+
+function sourceFingerprint(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex')
 }
 
 async function buildWithBackend(projectId: string, backend: EmbeddingBackend): Promise<VectorBuildResult> {
@@ -260,15 +266,17 @@ async function buildWithBackend(projectId: string, backend: EmbeddingBackend): P
   if (!tree) return { ok: false, error: '项目不存在' }
 
   const chunks: VectorChunk[] = []
+  const sources: VectorIndexSource[] = []
   for (const doc of tree.docs) {
     try {
       const { content } = await readDoc(doc.id)
-      await appendSourceChunks(chunks, backend, {
+      const chunkCount = await appendSourceChunks(chunks, backend, {
         docId: doc.id,
         kind: 'doc',
         title: doc.title,
         content
       })
+      sources.push({ id: doc.id, kind: 'doc', title: doc.title, sourceFingerprint: sourceFingerprint(content), chunkCount })
     } catch (error) {
       if (backend.kind === 'neural') throw error
       // 单个源文件读取失败时跳过；不让损坏文件阻止其余索引构建。
@@ -277,12 +285,13 @@ async function buildWithBackend(projectId: string, backend: EmbeddingBackend): P
   for (const resource of tree.resources) {
     try {
       const { content, name } = await readResource(projectId, resource.id)
-      await appendSourceChunks(chunks, backend, {
+      const chunkCount = await appendSourceChunks(chunks, backend, {
         docId: resource.id,
         kind: 'res',
         title: name,
         content
       })
+      sources.push({ id: resource.id, kind: 'res', title: name, sourceFingerprint: sourceFingerprint(content), chunkCount })
     } catch (error) {
       if (backend.kind === 'neural') throw error
       // 同上，特征哈希兜底路径跳过无法读取的单个资源。
@@ -293,7 +302,8 @@ async function buildWithBackend(projectId: string, backend: EmbeddingBackend): P
     schemaVersion: SCHEMA_VERSION,
     embedModel: backend.id,
     chunks,
-    updatedAt: nowIso()
+    updatedAt: nowIso(),
+    sources
   }
   await writeVectorIndex(projectId, index)
   logVectorEvent({
@@ -354,6 +364,66 @@ function runBuild(projectId: string, backend: EmbeddingBackend): Promise<VectorB
 /** 构建项目向量索引；首选神经嵌入，任意模型故障时从头以特征哈希重建。 */
 export async function buildVectorIndex(projectId: string): Promise<VectorBuildResult> {
   return runBuild(projectId, await preferredBackend())
+}
+
+export async function getVectorIndexStatus(projectId: string): Promise<VectorIndexStatus> {
+  const tree = (await buildSnapshot()).projects.find((project) => project.project.id === projectId)
+  if (!tree) {
+    return { projectId, indexExists: false, chunkCount: 0, files: [] }
+  }
+
+  const index = await readVectorIndex(projectId)
+  const chunkCounts = new Map<string, number>()
+  for (const chunk of index?.chunks ?? []) chunkCounts.set(chunk.docId, (chunkCounts.get(chunk.docId) ?? 0) + 1)
+  const sourceMap = new Map((index?.sources ?? []).map((source) => [source.id, source]))
+  const incompatible = Boolean(index && (index.schemaVersion !== SCHEMA_VERSION || !index.embedModel))
+  const files: VectorIndexFileStatus[] = []
+
+  for (const doc of tree.docs) {
+    let status: VectorIndexFileStatus['status'] = 'not-indexed'
+    let chunkCount = chunkCounts.get(doc.id) ?? 0
+    try {
+      const { content } = await readDoc(doc.id)
+      const source = sourceMap.get(doc.id)
+      if (source) {
+        chunkCount = source.chunkCount
+        status = source.title === doc.title && source.sourceFingerprint === sourceFingerprint(content) ? 'indexed' : 'stale'
+      } else if (chunkCount > 0) {
+        status = incompatible ? 'stale' : 'indexed'
+      }
+    } catch {
+      status = chunkCount > 0 ? 'stale' : 'not-indexed'
+    }
+    files.push({ id: doc.id, kind: 'doc', title: doc.title, status: index ? status : 'not-indexed', chunkCount })
+  }
+
+  for (const resource of tree.resources) {
+    let status: VectorIndexFileStatus['status'] = 'not-indexed'
+    let chunkCount = chunkCounts.get(resource.id) ?? 0
+    try {
+      const { content, name } = await readResource(projectId, resource.id)
+      const source = sourceMap.get(resource.id)
+      if (source) {
+        chunkCount = source.chunkCount
+        status = source.title === name && source.sourceFingerprint === sourceFingerprint(content) ? 'indexed' : 'stale'
+      } else if (chunkCount > 0) {
+        status = incompatible ? 'stale' : 'indexed'
+      }
+      files.push({ id: resource.id, kind: 'res', title: name, status: index ? status : 'not-indexed', chunkCount })
+    } catch {
+      files.push({ id: resource.id, kind: 'res', title: resource.name, status: index && chunkCount > 0 ? 'stale' : 'not-indexed', chunkCount })
+    }
+  }
+
+  return {
+    projectId,
+    indexExists: Boolean(index),
+    schemaVersion: index?.schemaVersion,
+    embedModel: index?.embedModel,
+    updatedAt: index?.updatedAt,
+    chunkCount: index?.chunks.length ?? 0,
+    files
+  }
 }
 
 async function backendForIndex(index: VectorIndex): Promise<EmbeddingBackend | null> {

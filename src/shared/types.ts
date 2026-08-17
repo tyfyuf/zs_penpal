@@ -285,11 +285,21 @@ export interface VectorChunk {
   vector: number[]
 }
 
+export interface VectorIndexSource {
+  id: string
+  kind: 'doc' | 'res'
+  title: string
+  sourceFingerprint: string
+  chunkCount: number
+}
+
 export interface VectorIndex {
   schemaVersion: number
   embedModel: string
   chunks: VectorChunk[]
   updatedAt: string
+  /** 当前源文件的指纹与分块统计；旧索引可能没有该字段。 */
+  sources?: VectorIndexSource[]
 }
 
 export interface VectorSearchHit {
@@ -299,6 +309,26 @@ export interface VectorSearchHit {
   index: number
   text: string
   score: number
+}
+
+export type VectorSourceStatus = 'indexed' | 'stale' | 'not-indexed'
+
+export interface VectorIndexFileStatus {
+  id: string
+  kind: 'doc' | 'res'
+  title: string
+  status: VectorSourceStatus
+  chunkCount: number
+}
+
+export interface VectorIndexStatus {
+  projectId: string
+  indexExists: boolean
+  schemaVersion?: number
+  embedModel?: string
+  updatedAt?: string
+  chunkCount: number
+  files: VectorIndexFileStatus[]
 }
 
 /** 一致性提示（纯规则扫描） */
@@ -479,6 +509,18 @@ export interface MemoryContextItem {
   title: string
   /** 为何补充（模型自述缺什么） */
   reason?: string
+  /** 向量命中原文的短预览，仅 vector 项使用。 */
+  preview?: string
+  /** 向量相似度分数，仅 vector 项使用。 */
+  score?: number
+}
+
+export interface VectorMemoryTrace {
+  attempted: boolean
+  outcome: 'skipped' | 'hit' | 'empty' | 'failed'
+  hitCount: number
+  query?: string
+  error?: string
 }
 
 export interface MemoryContext {
@@ -488,6 +530,8 @@ export interface MemoryContext {
   rollups: MemoryContextItem[]
   /** C 层向量命中 */
   vector: MemoryContextItem[]
+  /** C 层是否实际尝试检索及结果。 */
+  vectorTrace?: VectorMemoryTrace
   /** 模型自述缺什么 */
   reason?: string
 }

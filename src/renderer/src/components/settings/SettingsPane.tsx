@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { History, RefreshCw } from 'lucide-react'
-import type { DocRollup, DocRollupOverview, GitCommitInfo, UsageSnapshot } from '@shared/types'
+import type { DocRollup, DocRollupOverview, GitCommitInfo, UsageSnapshot, VectorIndexStatus } from '@shared/types'
 import { useAppStore } from '../../store/app.store'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
@@ -36,6 +36,8 @@ export default function SettingsPane(): JSX.Element {
   const [rollups, setRollups] = useState<Record<string, DocRollupOverview>>({})
   const [rollupPreview, setRollupPreview] = useState<{ title: string; text: string } | null>(null)
   const [rollupBusy, setRollupBusy] = useState(false)
+  const [vectorStatuses, setVectorStatuses] = useState<Record<string, VectorIndexStatus>>({})
+  const [vectorBusy, setVectorBusy] = useState(false)
 
   useEffect(() => {
     void api.invoke('crypto:hasApiKey', undefined).then(setHasKey)
@@ -43,6 +45,11 @@ export default function SettingsPane(): JSX.Element {
     void loadRollups()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    void loadVectorStatuses()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace.projects])
 
   async function loadRollups(): Promise<void> {
     const map: Record<string, DocRollupOverview> = {}
@@ -54,6 +61,30 @@ export default function SettingsPane(): JSX.Element {
       }
     }
     setRollups(map)
+  }
+
+  async function loadVectorStatuses(): Promise<void> {
+    const map: Record<string, VectorIndexStatus> = {}
+    for (const p of workspace.projects) {
+      try {
+        map[p.project.id] = await api.invoke('vector:status', p.project.id)
+      } catch {
+        /* ignore; the next refresh/build can recover */
+      }
+    }
+    setVectorStatuses(map)
+  }
+
+  async function buildVectors(projectId: string): Promise<void> {
+    setVectorBusy(true)
+    try {
+      const res = await api.invoke('vector:build', projectId)
+      if (res.ok) toast.success(t('settings.vectorIndexBuilt', { n: res.chunkCount ?? 0, model: res.embedModel ?? 'unknown' }))
+      else toast.error(res.error ?? t('settings.vectorIndexFailed'))
+      await loadVectorStatuses()
+    } finally {
+      setVectorBusy(false)
+    }
   }
 
   async function generateRollups(projectId: string): Promise<void> {
@@ -405,6 +436,59 @@ export default function SettingsPane(): JSX.Element {
                       ))}
                     </div>
                   )}
+                </div>
+              )
+            })}
+          </div>
+        </Section>
+
+        <Section title={t('settings.vectorIndex')}>
+          <div className="space-y-3">
+            {workspace.projects.length === 0 && (
+              <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.vectorIndexEmpty')}</div>
+            )}
+            {workspace.projects.map((p) => {
+              const status = vectorStatuses[p.project.id]
+              return (
+                <div key={p.project.id} className="rounded border p-2" style={{ borderColor: 'var(--border)' }}>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">{p.project.name}</span>
+                    <span className="text-xs" style={{ color: 'var(--muted)' }}>
+                      {status ? `${t('settings.vectorIndexChunks', { n: status.chunkCount })} · ${status.embedModel ?? t('settings.vectorIndexNotBuilt')}` : t('summary.loading')}
+                    </span>
+                    <span className="flex-1" />
+                    <button className="btn !py-1 text-xs" disabled={vectorBusy} onClick={() => void buildVectors(p.project.id)}>
+                      <RefreshCw size={12} />
+                      {vectorBusy ? t('settings.vectorIndexBuilding') : t('settings.vectorIndexBuild')}
+                    </button>
+                  </div>
+                  {status?.indexExists && status.updatedAt && (
+                    <div className="mt-1 text-[11px]" style={{ color: 'var(--muted)' }}>
+                      {t('settings.vectorIndexUpdated', { date: new Date(status.updatedAt).toLocaleString() })}
+                    </div>
+                  )}
+                  {status && status.files.length > 0 ? (
+                    <div className="mt-2 space-y-1">
+                      {status.files.map((file) => {
+                        const color = file.status === 'indexed' ? 'var(--ok)' : file.status === 'stale' ? 'var(--warn)' : 'var(--muted)'
+                        const label = file.status === 'indexed'
+                          ? t('settings.vectorIndexIndexed')
+                          : file.status === 'stale'
+                            ? t('settings.vectorIndexStale')
+                            : t('settings.vectorIndexNotBuilt')
+                        return (
+                          <div key={`${file.kind}:${file.id}`} className="flex items-center gap-2 text-xs">
+                            <span className="h-1.5 w-1.5 rounded-full" style={{ background: color }} />
+                            <span className="min-w-0 flex-1 truncate">{file.title}</span>
+                            <span style={{ color }}>{label}</span>
+                            <span style={{ color: 'var(--muted)' }}>{t('settings.vectorIndexFileChunks', { n: file.chunkCount })}</span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : status ? (
+                    <div className="mt-2 text-xs" style={{ color: 'var(--muted)' }}>{t('settings.vectorIndexNoFiles')}</div>
+                  ) : null}
                 </div>
               )
             })}

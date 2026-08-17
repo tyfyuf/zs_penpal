@@ -754,17 +754,43 @@ function MemoryCard({ memory }: { memory: MemoryContext }): JSX.Element {
   const small = memory.small ?? []
   const rollups = memory.rollups ?? []
   const vector = memory.vector ?? []
+  const trace = memory.vectorTrace
   const total = small.length + rollups.length + vector.length
-  if (total === 0 && !memory.reason) return <></>
-  const line = (kind: 'small' | 'rollup' | 'vector', key: string, title: string, reason?: string): JSX.Element => (
-    <div key={key} className="flex items-start gap-1">
-      <span style={{ color: kind === 'rollup' ? 'var(--accent)' : kind === 'vector' ? 'var(--warn)' : 'var(--muted)' }}>
-        {kind === 'rollup' ? '◈' : kind === 'vector' ? '▸' : '•'}
-      </span>
-      <span className="min-w-0 flex-1 truncate">{title}</span>
-      {reason && <span className="shrink-0 text-[10px]" style={{ color: 'var(--muted)' }}>· {reason}</span>}
+  if (total === 0 && !memory.reason && !trace) return <></>
+
+  const line = (item: MemoryContext['small'][number], kind: 'small' | 'rollup' | 'vector'): JSX.Element => (
+    <div key={item.key} className="rounded px-1 py-0.5">
+      <div className="flex items-start gap-1">
+        <span style={{ color: kind === 'rollup' ? 'var(--accent)' : kind === 'vector' ? 'var(--warn)' : 'var(--muted)' }}>
+          {kind === 'rollup' ? '◈' : kind === 'vector' ? '▸' : '•'}
+        </span>
+        <span className="min-w-0 flex-1">{item.title}</span>
+        {kind === 'vector' && item.score != null && (
+          <span className="shrink-0 text-[10px]" style={{ color: 'var(--muted)' }}>
+            {t('chat.vectorScore', { n: item.score.toFixed(3) })}
+          </span>
+        )}
+        {item.reason && kind !== 'vector' && <span className="shrink-0 text-[10px]" style={{ color: 'var(--muted)' }}>· {item.reason}</span>}
+      </div>
+      {kind === 'vector' && item.preview && (
+        <div className="ml-4 mt-0.5 max-h-20 overflow-hidden whitespace-pre-wrap text-[11px] leading-relaxed" style={{ color: 'var(--muted)' }}>
+          {item.preview}
+        </div>
+      )}
     </div>
   )
+
+  let vectorStatus = ''
+  if (trace) {
+    vectorStatus = trace.outcome === 'hit'
+      ? t('chat.vectorHit', { n: trace.hitCount })
+      : trace.outcome === 'empty'
+        ? t('chat.vectorNoHit')
+        : trace.outcome === 'failed'
+          ? t('chat.vectorFailed')
+          : t('chat.vectorSkipped')
+  }
+
   return (
     <div className="mt-1.5 rounded-lg border px-2.5 py-1.5 text-xs" style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}>
       <button className="flex w-full items-center gap-1" style={{ color: 'var(--muted)' }} onClick={() => setOpen((o) => !o)}>
@@ -774,10 +800,31 @@ function MemoryCard({ memory }: { memory: MemoryContext }): JSX.Element {
         {memory.reason && <span className="truncate" style={{ color: 'var(--warn)' }}>· {memory.reason}</span>}
       </button>
       {open && (
-        <div className="mt-1 space-y-0.5">
-          {small.map((i) => line('small', i.key, i.title))}
-          {rollups.map((i) => line('rollup', i.key, i.title, i.reason))}
-          {vector.map((i) => line('vector', i.key, i.title, i.reason))}
+        <div className="mt-1 space-y-1">
+          {small.length > 0 && (
+            <div>
+              <div className="mb-0.5 font-medium" style={{ color: 'var(--muted)' }}>{t('chat.memorySummary')}</div>
+              {small.map((i) => line(i, 'small'))}
+            </div>
+          )}
+          {rollups.length > 0 && (
+            <div>
+              <div className="mb-0.5 font-medium" style={{ color: 'var(--accent)' }}>{t('chat.memoryRollups')}</div>
+              {rollups.map((i) => line(i, 'rollup'))}
+            </div>
+          )}
+          {(trace || vector.length > 0) && (
+            <div>
+              <div className="mb-0.5 font-medium" style={{ color: 'var(--warn)' }}>{t('chat.vectorSearch')}</div>
+              {trace && (
+                <div className="mb-0.5 text-[11px]" style={{ color: trace.outcome === 'failed' ? 'var(--danger)' : 'var(--muted)' }}>
+                  {t('chat.vectorSearchStatus', { status: vectorStatus })}
+                  {trace.query && <span> · {t('chat.vectorQuery', { q: trace.query })}</span>}
+                </div>
+              )}
+              {vector.map((i) => line(i, 'vector'))}
+            </div>
+          )}
         </div>
       )}
     </div>

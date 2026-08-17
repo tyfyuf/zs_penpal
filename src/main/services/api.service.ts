@@ -10,6 +10,7 @@ import type {
   DocSummary,
   MemoryContext,
   MemoryContextItem,
+  VectorMemoryTrace,
   ProjectTree,
   StreamContextRange,
   StreamDonePayload,
@@ -551,13 +552,18 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
       const rollups = await readDocRollups(chat.projectId)
       try {
         const plan = await planMemory(client, settings, built.messages, rollups, chat.projectId)
-        if (plan.extraMsgs.length > 0) {
-          finalMessages = [...finalMessages, ...plan.extraMsgs]
-          built.memory.rollups.push(...plan.rollupItems)
-          built.memory.vector.push(...plan.vectorItems)
-          if (plan.reason) built.memory.reason = plan.reason
+        if (plan.extraMsgs.length > 0) finalMessages = [...finalMessages, ...plan.extraMsgs]
+        built.memory.rollups.push(...plan.rollupItems)
+        built.memory.vector.push(...plan.vectorItems)
+        built.memory.vectorTrace = plan.vectorTrace
+        if (plan.reason) built.memory.reason = plan.reason
+      } catch (error) {
+        built.memory.vectorTrace = {
+          attempted: false,
+          outcome: 'failed',
+          hitCount: 0,
+          error: error instanceof Error ? error.message : String(error)
         }
-      } catch {
         /* 规划失败：不补充记忆，直接作答，绝不卡住用户 */
       }
     }
@@ -691,6 +697,7 @@ async function planMemory(
   extraMsgs: ChatCompletionMessageParam[]
   rollupItems: MemoryContextItem[]
   vectorItems: MemoryContextItem[]
+  vectorTrace: VectorMemoryTrace
   reason: string
 }> {
   const en = settings.language === 'en'
@@ -701,8 +708,8 @@ async function planMemory(
         ? 'Available document rollups: (none)'
         : '可用的大摘要：无'
   const instruction = en
-    ? 'If you need more memory to answer the user, output JSON {"needs": ["id"...], "vectorQuery": "..." or null, "reason": "..."} with at most 5 rollup ids and at most one vectorQuery (a short query to search the project\'s original text chunks; null if not needed). Otherwise output {"needs": [], "vectorQuery": null, "reason": ""}.'
-    : '如果你需要更多记忆才能回答用户，输出 JSON {"needs": ["id"...], "vectorQuery": "..." 或 null, "reason": "..."}，needs 最多 5 个 rollup id，vectorQuery 最多一个（用于检索项目原文分块的简短查询，不需要则 null）；否则输出 {"needs": [], "vectorQuery": null, "reason": ""}。'
+    ? 'Decide whether the current summaries are sufficient. If the user asks about a concrete fact, detail, exception, wording, source, setting, or other information that may only exist in the project\'s original documents/resources, you MUST set vectorQuery to a short, precise search query even if a summary contains a broad description. Use null only when original text is not needed. Output JSON {"needs": ["id"...], "vectorQuery": "..." or null, "reason": "..."} with at most 5 rollup ids and one vectorQuery. Otherwise output {"needs": [], "vectorQuery": null, "reason": ""}.'
+    : '先判断现有摘要是否足够。如果用户询问具体事实、细节、例外、原文措辞、出处、设定或其他可能只存在于项目文档/资源原文中的信息，即使摘要有概括，也必须设置 vectorQuery 为简短而具体的检索词；只有不需要原文时才可使用 null。输出 JSON {"needs": ["id"...], "vectorQuery": "..." 或 null, "reason": "..."}，needs 最多 5 个、vectorQuery 最多一个；否则输出 {"needs": [], "vectorQuery": null, "reason": ""}。'
   const decisionMsgs: ChatCompletionMessageParam[] = [...messages, { role: 'system', content: `${catalog}\n\n${instruction}` }]
   const res = await client.chat.completions.create({
     model: settings.model,
@@ -716,6 +723,7 @@ async function planMemory(
   const extraMsgs: ChatCompletionMessageParam[] = []
   const rollupItems: MemoryContextItem[] = []
   const vectorItems: MemoryContextItem[] = []
+  let vectorTrace: VectorMemoryTrace = { attempted: false, outcome: 'skipped', hitCount: 0 }
 
   const byId = new Map(rollups.map((r) => [r.id, r]))
   const label = en ? 'Docs' : '第'
@@ -728,14 +736,33 @@ async function planMemory(
   }
 
   if (d.vectorQuery) {
-    const hits = await searchVectorIndex(projectId, d.vectorQuery, 5)
-    for (const h of hits) {
-      extraMsgs.push({ role: 'system', content: `${en ? '【Vector search hit: ' : '【向量检索命中：'}${h.title} #${h.index}】\n${h.text}` })
-      vectorItems.push({ kind: 'vector', key: `${h.docId}:${h.index}`, title: `${h.title} #${h.index}`, reason: d.reason })
+    vectorTrace = { attempted: true, outcome: 'empty', hitCount: 0, query: d.vectorQuery }
+    try {
+      const hits = await searchVectorIndex(projectId, d.vectorQuery, 5)
+      vectorTrace = { attempted: true, outcome: hits.length > 0 ? 'hit' : 'empty', hitCount: hits.length, query: d.vectorQuery }
+      for (const h of hits) {
+        extraMsgs.push({ role: 'system', content: `${en ? '【Vector search hit: ' : '【向量检索命中：'}${h.title} #${h.index}】\n${h.text}` })
+        vectorItems.push({
+          kind: 'vector',
+          key: `${h.docId}:${h.index}`,
+          title: `${h.title} #${h.index}`,
+          reason: d.reason,
+          preview: h.text,
+          score: h.score
+        })
+      }
+    } catch (error) {
+      vectorTrace = {
+        attempted: true,
+        outcome: 'failed',
+        hitCount: 0,
+        query: d.vectorQuery,
+        error: error instanceof Error ? error.message : String(error)
+      }
     }
   }
 
-  return { extraMsgs, rollupItems, vectorItems, reason: d.reason }
+  return { extraMsgs, rollupItems, vectorItems, vectorTrace, reason: d.reason }
 }
 
 // ---------------------------------------------------------------------------
