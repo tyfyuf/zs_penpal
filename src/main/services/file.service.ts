@@ -282,11 +282,11 @@ export async function purgeDoc(docId: string): Promise<void> {
     if (chat.status === 'user_archived') {
       await purgeChat(chat.id)
     } else {
-      await atomicWriteJson(chatMetaPath(projectId, chat.id), {
-        ...chat,
+      await mutateChatMeta(chat.id, (current) => ({
+        ...current,
         status: 'orphan_archived',
         updatedAt: nowIso()
-      })
+      }))
     }
   }
 }
@@ -318,6 +318,33 @@ async function getChatMeta(chatId: string): Promise<ChatMeta> {
     if (meta) return meta
   }
   throw new Error('chat not found')
+}
+
+/**
+ * Serialize the complete read-modify-write transaction for one chat meta file.
+ * atomicWriteJson serializes writes only; two callers can still read the same
+ * old snapshot and let the later write erase fields added by the earlier one.
+ */
+const chatMetaMutationQueues = new Map<string, Promise<void>>()
+
+async function mutateChatMeta(
+  chatId: string,
+  mutate: (current: ChatMeta) => ChatMeta | Promise<ChatMeta>
+): Promise<ChatMeta> {
+  const previous = chatMetaMutationQueues.get(chatId) ?? Promise.resolve()
+  let result: ChatMeta | undefined
+  const next = previous.catch(() => {}).then(async () => {
+    const current = await getChatMeta(chatId)
+    result = await mutate(current)
+    await atomicWriteJson(chatMetaPath(result.projectId, chatId), result)
+  })
+  chatMetaMutationQueues.set(chatId, next)
+  try {
+    await next
+    return result!
+  } finally {
+    if (chatMetaMutationQueues.get(chatId) === next) chatMetaMutationQueues.delete(chatId)
+  }
 }
 
 export async function createChat(
@@ -353,10 +380,7 @@ export async function updateChatMeta(
   chatId: string,
   patch: Partial<Pick<ChatMeta, 'contextRange' | 'lockedRange' | 'injectionOverrides'>>
 ): Promise<ChatMeta> {
-  const chat = await getChatMeta(chatId)
-  const next = { ...chat, ...patch, updatedAt: nowIso() }
-  await atomicWriteJson(chatMetaPath(chat.projectId, chatId), next)
-  return next
+  return mutateChatMeta(chatId, (chat) => ({ ...chat, ...patch, updatedAt: nowIso() }))
 }
 
 export async function getChat(chatId: string): Promise<{ chat: ChatMeta; messages: ChatMessage[] }> {
@@ -366,10 +390,7 @@ export async function getChat(chatId: string): Promise<{ chat: ChatMeta; message
 }
 
 export async function renameChat(chatId: string, title: string): Promise<ChatMeta> {
-  const chat = await getChatMeta(chatId)
-  const next = { ...chat, title, updatedAt: nowIso() }
-  await atomicWriteJson(chatMetaPath(chat.projectId, chatId), next)
-  return next
+  return mutateChatMeta(chatId, (chat) => ({ ...chat, title, updatedAt: nowIso() }))
 }
 
 /** 更新上下文对话的上下文范围（PRD 6.4 / 6.6） */
@@ -377,16 +398,13 @@ export async function updateChatContext(
   chatId: string,
   contextRange: import('@shared/types').ContextRange
 ): Promise<ChatMeta> {
-  const chat = await getChatMeta(chatId)
-  const next = { ...chat, contextRange, updatedAt: nowIso() }
-  await atomicWriteJson(chatMetaPath(chat.projectId, chatId), next)
-  return next
+  return mutateChatMeta(chatId, (chat) => ({ ...chat, contextRange, updatedAt: nowIso() }))
 }
 
 export async function appendMessage(chatId: string, message: ChatMessage): Promise<void> {
   const chat = await getChatMeta(chatId)
   await appendJsonl(chatJsonlPath(chat.projectId, chatId), message)
-  await atomicWriteJson(chatMetaPath(chat.projectId, chatId), { ...chat, updatedAt: nowIso() })
+  await mutateChatMeta(chatId, (current) => ({ ...current, updatedAt: nowIso() }))
 }
 
 /** 替换最近一条 assistant 回答（重新生成场景，PRD 6.6）；reasoning 为思维链（可空） */
@@ -400,31 +418,29 @@ export async function replaceLastAssistantMessage(chatId: string, content: strin
     }
   }
   await atomicWrite(chatJsonlPath(chat.projectId, chatId), messages.map((m) => JSON.stringify(m)).join('\n') + (messages.length ? '\n' : ''))
-  await atomicWriteJson(chatMetaPath(chat.projectId, chatId), { ...chat, updatedAt: nowIso() })
+  await mutateChatMeta(chatId, (current) => ({ ...current, updatedAt: nowIso() }))
 }
 
 /** 用户归档对话（PRD 4.2.1） */
 export async function deleteChat(chatId: string): Promise<void> {
-  const chat = await getChatMeta(chatId)
-  await atomicWriteJson(chatMetaPath(chat.projectId, chatId), { ...chat, status: 'user_archived', updatedAt: nowIso() })
+  await mutateChatMeta(chatId, (chat) => ({ ...chat, status: 'user_archived', updatedAt: nowIso() }))
 }
 
 /** 从归档区恢复对话（PRD 4.2.3） */
 export async function restoreChat(chatId: string): Promise<ChatMeta> {
-  const chat = await getChatMeta(chatId)
-  // 原关联文档仍存在（未进回收站）则恢复原关联；否则恢复为项目级对话
-  let kind: ChatKind = chat.kind
-  let docId = chat.docId
-  if (chat.kind === 'doc' || chat.kind === 'context') {
-    const docMeta = docId ? await readJson<DocMeta>(docMetaPath(chat.projectId, docId)) : null
-    if (!docMeta || docMeta.status === 'trash') {
-      kind = 'project'
-      docId = undefined
+  return mutateChatMeta(chatId, async (chat) => {
+    // Restore the original relation when its document still exists; otherwise restore as a project chat.
+    let kind: ChatKind = chat.kind
+    let docId = chat.docId
+    if (chat.kind === 'doc' || chat.kind === 'context') {
+      const docMeta = docId ? await readJson<DocMeta>(docMetaPath(chat.projectId, docId)) : null
+      if (!docMeta || docMeta.status === 'trash') {
+        kind = 'project'
+        docId = undefined
+      }
     }
-  }
-  const next = { ...chat, kind, docId, status: 'normal' as const, updatedAt: nowIso() }
-  await atomicWriteJson(chatMetaPath(chat.projectId, chatId), next)
-  return next
+    return { ...chat, kind, docId, status: 'normal' as const, updatedAt: nowIso() }
+  })
 }
 
 export async function purgeChat(chatId: string): Promise<void> {
@@ -486,7 +502,6 @@ export async function uploadResource(
   }
   await atomicWriteJson(resourceMetaPath(projectId, id), meta)
   await atomicWrite(resourceContentPath(projectId, id), content)
-  await invalidateVectorIndex(projectId)
   return meta
 }
 
@@ -514,7 +529,6 @@ export async function uploadResourceBytes(
   await atomicWriteJson(resourceMetaPath(projectId, id), meta)
   await atomicWrite(resourceContentPath(projectId, id), decoded.text)
   await writeFile(resourceSourcePath(projectId, id), Buffer.from(data))
-  await invalidateVectorIndex(projectId)
   return meta
 }
 
@@ -558,7 +572,6 @@ export async function replaceResourceBytes(
   await writeFile(resourceSourcePath(projectId, resourceId), Buffer.from(data))
   await atomicWriteJson(resourceMetaPath(projectId, resourceId), next)
   await rm(resourceSummaryPath(projectId, resourceId), { force: true })
-  await invalidateVectorIndex(projectId)
   return next
 }
 
@@ -735,10 +748,6 @@ export async function readVectorIndex(projectId: string): Promise<VectorIndex | 
 
 export async function writeVectorIndex(projectId: string, index: VectorIndex): Promise<void> {
   await atomicWriteJson(vectorIndexPath(projectId), index)
-}
-
-export async function invalidateVectorIndex(projectId: string): Promise<void> {
-  await rm(vectorIndexPath(projectId), { force: true })
 }
 
 // ---------------------------------------------------------------------------

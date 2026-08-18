@@ -62,9 +62,17 @@ export function logStructuredGenerationAttempt(event: {
 export function logVectorEvent(event: {
   stage: 'load' | 'build' | 'search' | 'fallback' | 'dispose'
   backend: string
-  outcome: 'success' | 'failure'
+  outcome: 'success' | 'failure' | 'empty'
   durationMs?: number
   chunkCount?: number
+  candidateCount?: number
+  hitCount?: number
+  topScore?: number
+  queryLength?: number
+  source?: 'automatic' | 'tool'
+  attempt?: number
+  sourceKinds?: ('doc' | 'res')[]
+  operation?: 'full' | 'incremental' | 'source' | 'remove'
   reason?: string
 }): void {
   queue = queue.then(async () => {
@@ -82,6 +90,35 @@ export function logVectorEvent(event: {
   })
 }
 
+/**
+ * 工具协议审计：只记录协议状态，不记录查询词、工具参数、项目标识或任何原文。
+ */
+export function logToolProtocolEvent(event: {
+  outcome:
+    | 'native'
+    | 'text-recovered'
+    | 'malformed'
+    | 'truncated'
+    | 'compatibility-retry'
+    | 'repair'
+    | 'no-tool-fallback'
+  finishReason?: string | null
+  toolCalls?: number
+  durationMs?: number
+}): void {
+  queue = queue.then(async () => {
+    try {
+      await mkdir(logsDir(), { recursive: true })
+      await appendFile(
+        join(logsDir(), `tool-protocol-${format(new Date(), 'yyyy-MM-dd')}.jsonl`),
+        `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`,
+        'utf8'
+      )
+    } catch {
+      // 日志不能影响工具调用主流程
+    }
+  })
+}
 /** 启动时清理超过保留天数的旧日志文件 */
 export async function initErrorLog(): Promise<void> {
   try {

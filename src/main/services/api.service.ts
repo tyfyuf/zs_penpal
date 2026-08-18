@@ -30,6 +30,7 @@ import {
   buildRollupCatalogBlock,
   ensureDocSummary
 } from './summary.service'
+import { logToolProtocolEvent } from './log.service'
 import { recordUsage } from './usage.service'
 import { executeStructuredTask } from './structured-generation.service'
 import { searchVectorIndex } from './vector.service'
@@ -147,7 +148,7 @@ async function retrieveProjectOriginals(
 }> {
   const normalizedQuery = compactSearchQuery(query)
   try {
-    const hits = await searchVectorIndex(projectId, normalizedQuery, Math.max(1, Math.min(topK, 5)))
+    const hits = await searchVectorIndex(projectId, normalizedQuery, Math.max(1, Math.min(topK, 5)), { source })
     return {
       messages: hits.map((hit) => ({ role: 'system', content: vectorHitBlock(hit, lang, source) })),
       items: hits.map((hit) => ({
@@ -202,7 +203,7 @@ function appendVectorAttempt(memory: MemoryContext, attempt: VectorMemoryAttempt
 }
 
 const MAX_SEARCH_TOOL_CALLS = 2
-const toolSupport = new Map<string, boolean>()
+const MAX_TOOL_REPAIR_ATTEMPTS = 1
 
 interface PendingToolCall {
   id: string
@@ -214,6 +215,14 @@ interface StreamToolDelta {
   index?: number
   id?: string
   function?: { name?: string; arguments?: string }
+}
+
+interface StreamRoundState {
+  content: string
+  reasoning: string
+  pending: Map<number, PendingToolCall>
+  finishReason?: string | null
+  usage?: UsageLike
 }
 
 const PROJECT_SEARCH_TOOL = {
@@ -233,10 +242,6 @@ const PROJECT_SEARCH_TOOL = {
   }
 } as const
 
-function toolSupportKey(settings: ApiSettings): string {
-  return `${settings.baseURL.trim().replace(/\/+$/, '').toLowerCase()}::${settings.model.trim().toLowerCase()}`
-}
-
 function isToolCompatibilityError(error: unknown): boolean {
   const status = (error as { status?: number })?.status
   const text = (error instanceof Error ? error.message : String(error)).toLowerCase()
@@ -252,6 +257,22 @@ function addUsage(total: UsageLike | undefined, next: UsageLike | undefined): Us
     completion_tokens: total.completion_tokens + next.completion_tokens,
     total_tokens: total.total_tokens + next.total_tokens
   }
+}
+
+/** Merge vendor-supplied incremental or cumulative stream fragments. */
+function mergeStreamFragment(previous: string, incoming: string | undefined): string {
+  if (!incoming) return previous
+  if (!previous) return incoming
+  if (incoming === previous || previous.endsWith(incoming)) return previous
+  if (incoming.startsWith(previous)) return incoming
+
+  const maxOverlap = Math.min(previous.length, incoming.length)
+  for (let length = maxOverlap; length > 0; length--) {
+    if (previous.slice(-length) === incoming.slice(0, length)) {
+      return previous + incoming.slice(length)
+    }
+  }
+  return previous + incoming
 }
 
 function parseSearchToolArguments(raw: string): { query: string; topK: number } | null {
@@ -279,6 +300,110 @@ function toolResultContent(result: Awaited<ReturnType<typeof retrieveProjectOrig
   })
 }
 
+function normalizeExplicitToolBody(content: string): string {
+  const trimmed = content.trim()
+  const xmlMatch = /^<tool_call>\s*([\s\S]*?)\s*<\/tool_call>$/i.exec(trimmed)
+  return xmlMatch ? xmlMatch[1].trim() : trimmed
+}
+
+/**
+ * Recover only an explicit, complete pseudo tool call; never infer intent from prose.
+ */
+function parseExplicitTextToolCall(content: string): PendingToolCall | null {
+  const body = normalizeExplicitToolBody(content)
+  const functionMatch = /^search_project_source\s*([\s\S]*)$/i.exec(body)
+  if (functionMatch) {
+    const argumentText = functionMatch[1].trim()
+    if (!argumentText.startsWith('(') || !argumentText.endsWith(')')) return null
+    const rawArguments = argumentText.slice(1, -1).trim()
+    const args = parseSearchToolArguments(rawArguments)
+    if (!args) return null
+    return { id: '', name: 'search_project_source', arguments: JSON.stringify(args) }
+  }
+
+  try {
+    const value = JSON.parse(body) as { name?: unknown; arguments?: unknown }
+    if (value.name !== 'search_project_source') return null
+    const rawArguments = typeof value.arguments === 'string'
+      ? value.arguments
+      : JSON.stringify(value.arguments ?? {})
+    const args = parseSearchToolArguments(rawArguments)
+    if (!args) return null
+    return { id: '', name: 'search_project_source', arguments: JSON.stringify(args) }
+  } catch {
+    return null
+  }
+}
+
+function looksLikeExplicitTextToolCall(content: string): boolean {
+  const body = normalizeExplicitToolBody(content)
+  if (/^search_project_source\s*\(/i.test(body)) return true
+  if (/^\{\s*"name"\s*:\s*"search_project_source"\b/i.test(body)) return true
+  return /^<tool_call>/i.test(content.trim())
+}
+
+function toolCallArguments(call: PendingToolCall): { query: string; topK: number } | null {
+  return call.name === 'search_project_source' ? parseSearchToolArguments(call.arguments) : null
+}
+
+function isToolFinishReason(reason: string | null | undefined): boolean {
+  return reason === 'tool_calls' || reason === 'tool_call' || reason === 'function_call'
+}
+
+function isTruncatedFinishReason(reason: string | null | undefined): boolean {
+  return reason === 'length' || reason === 'max_tokens'
+}
+
+function buildToolRepairInstruction(lang: 'zh' | 'en'): ChatCompletionMessageParam {
+  return {
+    role: 'system',
+    content: lang === 'en'
+      ? 'The previous project-source tool call was incomplete or malformed. If source retrieval is needed, call only search_project_source with valid JSON arguments, for example {"query":"short precise query","topK":5}. Do not output the tool name, JSON, XML, or a pseudo-call as text. If retrieval is not needed, answer the user directly.'
+      : '\u4e0a\u4e00\u8f6e\u7684\u9879\u76ee\u539f\u6587\u68c0\u7d22\u8c03\u7528\u4e0d\u5b8c\u6574\u6216\u683c\u5f0f\u9519\u8bef\u3002\u5982\u679c\u9700\u8981\u68c0\u7d22\uff0c\u8bf7\u53ea\u8c03\u7528 search_project_source\uff0c\u5e76\u63d0\u4f9b\u5408\u6cd5 JSON \u53c2\u6570\uff0c\u4f8b\u5982 {\"query\":\"\u7b80\u77ed\u4e14\u7cbe\u786e\u7684\u68c0\u7d22\u8bcd\",\"topK\":5}\u3002\u4e0d\u8981\u628a\u5de5\u5177\u540d\u3001JSON\u3001XML \u6216\u4f2a\u8c03\u7528\u6587\u672c\u4f5c\u4e3a\u666e\u901a\u6587\u5b57\u8f93\u51fa\u3002\u5982\u679c\u4e0d\u9700\u8981\u68c0\u7d22\uff0c\u8bf7\u76f4\u63a5\u56de\u7b54\u7528\u6237\u3002'
+  }
+}
+
+function buildNoToolFallbackInstruction(lang: 'zh' | 'en'): ChatCompletionMessageParam {
+  return {
+    role: 'system',
+    content: lang === 'en'
+      ? 'Do not call any tool in this final attempt. Answer directly using the summaries and project-source excerpts already supplied in the conversation. If the evidence is insufficient, say so clearly; never claim that you lack permission to access project sources.'
+      : '\u8fd9\u662f\u6700\u540e\u4e00\u6b21\u56de\u7b54\u5c1d\u8bd5\uff0c\u4e0d\u8981\u8c03\u7528\u4efb\u4f55\u5de5\u5177\u3002\u8bf7\u76f4\u63a5\u4f9d\u636e\u5f53\u524d\u5bf9\u8bdd\u4e2d\u5df2\u7ecf\u63d0\u4f9b\u7684\u6458\u8981\u548c\u9879\u76ee\u539f\u6587\u7247\u6bb5\u56de\u7b54\u3002\u5982\u679c\u8bc1\u636e\u4e0d\u8db3\uff0c\u8bf7\u660e\u786e\u8bf4\u660e\uff1b\u4e0d\u8981\u58f0\u79f0\u6ca1\u6709\u8bbf\u95ee\u9879\u76ee\u539f\u6587\u7684\u6743\u9650\u3002'
+  }
+}
+
+function newStreamRound(): StreamRoundState {
+  return { content: '', reasoning: '', pending: new Map() }
+}
+
+function publishAnswerRound(
+  chatId: string,
+  requestId: string,
+  content: string,
+  reasoning: string
+): void {
+  if (content) broadcast(EVENTS.streamChunk, { chatId, requestId, delta: content })
+  if (reasoning) broadcast(EVENTS.streamChunk, { chatId, requestId, delta: '', reasoningDelta: reasoning })
+}
+
+function protocolDuration(startedAt: number): number {
+  return Math.max(0, Date.now() - startedAt)
+}
+
+function toolProtocolLog(
+  outcome: Parameters<typeof logToolProtocolEvent>[0]['outcome'],
+  startedAt: number,
+  state: StreamRoundState,
+  toolCalls?: number
+): void {
+  logToolProtocolEvent({
+    outcome,
+    finishReason: state.finishReason,
+    toolCalls,
+    durationMs: protocolDuration(startedAt)
+  })
+}
+
 async function streamAnswerWithTools(options: {
   client: OpenAI
   settings: ApiSettings
@@ -290,7 +415,6 @@ async function streamAnswerWithTools(options: {
   requestId: string
 }): Promise<{ content: string; reasoning: string; usage?: UsageLike }> {
   const { client, settings, projectId, memory, controller, chatId, requestId } = options
-  const supportKey = toolSupportKey(settings)
   const capabilityInstruction: ChatCompletionMessageParam = {
     role: 'system',
     content: settings.language === 'en'
@@ -302,11 +426,14 @@ async function streamAnswerWithTools(options: {
   let reasoning = ''
   let usage: UsageLike | undefined
   let executedToolCalls = 0
+  let toolsDisabledForRequest = false
+  let repairAttempts = 0
+  let noToolFallbackUsed = false
 
   while (true) {
-    const useTools = toolSupport.get(supportKey) !== false && executedToolCalls < MAX_SEARCH_TOOL_CALLS
-    const pending = new Map<number, PendingToolCall>()
-    let roundContent = ''
+    const useTools = !toolsDisabledForRequest && executedToolCalls < MAX_SEARCH_TOOL_CALLS
+    const roundStartedAt = Date.now()
+    const state = newStreamRound()
 
     try {
       const stream = await client.chat.completions.create(
@@ -314,8 +441,7 @@ async function streamAnswerWithTools(options: {
           model: settings.model,
           messages: conversation,
           stream: true,
-          stream_options: { include_usage: true },
-          ...(useTools ? { tools: [PROJECT_SEARCH_TOOL], tool_choice: 'auto' as const } : {})
+          ...(useTools ? { tools: [PROJECT_SEARCH_TOOL], tool_choice: 'auto' as const } : { stream_options: { include_usage: true } })
         },
         { signal: controller.signal }
       )
@@ -323,82 +449,135 @@ async function streamAnswerWithTools(options: {
       for await (const chunk of stream) {
         const choice = chunk.choices?.[0] as
           | {
+              finish_reason?: string | null
               delta?: {
                 content?: string
                 reasoning_content?: string
                 reasoning?: string
                 tool_calls?: StreamToolDelta[]
+                function_call?: { name?: string; arguments?: string }
               }
             }
           | undefined
-        const deltaText = choice?.delta?.content
-        if (deltaText) {
-          roundContent += deltaText
-          content += deltaText
-          broadcast(EVENTS.streamChunk, { chatId, requestId, delta: deltaText })
-        }
-        const reasoningDelta = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning
-        if (reasoningDelta) {
-          reasoning += reasoningDelta
-          broadcast(EVENTS.streamChunk, { chatId, requestId, delta: '', reasoningDelta })
+        if (choice?.finish_reason) state.finishReason = choice.finish_reason
+        state.content = mergeStreamFragment(state.content, choice?.delta?.content)
+        state.reasoning = mergeStreamFragment(state.reasoning, choice?.delta?.reasoning_content ?? choice?.delta?.reasoning)
+        const legacyFunctionCall = choice?.delta?.function_call
+        if (legacyFunctionCall) {
+          const current = state.pending.get(0) ?? { id: '', name: '', arguments: '' }
+          if (legacyFunctionCall.name) current.name = mergeStreamFragment(current.name, legacyFunctionCall.name)
+          if (legacyFunctionCall.arguments) current.arguments = mergeStreamFragment(current.arguments, legacyFunctionCall.arguments)
+          state.pending.set(0, current)
         }
         for (const delta of choice?.delta?.tool_calls ?? []) {
           const index = delta.index ?? 0
-          const current = pending.get(index) ?? { id: '', name: '', arguments: '' }
-          if (delta.id) current.id = delta.id
-          if (delta.function?.name) {
-            current.name = current.name
-              ? (current.name.endsWith(delta.function.name) ? current.name : current.name + delta.function.name)
-              : delta.function.name
-          }
-          if (delta.function?.arguments) current.arguments += delta.function.arguments
-          pending.set(index, current)
+          const current = state.pending.get(index) ?? { id: '', name: '', arguments: '' }
+          if (delta.id) current.id = mergeStreamFragment(current.id, delta.id)
+          if (delta.function?.name) current.name = mergeStreamFragment(current.name, delta.function.name)
+          if (delta.function?.arguments) current.arguments = mergeStreamFragment(current.arguments, delta.function.arguments)
+          state.pending.set(index, current)
         }
         usage = addUsage(usage, chunk.usage as UsageLike | undefined)
       }
-      if (useTools) toolSupport.set(supportKey, true)
     } catch (error) {
       if (useTools && isToolCompatibilityError(error)) {
-        toolSupport.set(supportKey, false)
-        continue
+        toolsDisabledForRequest = true
+        toolProtocolLog('compatibility-retry', roundStartedAt, state)
+        if (!noToolFallbackUsed) {
+          conversation.push(buildNoToolFallbackInstruction(settings.language))
+          noToolFallbackUsed = true
+          logToolProtocolEvent({ outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
+          continue
+        }
       }
       throw error
     }
 
     if (controller.signal.aborted) return { content, reasoning, usage }
-    const calls = [...pending.values()].filter((call) => call.name || call.arguments)
-    if (calls.length === 0 || !useTools) return { content, reasoning, usage }
 
-    const remainingToolCalls = MAX_SEARCH_TOOL_CALLS - executedToolCalls
-    const assistantToolCalls = calls.slice(0, remainingToolCalls).map((call, index) => ({
-      id: call.id || `search_project_source_${executedToolCalls}_${index}`,
-      type: 'function' as const,
-      function: { name: call.name || 'search_project_source', arguments: call.arguments }
-    }))
-    conversation.push({
-      role: 'assistant',
-      content: roundContent || null,
-      tool_calls: assistantToolCalls
-    } as ChatCompletionMessageParam)
+    const nativeCalls = [...state.pending.values()].filter((call) => call.name || call.arguments)
+    const explicitCall = parseExplicitTextToolCall(state.content)
+    const hasExplicitSignal = looksLikeExplicitTextToolCall(state.content)
+    const validNativeCall = nativeCalls.find((call) => !!toolCallArguments(call))
+    const validCall = validNativeCall ?? explicitCall
+    const hasToolSignal = nativeCalls.length > 0 || hasExplicitSignal || isToolFinishReason(state.finishReason)
 
-    for (const call of assistantToolCalls) {
-      let resultContent: string
-      if (call.function.name !== 'search_project_source') {
-        resultContent = JSON.stringify({ outcome: 'failed', error: 'Unknown tool.' })
+    if (validCall && useTools) {
+      if (explicitCall && !validNativeCall) {
+        toolProtocolLog('text-recovered', roundStartedAt, state, 1)
       } else {
-        const args = parseSearchToolArguments(call.function.arguments)
-        if (!args) {
-          resultContent = JSON.stringify({ outcome: 'failed', error: 'Invalid tool arguments.' })
-        } else {
-          const result = await retrieveProjectOriginals(projectId, args.query, settings.language, 'tool', '', args.topK)
-          appendVectorAttempt(memory, result.attempt, result.items)
-          resultContent = toolResultContent(result)
-        }
+        toolProtocolLog('native', roundStartedAt, state, nativeCalls.length || 1)
       }
-      conversation.push({ role: 'tool', tool_call_id: call.id, content: resultContent } as ChatCompletionMessageParam)
+      const assistantToolCall = {
+        id: validCall.id || `search_project_source_${executedToolCalls}`,
+        type: 'function' as const,
+        function: { name: validCall.name, arguments: validCall.arguments }
+      }
+      conversation.push({
+        role: 'assistant',
+        content: null,
+        tool_calls: [assistantToolCall]
+      } as ChatCompletionMessageParam)
+
+      const args = toolCallArguments(validCall)
+      const resultContent = args
+        ? (() => {
+            return retrieveProjectOriginals(projectId, args.query, settings.language, 'tool', '', args.topK)
+          })()
+        : null
+      if (!resultContent) {
+        conversation.push({
+          role: 'tool',
+          tool_call_id: assistantToolCall.id,
+          content: JSON.stringify({ outcome: 'failed', error: 'Invalid tool arguments.' })
+        } as ChatCompletionMessageParam)
+      } else {
+        const result = await resultContent
+        appendVectorAttempt(memory, result.attempt, result.items)
+        conversation.push({
+          role: 'tool',
+          tool_call_id: assistantToolCall.id,
+          content: toolResultContent(result)
+        } as ChatCompletionMessageParam)
+      }
       executedToolCalls++
-      if (executedToolCalls >= MAX_SEARCH_TOOL_CALLS) break
+      continue
     }
+
+    if (hasToolSignal && (!validCall || !useTools)) {
+      const outcome = isTruncatedFinishReason(state.finishReason) ? 'truncated' : 'malformed'
+      toolProtocolLog(outcome, roundStartedAt, state, nativeCalls.length)
+      if (repairAttempts < MAX_TOOL_REPAIR_ATTEMPTS && useTools) {
+        repairAttempts++
+        conversation.push(buildToolRepairInstruction(settings.language))
+        logToolProtocolEvent({ outcome: 'repair', durationMs: protocolDuration(roundStartedAt) })
+        continue
+      }
+      if (!noToolFallbackUsed) {
+        toolsDisabledForRequest = true
+        noToolFallbackUsed = true
+        conversation.push(buildNoToolFallbackInstruction(settings.language))
+        logToolProtocolEvent({ outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
+        continue
+      }
+      throw new Error('\u6a21\u578b\u8fd4\u56de\u4e86\u65e0\u6cd5\u89e3\u6790\u7684\u5de5\u5177\u8c03\u7528\uff0c\u4e14\u4e00\u6b21\u683c\u5f0f\u4fee\u590d\u672a\u6210\u529f')
+    }
+
+    if (!state.content.trim() && !state.reasoning.trim()) {
+      if (!noToolFallbackUsed) {
+        toolsDisabledForRequest = true
+        noToolFallbackUsed = true
+        conversation.push(buildNoToolFallbackInstruction(settings.language))
+        logToolProtocolEvent({ outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
+        continue
+      }
+      throw new Error('\u6a21\u578b\u8fd4\u56de\u4e3a\u7a7a')
+    }
+
+    content += state.content
+    reasoning += state.reasoning
+    publishAnswerRound(chatId, requestId, state.content, state.reasoning)
+    return { content, reasoning, usage }
   }
 }
 

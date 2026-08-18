@@ -38,6 +38,7 @@ export default function SettingsPane(): JSX.Element {
   const [rollupBusy, setRollupBusy] = useState(false)
   const [vectorStatuses, setVectorStatuses] = useState<Record<string, VectorIndexStatus>>({})
   const [vectorBusy, setVectorBusy] = useState(false)
+  const [vectorBusyKey, setVectorBusyKey] = useState<string | null>(null)
 
   useEffect(() => {
     void api.invoke('crypto:hasApiKey', undefined).then(setHasKey)
@@ -77,6 +78,7 @@ export default function SettingsPane(): JSX.Element {
 
   async function buildVectors(projectId: string): Promise<void> {
     setVectorBusy(true)
+    setVectorBusyKey(projectId)
     try {
       const res = await api.invoke('vector:build', projectId)
       if (res.ok) toast.success(t('settings.vectorIndexBuilt', { n: res.chunkCount ?? 0, model: res.embedModel ?? 'unknown' }))
@@ -84,6 +86,22 @@ export default function SettingsPane(): JSX.Element {
       await loadVectorStatuses()
     } finally {
       setVectorBusy(false)
+      setVectorBusyKey(null)
+    }
+  }
+
+  async function rebuildVectorFile(projectId: string, file: VectorIndexStatus['files'][number]): Promise<void> {
+    const key = `${projectId}:${file.kind}:${file.id}`
+    setVectorBusy(true)
+    setVectorBusyKey(key)
+    try {
+      const res = await api.invoke('vector:rebuildSource', { projectId, id: file.id, kind: file.kind })
+      if (res.ok) toast.success(t('settings.vectorIndexFileBuilt', { n: res.chunkCount ?? 0 }))
+      else toast.error(res.error ?? t('settings.vectorIndexFailed'))
+      await loadVectorStatuses()
+    } finally {
+      setVectorBusy(false)
+      setVectorBusyKey(null)
     }
   }
 
@@ -482,14 +500,30 @@ export default function SettingsPane(): JSX.Element {
                             : file.status === 'encoding-error'
                               ? t('settings.vectorIndexEncodingError')
                               : t('settings.vectorIndexNotBuilt')
-                        return (
-                          <div key={`${file.kind}:${file.id}`} className="flex items-center gap-2 text-xs">
-                            <span className="h-1.5 w-1.5 rounded-full" style={{ background: color }} />
-                            <span className="min-w-0 flex-1 truncate">{file.title}</span>
-                            <span style={{ color }}>{label}</span>
-                            <span style={{ color: 'var(--muted)' }}>{t('settings.vectorIndexFileChunks', { n: file.chunkCount })}</span>
-                          </div>
-                        )
+                         const fileKey = `${p.project.id}:${file.kind}:${file.id}`
+                         const canRebuild = file.status !== 'encoding-error'
+                         const fileAction = file.status === 'indexed'
+                           ? t('settings.vectorIndexRebuildFile')
+                           : file.status === 'stale'
+                             ? t('settings.vectorIndexUpdateFile')
+                             : t('settings.vectorIndexBuildFile')
+                         return (
+                           <div key={`${file.kind}:${file.id}`} className="flex items-center gap-2 text-xs">
+                             <span className="h-1.5 w-1.5 rounded-full" style={{ background: color }} />
+                             <span className="min-w-0 flex-1 truncate">{file.title}</span>
+                             <span style={{ color }}>{label}</span>
+                             <span style={{ color: 'var(--muted)' }}>{t('settings.vectorIndexFileChunks', { n: file.chunkCount })}</span>
+                             <button
+                               className="btn !py-0.5 text-[11px]"
+                               disabled={vectorBusy || !canRebuild}
+                               title={file.status === 'encoding-error' ? t('settings.vectorIndexEncodingRepairFirst') : fileAction}
+                               onClick={() => void rebuildVectorFile(p.project.id, file)}
+                             >
+                               <RefreshCw size={11} />
+                               {vectorBusyKey === fileKey ? t('settings.vectorIndexBuilding') : fileAction}
+                             </button>
+                           </div>
+                         )
                       })}
                     </div>
                   ) : status ? (

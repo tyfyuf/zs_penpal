@@ -43,7 +43,10 @@ export interface VectorBuildResult {
   embedModel?: string
 }
 
-const buildPromises = new Map<string, Promise<VectorBuildResult>>()
+const projectOperations = new Map<string, Promise<unknown>>()
+const projectGenerations = new Map<string, number>()
+const projectRunningGenerations = new Map<string, number>()
+const projectBusy = new Set<string>()
 
 function fnv1a(str: string): number {
   let h = 0x811c9dc5
@@ -319,53 +322,235 @@ function sourceFingerprint(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex')
 }
 
-async function buildWithBackend(projectId: string, backend: EmbeddingBackend): Promise<VectorBuildResult> {
-  const startedAt = Date.now()
+function nextProjectGeneration(projectId: string): number {
+  const next = (projectGenerations.get(projectId) ?? 0) + 1
+  projectGenerations.set(projectId, next)
+  return next
+}
+
+/**
+ * Operations are serialized per project. A newer queued operation must not
+ * cancel the one currently executing: it will run afterwards against the
+ * latest written index. This marker guards only the active queue slot.
+ */
+function isCurrentGeneration(projectId: string, generation: number): boolean {
+  return projectRunningGenerations.get(projectId) === generation
+}
+
+function runProjectOperation<T>(projectId: string, operation: (generation: number) => Promise<T>): Promise<T> {
+  const generation = nextProjectGeneration(projectId)
+  const previous = projectOperations.get(projectId) ?? Promise.resolve()
+  const current = previous
+    .catch(() => undefined)
+    .then(async () => {
+      projectBusy.add(projectId)
+      projectRunningGenerations.set(projectId, generation)
+      try {
+        return await operation(generation)
+      } finally {
+        if (projectRunningGenerations.get(projectId) === generation) {
+          projectRunningGenerations.delete(projectId)
+        }
+        projectBusy.delete(projectId)
+      }
+    })
+  projectOperations.set(projectId, current)
+  void current.then(
+    () => { if (projectOperations.get(projectId) === current) projectOperations.delete(projectId) },
+    () => { if (projectOperations.get(projectId) === current) projectOperations.delete(projectId) }
+  )
+  return current
+}
+
+function removeSourceChunks(chunks: VectorChunk[], sourceId: string, kind: 'doc' | 'res'): VectorChunk[] {
+  return chunks.filter((chunk) => !(chunk.docId === sourceId && chunk.kind === kind))
+}
+
+function sourceKey(id: string, kind: 'doc' | 'res'): string {
+  return `${kind}:${id}`
+}
+
+interface CurrentSource {
+  id: string
+  kind: 'doc' | 'res'
+  title: string
+}
+
+async function listCurrentSources(projectId: string): Promise<CurrentSource[] | null> {
   const tree = (await buildSnapshot()).projects.find((project) => project.project.id === projectId)
-  if (!tree) return { ok: false, error: '项目不存在' }
+  if (!tree) return null
+  return [
+    ...tree.docs.map((doc) => ({ id: doc.id, kind: 'doc' as const, title: doc.title })),
+    ...tree.resources.map((resource) => ({ id: resource.id, kind: 'res' as const, title: resource.name }))
+  ]
+}
 
-  const chunks: VectorChunk[] = []
-  const sources: VectorIndexSource[] = []
-  for (const doc of tree.docs) {
-    try {
-      const { content } = await readDoc(doc.id)
+async function readCurrentSource(projectId: string, source: CurrentSource): Promise<{
+  content: string
+  title: string
+  fingerprint: string
+  encodingError?: string
+} | null> {
+  try {
+    if (source.kind === 'doc') {
+      const { content } = await readDoc(source.id)
       const integrity = analyzeTextIntegrity(content)
-      if (integrity.suspicious) continue
-      const chunkCount = await appendSourceChunks(chunks, backend, {
-        docId: doc.id,
-        kind: 'doc',
-        title: doc.title,
-        content
-      })
-      sources.push({ id: doc.id, kind: 'doc', title: doc.title, sourceFingerprint: sourceFingerprint(content), chunkCount })
-    } catch (error) {
-      if (backend.kind === 'neural') throw error
-      // 单个源文件读取失败时跳过；不让损坏文件阻止其余索引构建。
+      if (integrity.suspicious) return { content, title: source.title, fingerprint: sourceFingerprint(content), encodingError: integrity.issue }
+      return { content, title: source.title, fingerprint: sourceFingerprint(content) }
     }
+    const { content, name, encoding } = await readResource(projectId, source.id)
+    if (encoding.suspicious) return { content, title: name, fingerprint: sourceFingerprint(content), encodingError: encoding.issue }
+    return { content, title: name, fingerprint: sourceFingerprint(content) }
+  } catch {
+    return null
   }
-  for (const resource of tree.resources) {
-    try {
-      const { content, name, encoding } = await readResource(projectId, resource.id)
-      if (encoding.suspicious) continue
-      const chunkCount = await appendSourceChunks(chunks, backend, {
-        docId: resource.id,
-        kind: 'res',
-        title: name,
-        content
-      })
-      sources.push({ id: resource.id, kind: 'res', title: name, sourceFingerprint: sourceFingerprint(content), chunkCount })
-    } catch (error) {
-      if (backend.kind === 'neural') throw error
-      // 同上，特征哈希兜底路径跳过无法读取的单个资源。
-    }
-  }
+}
 
+async function buildFullWithBackend(projectId: string, backend: EmbeddingBackend, generation?: number): Promise<VectorBuildResult> {
+  const startedAt = Date.now()
+  const sources = await listCurrentSources(projectId)
+  if (!sources) return { ok: false, error: '项目不存在' }
+  const chunks: VectorChunk[] = []
+  const indexSources: VectorIndexSource[] = []
+  for (const source of sources) {
+    const current = await readCurrentSource(projectId, source)
+    if (!current || current.encodingError) continue
+    if (generation !== undefined && !isCurrentGeneration(projectId, generation)) return { ok: false, error: '索引操作已过期' }
+    try {
+      const chunkCount = await appendSourceChunks(chunks, backend, {
+        docId: source.id,
+        kind: source.kind,
+        title: current.title,
+        content: current.content
+      })
+      indexSources.push({ id: source.id, kind: source.kind, title: current.title, sourceFingerprint: current.fingerprint, chunkCount })
+    } catch (error) {
+      if (backend.kind === 'neural') throw error
+    }
+  }
+  if (generation !== undefined && !isCurrentGeneration(projectId, generation)) return { ok: false, error: '索引操作已过期' }
   const index: VectorIndex = {
     schemaVersion: SCHEMA_VERSION,
     embedModel: backend.id,
     chunks,
     updatedAt: nowIso(),
-    sources
+    sources: indexSources
+  }
+  await writeVectorIndex(projectId, index)
+  logVectorEvent({ stage: 'build', backend: backend.id, outcome: 'success', durationMs: Date.now() - startedAt, chunkCount: chunks.length, operation: 'full' })
+  return { ok: true, chunkCount: chunks.length, embedModel: backend.id }
+}
+
+async function buildIncrementalWithBackend(
+  projectId: string,
+  backend: EmbeddingBackend,
+  generation: number,
+  only?: { id: string; kind: 'doc' | 'res'; force: boolean }
+): Promise<VectorBuildResult> {
+  const startedAt = Date.now()
+  const currentSources = await listCurrentSources(projectId)
+  if (!currentSources) return { ok: false, error: '项目不存在' }
+  const existing = await readVectorIndex(projectId)
+  if (!indexMatchesBackend(existing, backend) || !Array.isArray(existing.sources)) {
+    // A file-level operation may initialize an empty project index, but must not
+    // unexpectedly re-embed every source. Existing indexes with a different
+    // backend/schema still require a full rebuild to keep vectors homogeneous.
+    if (only && !existing) {
+      const target = currentSources.find((source) => sourceKey(source.id, source.kind) === sourceKey(only.id, only.kind))
+      if (!target) return { ok: true, chunkCount: 0, embedModel: backend.id }
+      const current = await readCurrentSource(projectId, target)
+      if (!current || current.encodingError) return { ok: true, chunkCount: 0, embedModel: backend.id }
+      if (!isCurrentGeneration(projectId, generation)) return { ok: false, error: '索引操作已过期' }
+      const chunks: VectorChunk[] = []
+      const chunkCount = await appendSourceChunks(chunks, backend, {
+        docId: target.id,
+        kind: target.kind,
+        title: current.title,
+        content: current.content
+      })
+      if (!isCurrentGeneration(projectId, generation)) return { ok: false, error: '索引操作已过期' }
+      await writeVectorIndex(projectId, {
+        schemaVersion: SCHEMA_VERSION,
+        embedModel: backend.id,
+        chunks,
+        updatedAt: nowIso(),
+        sources: [{ id: target.id, kind: target.kind, title: current.title, sourceFingerprint: current.fingerprint, chunkCount }]
+      })
+      logVectorEvent({ stage: 'build', backend: backend.id, outcome: 'success', durationMs: Date.now() - startedAt, chunkCount, operation: 'source' })
+      return { ok: true, chunkCount, embedModel: backend.id }
+    }
+    return buildFullWithBackend(projectId, backend, generation)
+  }
+
+  const currentMap = new Map(currentSources.map((source) => [sourceKey(source.id, source.kind), source]))
+  const existingSources = new Map(existing.sources.map((source) => [sourceKey(source.id, source.kind), source]))
+  let chunks = [...existing.chunks]
+  const nextSources: VectorIndexSource[] = []
+
+  for (const [key, oldSource] of existingSources) {
+    if (!currentMap.has(key)) chunks = removeSourceChunks(chunks, oldSource.id, oldSource.kind)
+  }
+
+  for (const source of currentSources) {
+    if (!isCurrentGeneration(projectId, generation)) return { ok: false, error: '索引操作已过期' }
+    const key = sourceKey(source.id, source.kind)
+    const oldSource = existingSources.get(key)
+    if (only && (only.id !== source.id || only.kind !== source.kind)) {
+      if (oldSource) nextSources.push(oldSource)
+      continue
+    }
+    const current = await readCurrentSource(projectId, source)
+    if (!current) {
+      if (oldSource) nextSources.push(oldSource)
+      continue
+    }
+    if (current.encodingError) {
+      chunks = removeSourceChunks(chunks, source.id, source.kind)
+      continue
+    }
+
+    const existingChunkCount = chunks.filter((chunk) => chunk.docId === source.id && chunk.kind === source.kind).length
+    const contentUnchanged = Boolean(
+      oldSource &&
+      !only?.force &&
+      oldSource.sourceFingerprint === current.fingerprint &&
+      oldSource.chunkCount === existingChunkCount
+    )
+    if (contentUnchanged && oldSource) {
+      // Renaming a source changes metadata only; retain its vectors and update
+      // the title carried by each hit instead of re-embedding the content.
+      if (oldSource.title !== current.title) {
+        chunks = chunks.map((chunk) => (
+          chunk.docId === source.id && chunk.kind === source.kind
+            ? { ...chunk, title: current.title }
+            : chunk
+        ))
+        nextSources.push({ ...oldSource, title: current.title })
+      } else {
+        nextSources.push(oldSource)
+      }
+      continue
+    }
+
+    chunks = removeSourceChunks(chunks, source.id, source.kind)
+    const sourceChunks: VectorChunk[] = []
+    const chunkCount = await appendSourceChunks(sourceChunks, backend, {
+      docId: source.id,
+      kind: source.kind,
+      title: current.title,
+      content: current.content
+    })
+    chunks.push(...sourceChunks)
+    nextSources.push({ id: source.id, kind: source.kind, title: current.title, sourceFingerprint: current.fingerprint, chunkCount })
+  }
+
+  if (!isCurrentGeneration(projectId, generation)) return { ok: false, error: '索引操作已过期' }
+  const index: VectorIndex = {
+    schemaVersion: SCHEMA_VERSION,
+    embedModel: backend.id,
+    chunks,
+    updatedAt: nowIso(),
+    sources: nextSources
   }
   await writeVectorIndex(projectId, index)
   logVectorEvent({
@@ -373,118 +558,106 @@ async function buildWithBackend(projectId: string, backend: EmbeddingBackend): P
     backend: backend.id,
     outcome: 'success',
     durationMs: Date.now() - startedAt,
-    chunkCount: chunks.length
+    chunkCount: chunks.length,
+    operation: only ? 'source' : 'incremental'
   })
   return { ok: true, chunkCount: chunks.length, embedModel: backend.id }
 }
 
-async function buildWithFallback(projectId: string, initialBackend: EmbeddingBackend): Promise<VectorBuildResult> {
+async function buildWithFallback(
+  projectId: string,
+  initialBackend: EmbeddingBackend,
+  generation: number,
+  only?: { id: string; kind: 'doc' | 'res'; force: boolean }
+): Promise<VectorBuildResult> {
   try {
-    return await buildWithBackend(projectId, initialBackend)
+    return await buildIncrementalWithBackend(projectId, initialBackend, generation, only)
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
-    logVectorEvent({
-      stage: 'build',
-      backend: initialBackend.id,
-      outcome: 'failure',
-      reason
-    })
+    logVectorEvent({ stage: 'build', backend: initialBackend.id, outcome: 'failure', reason, operation: only ? 'source' : 'incremental' })
     if (initialBackend.kind === 'hash') return { ok: false, error: reason }
     const fallbackReason = `神经索引构建失败，改用特征哈希：${reason}`
     try {
-      const result = await buildWithBackend(projectId, HASH_BACKEND)
-      logVectorEvent({
-        stage: 'fallback',
-        backend: HASH_EMBED_MODEL,
-        outcome: result.ok ? 'success' : 'failure',
-        reason: result.ok ? fallbackReason : result.error ?? fallbackReason
-      })
+      const result = await buildFullWithBackend(projectId, HASH_BACKEND, generation)
+      logVectorEvent({ stage: 'fallback', backend: HASH_EMBED_MODEL, outcome: result.ok ? 'success' : 'failure', reason: result.ok ? fallbackReason : result.error ?? fallbackReason, operation: 'full' })
       return result
     } catch (fallbackError) {
       const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
-      logVectorEvent({
-        stage: 'fallback',
-        backend: HASH_EMBED_MODEL,
-        outcome: 'failure',
-        reason: fallbackMessage
-      })
+      logVectorEvent({ stage: 'fallback', backend: HASH_EMBED_MODEL, outcome: 'failure', reason: fallbackMessage, operation: 'full' })
       return { ok: false, error: fallbackMessage }
     }
   }
 }
 
-function runBuild(projectId: string, backend: EmbeddingBackend): Promise<VectorBuildResult> {
-  const existing = buildPromises.get(projectId)
-  if (existing) return existing
-  const promise = buildWithFallback(projectId, backend).finally(() => {
-    if (buildPromises.get(projectId) === promise) buildPromises.delete(projectId)
-  })
-  buildPromises.set(projectId, promise)
-  return promise
+/** Project-wide refresh with changed/new sources only; removed sources are pruned. */
+export async function buildVectorIndex(projectId: string): Promise<VectorBuildResult> {
+  const backend = await preferredBackend()
+  return runProjectOperation(projectId, (generation) => buildWithFallback(projectId, backend, generation))
 }
 
-/** 构建项目向量索引；首选神经嵌入，任意模型故障时从头以特征哈希重建。 */
-export async function buildVectorIndex(projectId: string): Promise<VectorBuildResult> {
-  return runBuild(projectId, await preferredBackend())
+/** Force a single document/resource to be rebuilt. */
+export async function rebuildVectorSource(projectId: string, id: string, kind: 'doc' | 'res'): Promise<VectorBuildResult> {
+  const backend = await preferredBackend()
+  return runProjectOperation(projectId, (generation) => buildWithFallback(projectId, backend, generation, { id, kind, force: true }))
+}
+
+export function queueVectorSourceSync(projectId: string, id: string, kind: 'doc' | 'res'): void {
+  void runProjectOperation(projectId, async (generation) => {
+    const backend = await preferredBackend()
+    return buildWithFallback(projectId, backend, generation, { id, kind, force: false })
+  }).catch((error) => {
+    logVectorEvent({ stage: 'build', backend: 'automatic', outcome: 'failure', reason: error instanceof Error ? error.message : String(error), operation: 'source' })
+  })
+}
+
+export function queueVectorSourceRemoval(projectId: string, id: string, kind: 'doc' | 'res'): void {
+  void runProjectOperation(projectId, async (generation) => {
+    const index = await readVectorIndex(projectId)
+    if (!index) return { ok: true, chunkCount: 0, embedModel: undefined }
+    if (!isCurrentGeneration(projectId, generation)) return { ok: false, error: '索引操作已过期' }
+    const chunks = removeSourceChunks(index.chunks, id, kind)
+    const sources = (index.sources ?? []).filter((source) => !(source.id === id && source.kind === kind))
+    await writeVectorIndex(projectId, { ...index, chunks, sources, updatedAt: nowIso() })
+    logVectorEvent({ stage: 'build', backend: index.embedModel, outcome: 'success', chunkCount: chunks.length, operation: 'remove' })
+    return { ok: true, chunkCount: chunks.length, embedModel: index.embedModel }
+  }).catch((error) => {
+    logVectorEvent({ stage: 'build', backend: 'automatic', outcome: 'failure', reason: error instanceof Error ? error.message : String(error), operation: 'remove' })
+  })
 }
 
 export async function getVectorIndexStatus(projectId: string): Promise<VectorIndexStatus> {
   const tree = (await buildSnapshot()).projects.find((project) => project.project.id === projectId)
-  if (!tree) {
-    return { projectId, indexExists: false, chunkCount: 0, files: [] }
-  }
+  if (!tree) return { projectId, indexExists: false, chunkCount: 0, files: [], busy: projectBusy.has(projectId) }
 
   const index = await readVectorIndex(projectId)
   const chunkCounts = new Map<string, number>()
-  for (const chunk of index?.chunks ?? []) chunkCounts.set(chunk.docId, (chunkCounts.get(chunk.docId) ?? 0) + 1)
-  const sourceMap = new Map((index?.sources ?? []).map((source) => [source.id, source]))
-  const incompatible = Boolean(index && (index.schemaVersion !== SCHEMA_VERSION || !index.embedModel))
+  for (const chunk of index?.chunks ?? []) chunkCounts.set(`${chunk.kind}:${chunk.docId}`, (chunkCounts.get(`${chunk.kind}:${chunk.docId}`) ?? 0) + 1)
+  const sourceMap = new Map((index?.sources ?? []).map((source) => [sourceKey(source.id, source.kind), source]))
+  const incompatible = Boolean(index && (index.schemaVersion !== SCHEMA_VERSION || !index.embedModel || !Array.isArray(index.sources)))
   const files: VectorIndexFileStatus[] = []
 
-  for (const doc of tree.docs) {
-    let status: VectorIndexFileStatus['status'] = 'not-indexed'
-    let chunkCount = chunkCounts.get(doc.id) ?? 0
-    try {
-      const { content } = await readDoc(doc.id)
-      const integrity = analyzeTextIntegrity(content)
-      if (integrity.suspicious) {
-        files.push({ id: doc.id, kind: 'doc', title: doc.title, status: 'encoding-error', chunkCount: 0, issue: integrity.issue })
-        continue
-      }
-      const source = sourceMap.get(doc.id)
-      if (source) {
-        chunkCount = source.chunkCount
-        status = source.title === doc.title && source.sourceFingerprint === sourceFingerprint(content) ? 'indexed' : 'stale'
-      } else if (chunkCount > 0) {
-        status = incompatible ? 'stale' : 'indexed'
-      }
-    } catch {
-      status = chunkCount > 0 ? 'stale' : 'not-indexed'
+  const inspect = async (source: CurrentSource): Promise<void> => {
+    const key = sourceKey(source.id, source.kind)
+    const chunkCount = chunkCounts.get(key) ?? 0
+    const current = await readCurrentSource(projectId, source)
+    if (current?.encodingError) {
+      files.push({ id: source.id, kind: source.kind, title: current.title, status: 'encoding-error', chunkCount: 0, issue: current.encodingError as VectorIndexFileStatus['issue'] })
+      return
     }
-    files.push({ id: doc.id, kind: 'doc', title: doc.title, status: index ? status : 'not-indexed', chunkCount })
+    const indexed = sourceMap.get(key)
+    let status: VectorIndexFileStatus['status'] = 'not-indexed'
+    let effectiveCount = chunkCount
+    if (indexed && current) {
+      effectiveCount = indexed.chunkCount
+      status = indexed.title === current.title && indexed.sourceFingerprint === current.fingerprint ? 'indexed' : 'stale'
+    } else if (indexed || chunkCount > 0) {
+      status = incompatible ? 'stale' : 'indexed'
+    }
+    files.push({ id: source.id, kind: source.kind, title: current?.title ?? source.title, status: index ? status : 'not-indexed', chunkCount: effectiveCount })
   }
 
-  for (const resource of tree.resources) {
-    let status: VectorIndexFileStatus['status'] = 'not-indexed'
-    let chunkCount = chunkCounts.get(resource.id) ?? 0
-    try {
-      const { content, name, encoding } = await readResource(projectId, resource.id)
-      if (encoding.suspicious) {
-        files.push({ id: resource.id, kind: 'res', title: name, status: 'encoding-error', chunkCount: 0, issue: encoding.issue })
-        continue
-      }
-      const source = sourceMap.get(resource.id)
-      if (source) {
-        chunkCount = source.chunkCount
-        status = source.title === name && source.sourceFingerprint === sourceFingerprint(content) ? 'indexed' : 'stale'
-      } else if (chunkCount > 0) {
-        status = incompatible ? 'stale' : 'indexed'
-      }
-      files.push({ id: resource.id, kind: 'res', title: name, status: index ? status : 'not-indexed', chunkCount })
-    } catch {
-      files.push({ id: resource.id, kind: 'res', title: resource.name, status: index && chunkCount > 0 ? 'stale' : 'not-indexed', chunkCount })
-    }
-  }
+  for (const doc of tree.docs) await inspect({ id: doc.id, kind: 'doc', title: doc.title })
+  for (const resource of tree.resources) await inspect({ id: resource.id, kind: 'res', title: resource.name })
 
   return {
     projectId,
@@ -493,7 +666,8 @@ export async function getVectorIndexStatus(projectId: string): Promise<VectorInd
     embedModel: index?.embedModel,
     updatedAt: index?.updatedAt,
     chunkCount: index?.chunks.length ?? 0,
-    files
+    files,
+    busy: projectBusy.has(projectId)
   }
 }
 
@@ -507,8 +681,8 @@ async function backendForIndex(index: VectorIndex): Promise<EmbeddingBackend | n
 async function ensureSearchIndex(projectId: string): Promise<{ index: VectorIndex; backend: EmbeddingBackend } | null> {
   const preferred = await preferredBackend()
   let index = await readVectorIndex(projectId)
-  if (!indexMatchesBackend(index, preferred)) {
-    const result = await runBuild(projectId, preferred)
+  if (!indexMatchesBackend(index, preferred) || !Array.isArray(index?.sources)) {
+    const result = await buildVectorIndex(projectId)
     if (!result.ok) return null
     index = await readVectorIndex(projectId)
   }
@@ -516,7 +690,7 @@ async function ensureSearchIndex(projectId: string): Promise<{ index: VectorInde
 
   let backend = await backendForIndex(index)
   if (!backend || !indexMatchesBackend(index, backend)) {
-    const result = await runBuild(projectId, HASH_BACKEND)
+    const result = await runProjectOperation(projectId, (generation) => buildWithFallback(projectId, HASH_BACKEND, generation))
     if (!result.ok) return null
     index = await readVectorIndex(projectId)
     backend = index ? await backendForIndex(index) : null
@@ -524,12 +698,21 @@ async function ensureSearchIndex(projectId: string): Promise<{ index: VectorInde
   return index && backend && indexMatchesBackend(index, backend) ? { index, backend } : null
 }
 
-/** 余弦检索 top-k 原文分块；神经查询失败时原子切换为特征哈希索引。 */
-export async function searchVectorIndex(projectId: string, query: string, topK = 5): Promise<VectorSearchHit[]> {
+/** Cosine top-k source retrieval; a neural query failure rebuilds a hash index. */
+export async function searchVectorIndex(
+  projectId: string,
+  query: string,
+  topK = 5,
+  trace?: { source?: 'automatic' | 'tool'; attempt?: number }
+): Promise<VectorSearchHit[]> {
+  const startedAt = Date.now()
   const normalizedQuery = query.trim()
   if (!normalizedQuery || topK <= 0) return []
   let prepared = await ensureSearchIndex(projectId)
-  if (!prepared) return []
+  if (!prepared) {
+    logVectorEvent({ stage: 'search', backend: 'none', outcome: 'empty', durationMs: Date.now() - startedAt, hitCount: 0, source: trace?.source, attempt: trace?.attempt, queryLength: normalizedQuery.length })
+    return []
+  }
 
   let queryVector: number[]
   try {
@@ -537,13 +720,8 @@ export async function searchVectorIndex(projectId: string, query: string, topK =
   } catch (error) {
     if (prepared.backend.kind === 'hash') return []
     const reason = error instanceof Error ? error.message : String(error)
-    logVectorEvent({
-      stage: 'search',
-      backend: prepared.backend.id,
-      outcome: 'failure',
-      reason
-    })
-    const result = await runBuild(projectId, HASH_BACKEND)
+    logVectorEvent({ stage: 'search', backend: prepared.backend.id, outcome: 'failure', durationMs: Date.now() - startedAt, reason, source: trace?.source, attempt: trace?.attempt, queryLength: normalizedQuery.length })
+    const result = await runProjectOperation(projectId, (generation) => buildWithFallback(projectId, HASH_BACKEND, generation))
     if (!result.ok) return []
     const index = await readVectorIndex(projectId)
     if (!index || !indexMatchesBackend(index, HASH_BACKEND)) return []
@@ -551,20 +729,27 @@ export async function searchVectorIndex(projectId: string, query: string, topK =
     queryVector = await HASH_BACKEND.embedQuery(normalizedQuery)
   }
 
-  const hits = prepared.index.chunks
+  const scored = prepared.index.chunks
     .map((chunk) => {
       const semanticScore = cosine(queryVector, chunk.vector)
       return { chunk, score: hybridScore(normalizedQuery, chunk.text, semanticScore) }
     })
     .filter((item) => Number.isFinite(item.score) && item.score > 0)
     .sort((a, b) => b.score - a.score)
-    .slice(0, topK)
-
+  const hits = scored.slice(0, topK)
   logVectorEvent({
     stage: 'search',
     backend: prepared.backend.id,
-    outcome: 'success',
-    chunkCount: prepared.index.chunks.length
+    outcome: hits.length > 0 ? 'success' : 'empty',
+    durationMs: Date.now() - startedAt,
+    chunkCount: prepared.index.chunks.length,
+    candidateCount: scored.length,
+    hitCount: hits.length,
+    topScore: hits[0]?.score,
+    source: trace?.source,
+    attempt: trace?.attempt,
+    queryLength: normalizedQuery.length,
+    sourceKinds: [...new Set(hits.map(({ chunk }) => chunk.kind))]
   })
   return hits.map(({ chunk, score }) => ({
     docId: chunk.docId,

@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import type {
   ChatAttachment,
+  ChatInjectionOverrides,
   ChatMessage,
   ChatMeta,
   ContextRange,
@@ -76,13 +77,14 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   /** 对话开始后手动开启、尚未随消息使用的键（仍可自由关闭；发送消息后并入 active） */
   const [pendingEnabled, setPendingEnabled] = useState<string[]>([])
   /** 该对话默认激活的注入键（相关度采样结果，首条消息前的“默认开”） */
-  const [defaultActive, setDefaultActive] = useState<string[]>([])
+  const [defaultActive, setDefaultActive] = useState<string[] | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SummarySearchResult[]>([])
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** 每次回答的记忆使用情况（透明展示），键 = assistant 消息 id */
   const [memories, setMemories] = useState<Record<string, MemoryContext>>({})
   const newSummaryNotifiedRef = useRef(false)
+  const injectionRecoveryRef = useRef<string | null>(null)
   const pendingReasonRef = useRef<'context' | 'summary' | 'both' | null>(null)
   const pendingNewlyEnabledRef = useRef<string[]>([])
   const rangeSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -101,6 +103,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   }, [workspace, chat?.docId])
 
   useEffect(() => {
+    injectionRecoveryRef.current = null
     void api.invoke('chat:get', chatId).then(({ chat, messages }) => {
       setChat(chat)
       setMessages(messages)
@@ -121,6 +124,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   // 默认激活集（相关度采样），随摘要变化刷新
   useEffect(() => {
     if (!chat?.id) return
+    setDefaultActive(null)
     void api.invoke('summary:defaultActive', chat.id).then(setDefaultActive).catch(() => setDefaultActive([]))
   }, [chat?.id, summaryRevision])
 
@@ -259,6 +263,30 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     return items
   }, [chat, overview, config, t])
 
+  // Repair legacy/corrupted started chats whose first-message freeze was lost.
+  // `active: []` is valid; only an absent `active` field violates the state-machine invariant.
+  useEffect(() => {
+    if (!chat || !overview || !config?.summaryEnabled || defaultActive === null) return
+    if (messages.length === 0 || activeInjections !== null || chat.injectionOverrides?.active !== undefined) return
+    if (injectionRecoveryRef.current === chat.id) return
+
+    const disabled = chat.injectionOverrides?.disabled ?? disabledInjections
+    const pending = chat.injectionOverrides?.pending ?? pendingEnabled
+    const available = new Set(injectionItems.map((item) => item.key))
+    const recovered = [...new Set([...defaultActive, ...pending])]
+      .filter((key) => available.has(key) && !disabled.includes(key))
+
+    injectionRecoveryRef.current = chat.id
+    setActiveInjections(recovered)
+    setPendingEnabled([])
+    void persistInjectionOverrides({ disabled, active: recovered, pending: [] }).then((ok) => {
+      if (ok) return
+      setActiveInjections(null)
+      setPendingEnabled(pending)
+    })
+  }, [chat, overview, config?.summaryEnabled, defaultActive, messages.length, activeInjections, disabledInjections, pendingEnabled, injectionItems])
+
+
   // 打开对话窗口时检测新加入摘要系统的摘要（进行中对话默认关闭），一次性提示
   useEffect(() => {
     if (!chat || !overview || !started || newSummaryNotifiedRef.current) return
@@ -304,7 +332,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       }
     } else {
       // 对话开始前：默认开启项可关（记 disabled）；默认关闭项可开（记 pending）
-      const inDefault = defaultActive.includes(key)
+      const inDefault = defaultActive?.includes(key) ?? false
       let nextDisabled = disabledInjections
       let nextPending = pendingEnabled
       if (inDefault) {
@@ -349,40 +377,60 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     setAttachments((a) => [...a, { docId: chat.docId, name: title }])
   }
 
+  async function persistInjectionOverrides(overrides: ChatInjectionOverrides): Promise<boolean> {
+    try {
+      const updated = await api.invoke('chat:patch', { chatId, patch: { injectionOverrides: overrides } })
+      setChat(updated)
+      return true
+    } catch (err) {
+      setError((err as Error).message)
+      return false
+    }
+  }
+
   async function send(regenerate = false): Promise<void> {
     if (streaming) return
     if (!regenerate && !input.trim() && attachments.length === 0) return
+    if (config?.summaryEnabled && ((messages.length === 0 && defaultActive === null) || (messages.length > 0 && activeInjections === null))) {
+      setError('\u6458\u8981\u6ce8\u5165\u72b6\u6001\u4ecd\u5728\u52a0\u8f7d\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5')
+      return
+    }
+
     const requestId = crypto.randomUUID()
     const userMessageId = crypto.randomUUID()
     if (!regenerate) {
-      // 冻结激活键：首条消息 = 默认采样集 ∪ 手动开启(pending) − 手动关闭(disabled)
+      // Persist the frozen injection state before appending the first user message.
+      // Otherwise appendMessage can race with chat:patch and restore an older meta snapshot.
       if (messages.length === 0) {
         const onKeys = injectionItems
-          .filter((i) => (defaultActive.includes(i.key) || pendingEnabled.includes(i.key)) && !disabledInjections.includes(i.key))
-          .map((i) => i.key)
+          .filter((item) => ((defaultActive?.includes(item.key) ?? false) || pendingEnabled.includes(item.key)) && !disabledInjections.includes(item.key))
+          .map((item) => item.key)
+        const persisted = await persistInjectionOverrides({ disabled: disabledInjections, active: onKeys, pending: [] })
+        if (!persisted) return
         setActiveInjections(onKeys)
         setPendingEnabled([])
-        void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: disabledInjections, active: onKeys, pending: [] } } })
       } else if (pendingEnabled.length > 0) {
-        const nextActive = [...(activeInjections ?? []), ...pendingEnabled]
+        const nextActive = [...new Set([...(activeInjections ?? []), ...pendingEnabled])]
+        const persisted = await persistInjectionOverrides({ disabled: disabledInjections, active: nextActive, pending: [] })
+        if (!persisted) return
         setActiveInjections(nextActive)
         setPendingEnabled([])
-        void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: disabledInjections, active: nextActive, pending: [] } } })
       }
-      setMessages((m) => [
-        ...m,
+      setMessages((current) => [
+        ...current,
         { id: userMessageId, role: 'user', content: input, createdAt: new Date().toISOString(), attachments }
       ])
       setPrevAnswer(null)
     } else {
-      // 重新生成同样会“使用”pending 中的摘要 → 锁定
+      // Regeneration also consumes pending summaries, so persist them before starting the request.
       if (pendingEnabled.length > 0) {
-        const nextActive = [...(activeInjections ?? []), ...pendingEnabled]
+        const nextActive = [...new Set([...(activeInjections ?? []), ...pendingEnabled])]
+        const persisted = await persistInjectionOverrides({ disabled: disabledInjections, active: nextActive, pending: [] })
+        if (!persisted) return
         setActiveInjections(nextActive)
         setPendingEnabled([])
-        void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: disabledInjections, active: nextActive, pending: [] } } })
       }
-      const lastA = [...messages].reverse().find((m) => m.role === 'assistant')
+      const lastA = [...messages].reverse().find((message) => message.role === 'assistant')
       if (lastA) setPrevAnswer({ content: lastA.content, reasoning: lastA.reasoning })
     }
     setStreaming({ requestId, acc: '', reasoning: '' })
@@ -394,8 +442,8 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       chatId,
       requestId,
       userText: regenerate ? '' : input,
-      snapshotIds: regenerate ? undefined : attachments.map((a) => a.snapshotId).filter((x): x is string => !!x),
-      docIds: regenerate ? undefined : attachments.map((a) => a.docId).filter((x): x is string => !!x),
+      snapshotIds: regenerate ? undefined : attachments.map((attachment) => attachment.snapshotId).filter((id): id is string => !!id),
+      docIds: regenerate ? undefined : attachments.map((attachment) => attachment.docId).filter((id): id is string => !!id),
       contextRange: streamRange,
       regenerate,
       regenerateReason: regenerate ? pendingReasonRef.current ?? undefined : undefined,
@@ -621,7 +669,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
                 {injectionItems.map((item) => {
                   const enabled = started
                     ? (activeInjections?.includes(item.key) ?? false) || pendingEnabled.includes(item.key)
-                    : !disabledInjections.includes(item.key) && (defaultActive.includes(item.key) || pendingEnabled.includes(item.key))
+                    : !disabledInjections.includes(item.key) && ((defaultActive?.includes(item.key) ?? false) || pendingEnabled.includes(item.key))
                   const locked = started && (activeInjections?.includes(item.key) ?? false)
                   return (
                     <label

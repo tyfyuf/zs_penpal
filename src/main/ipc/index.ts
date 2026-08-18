@@ -61,7 +61,7 @@ import {
   undistillResource
 } from '../services/summary.service'
 import { getSnapshot } from '../services/usage.service'
-import { buildVectorIndex, getVectorIndexStatus, searchVectorIndex } from '../services/vector.service'
+import { buildVectorIndex, getVectorIndexStatus, rebuildVectorSource, searchVectorIndex, queueVectorSourceRemoval, queueVectorSourceSync } from '../services/vector.service'
 import { commitAllProjects, commitProject, gitLog, rollback } from '../services/git.service'
 import { ensureGit } from '../install/git-installer'
 import { exportDoc, exportProject } from '../services/export.service'
@@ -127,18 +127,49 @@ export function registerIpcHandlers(): void {
   // 文档
   handle(IPC.docCreate, (req) => createDoc(req.projectId, req.title))
   handle(IPC.docRead, (id) => readDoc(id))
-  handle(IPC.docSave, (req) => saveDoc(req.docId, req.content))
-  handle(IPC.docRename, (req) => renameDoc(req.docId, req.title))
-  handle(IPC.docDelete, (id) => deleteDoc(id))
-  handle(IPC.docRestore, (id) => restoreDoc(id))
-  handle(IPC.docPurge, (id) => purgeDoc(id))
+  handle(IPC.docSave, async (req) => {
+    const doc = await findDocMeta(req.docId)
+    const result = await saveDoc(req.docId, req.content)
+    if (doc) queueVectorSourceSync(doc.projectId, doc.id, 'doc')
+    return result
+  })
+  handle(IPC.docRename, async (req) => {
+    const doc = await findDocMeta(req.docId)
+    const result = await renameDoc(req.docId, req.title)
+    if (doc) queueVectorSourceSync(doc.projectId, doc.id, 'doc')
+    return result
+  })
+  handle(IPC.docDelete, async (id) => {
+    const doc = await findDocMeta(id)
+    const result = await deleteDoc(id)
+    if (doc) queueVectorSourceRemoval(doc.projectId, doc.id, 'doc')
+    return result
+  })
+  handle(IPC.docRestore, async (id) => {
+    const doc = await findDocMeta(id)
+    const result = await restoreDoc(id)
+    if (doc) queueVectorSourceSync(doc.projectId, doc.id, 'doc')
+    return result
+  })
+  handle(IPC.docPurge, async (id) => {
+    const doc = await findDocMeta(id)
+    const result = await purgeDoc(id)
+    if (doc) queueVectorSourceRemoval(doc.projectId, doc.id, 'doc')
+    return result
+  })
 
   // 对话
   handle(IPC.chatCreate, (req) => createChat(req.projectId, req.kind, req.title, req.docId, req.contextRange, req.action))
   handle(IPC.chatGet, (id) => getChat(id))
   handle(IPC.chatRename, (req) => renameChat(req.chatId, req.title))
   handle(IPC.chatAppend, (req) => appendMessage(req.chatId, req.message))
-  handle(IPC.chatAttachResource, (req) => attachResourceSnapshot(req.chatId, req.projectId, req.source))
+  handle(IPC.chatAttachResource, async (req) => {
+    const result = await attachResourceSnapshot(req.chatId, req.projectId, req.source)
+    if (req.source.mode === 'local' && result.resource?.id) {
+      queueVectorSourceSync(req.projectId, result.resource.id, 'res')
+    }
+    return result
+  })
   handle(IPC.chatDelete, (id) => deleteChat(id))
   handle(IPC.chatRestore, (id) => restoreChat(id))
   handle(IPC.chatPurge, (id) => purgeChat(id))
@@ -148,13 +179,29 @@ export function registerIpcHandlers(): void {
 
   // 资源
   handle(IPC.resourceList, (projectId) => listResources(projectId))
-  handle(IPC.resourceUpload, (req) => uploadResourceBytes(req.projectId, req.name, req.data, req.encodingHint))
+  handle(IPC.resourceUpload, async (req) => {
+    const result = await uploadResourceBytes(req.projectId, req.name, req.data, req.encodingHint)
+    queueVectorSourceSync(req.projectId, result.id, 'res')
+    return result
+  })
   handle(IPC.resourceRead, (req) => readResource(req.projectId, req.resourceId))
-  handle(IPC.resourceReplace, (req) => replaceResourceBytes(req.projectId, req.resourceId, req.data, req.encodingHint))
-  handle(IPC.resourceDelete, (req) => deleteResource(req.projectId, req.resourceId))
+  handle(IPC.resourceReplace, async (req) => {
+    const result = await replaceResourceBytes(req.projectId, req.resourceId, req.data, req.encodingHint)
+    queueVectorSourceSync(req.projectId, req.resourceId, 'res')
+    return result
+  })
+  handle(IPC.resourceDelete, async (req) => {
+    const result = await deleteResource(req.projectId, req.resourceId)
+    queueVectorSourceRemoval(req.projectId, req.resourceId, 'res')
+    return result
+  })
   handle(IPC.resourceDistill, (req) => distillResource(req.projectId, req.resourceId, req.type, req.force))
   handle(IPC.resourceUndistill, (req) => undistillResource(req.projectId, req.resourceId))
-  handle(IPC.fileOpenExternal, (path) => importExternalFile(path))
+  handle(IPC.fileOpenExternal, async (path) => {
+    const result = await importExternalFile(path)
+    if (result.ok && result.projectId && result.resourceId) queueVectorSourceSync(result.projectId, result.resourceId, 'res')
+    return result
+  })
 
   // AI
   handle(IPC.apiStreamChat, (req) => {
@@ -205,6 +252,7 @@ export function registerIpcHandlers(): void {
   handle(IPC.summaryGetRollup, (req) => getDocRollup(req.projectId, req.rollupId))
   handle(IPC.summaryScanConsistency, (projectId) => scanConsistency(projectId))
   handle(IPC.vectorBuild, (projectId) => buildVectorIndex(projectId))
+  handle(IPC.vectorRebuildSource, (req) => rebuildVectorSource(req.projectId, req.id, req.kind))
   handle(IPC.vectorStatus, (projectId) => getVectorIndexStatus(projectId))
   handle(IPC.vectorSearch, (req) => searchVectorIndex(req.projectId, req.query))
 

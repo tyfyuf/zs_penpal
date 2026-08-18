@@ -348,6 +348,8 @@ export interface VectorIndexStatus {
   updatedAt?: string
   chunkCount: number
   files: VectorIndexFileStatus[]
+  /** A project-level vector index operation is queued or running. */
+  busy?: boolean
 }
 
 /** 一致性提示（纯规则扫描） */

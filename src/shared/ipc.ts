@@ -148,6 +148,7 @@ export const IPC = {
   summaryGetRollup: 'summary:getRollup',
   summaryScanConsistency: 'summary:scanConsistency',
   vectorBuild: 'vector:build',
+  vectorRebuildSource: 'vector:rebuildSource',
   vectorStatus: 'vector:status',
   vectorSearch: 'vector:search',
   usageGet: 'usage:get',
@@ -253,6 +254,7 @@ export interface IpcApi {
     req: string
     res: { ok: boolean; error?: string; chunkCount?: number; embedModel?: string }
   }
+  [IPC.vectorRebuildSource]: { req: { projectId: string; id: string; kind: 'doc' | 'res' }; res: { ok: boolean; error?: string; chunkCount?: number; embedModel?: string } }
   [IPC.vectorStatus]: { req: string; res: VectorIndexStatus }
   [IPC.vectorSearch]: { req: { projectId: string; query: string }; res: VectorSearchHit[] }
   [IPC.usageGet]: { req: void; res: UsageSnapshot }
