@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type UIEvent, type WheelEvent } from 'react'
 import {
   Brain,
   Check,
@@ -92,8 +92,10 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   const streamBufferRef = useRef<{ requestId: string; acc: string; reasoning: string } | null>(null)
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const followBottomRef = useRef(true)
+  const programmaticScrollRef = useRef(false)
   const scrollRafRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const scrollContentRef = useRef<HTMLDivElement>(null)
 
   const config = useAppStore((s) => s.config)
   const workspace = useAppStore((s) => s.workspace)
@@ -268,25 +270,72 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId, setStreamingChat])
 
-  function scheduleScrollToBottom(): void {
-    if (!followBottomRef.current || scrollRafRef.current !== null) return
+  function isNearConversationBottom(element: HTMLDivElement): boolean {
+    const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight
+    return distanceFromBottom <= 40
+  }
+
+  function scheduleScrollToBottom(force = false): void {
+    if (force) {
+      followBottomRef.current = true
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current)
+        scrollRafRef.current = null
+      }
+    }
+    if (!force && !followBottomRef.current) return
+    if (scrollRafRef.current !== null) return
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = null
       const element = scrollRef.current
-      if (element && followBottomRef.current) element.scrollTo({ top: element.scrollHeight })
+      if (!element || (!force && !followBottomRef.current)) return
+
+      // Mark the write so the synthetic scroll event caused by this assignment
+      // cannot be mistaken for the user scrolling away from the bottom.
+      programmaticScrollRef.current = true
+      element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight)
+      requestAnimationFrame(() => {
+        programmaticScrollRef.current = false
+      })
     })
   }
 
-  function handleConversationScroll(): void {
+  function handleConversationScroll(event: UIEvent<HTMLDivElement>): void {
     const element = scrollRef.current
     if (!element) return
-    const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight
-    followBottomRef.current = distanceFromBottom <= 40
+    // Chromium reports programmatic scroll events as untrusted. Keep the
+    // current follow state for those events; trusted events are user input.
+    if (programmaticScrollRef.current && !event.nativeEvent.isTrusted) return
+    followBottomRef.current = isNearConversationBottom(element)
+  }
+
+  function handleConversationWheel(event: WheelEvent<HTMLDivElement>): void {
+    const element = scrollRef.current
+    if (!element) return
+    // Capture upward wheel intent immediately, before the following scroll
+    // event arrives, so a pending animation frame cannot pull the view back.
+    if (event.deltaY < 0) {
+      followBottomRef.current = false
+    } else if (event.deltaY > 0 && isNearConversationBottom(element)) {
+      followBottomRef.current = true
+    }
   }
 
   useEffect(() => {
     scheduleScrollToBottom()
   }, [messages, streaming?.acc, streaming?.reasoning])
+
+  // Streaming text, reasoning expansion, memory cards and late font/layout
+  // changes can all alter the content height without changing scroll state.
+  // Observe the inner content so follow mode remains at the bottom in each of
+  // those cases, while a user who has scrolled up remains undisturbed.
+  useEffect(() => {
+    const content = scrollContentRef.current
+    if (!content || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => scheduleScrollToBottom())
+    observer.observe(content)
+    return () => observer.disconnect()
+  }, [chatId])
 
   useEffect(() => () => {
     if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current)
@@ -533,7 +582,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       if (lastA) setPrevAnswer({ content: lastA.content, reasoning: lastA.reasoning })
     }
     followBottomRef.current = true
-    scheduleScrollToBottom()
+    scheduleScrollToBottom(true)
     streamBufferRef.current = { requestId, acc: '', reasoning: '' }
     setReasoningExpanded(`stream:${requestId}`, false)
     setStreaming({ requestId, acc: '', reasoning: '' })
@@ -631,7 +680,8 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
         </div>
       )}
 
-      <div ref={scrollRef} onScroll={handleConversationScroll} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+      <div ref={scrollRef} onScroll={handleConversationScroll} onWheel={handleConversationWheel} className="min-h-0 flex-1 overflow-y-auto p-4">
+        <div ref={scrollContentRef} className="space-y-3">
         {!isContext && regenerateBanner}
 
         {messages.map((m) => (
@@ -717,6 +767,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
             {t('chat.callFailed', { error })}
           </div>
         )}
+        </div>
       </div>
 
       {/* 摘要注入开关面板（输入框上方，可折叠） */}
