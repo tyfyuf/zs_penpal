@@ -82,12 +82,17 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   const [searchResults, setSearchResults] = useState<SummarySearchResult[]>([])
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** 每次回答的记忆使用情况（透明展示），键 = assistant 消息 id */
-  const [memories, setMemories] = useState<Record<string, MemoryContext>>({})
+  const [expandedReasoning, setExpandedReasoning] = useState<Record<string, boolean>>({})
   const newSummaryNotifiedRef = useRef(false)
   const injectionRecoveryRef = useRef<string | null>(null)
   const pendingReasonRef = useRef<'context' | 'summary' | 'both' | null>(null)
   const pendingNewlyEnabledRef = useRef<string[]>([])
   const rangeSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const expandedReasoningRef = useRef<Record<string, boolean>>({})
+  const streamBufferRef = useRef<{ requestId: string; acc: string; reasoning: string } | null>(null)
+  const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const followBottomRef = useRef(true)
+  const scrollRafRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const config = useAppStore((s) => s.config)
@@ -104,6 +109,14 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
 
   useEffect(() => {
     injectionRecoveryRef.current = null
+    expandedReasoningRef.current = {}
+    setExpandedReasoning({})
+    streamBufferRef.current = null
+    if (streamFlushTimerRef.current) {
+      clearTimeout(streamFlushTimerRef.current)
+      streamFlushTimerRef.current = null
+    }
+    followBottomRef.current = true
     void api.invoke('chat:get', chatId).then(({ chat, messages }) => {
       setChat(chat)
       setMessages(messages)
@@ -129,18 +142,63 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   }, [chat?.id, summaryRevision])
 
   // 流式订阅
+  function setReasoningExpanded(key: string, open: boolean): void {
+    expandedReasoningRef.current = { ...expandedReasoningRef.current, [key]: open }
+    setExpandedReasoning((current) => ({ ...current, [key]: open }))
+  }
+
+  function clearReasoningExpanded(key: string): void {
+    delete expandedReasoningRef.current[key]
+    setExpandedReasoning((current) => {
+      if (!(key in current)) return current
+      const next = { ...current }
+      delete next[key]
+      return next
+    })
+  }
+
+  function flushStreamingBuffer(): void {
+    if (streamFlushTimerRef.current) {
+      clearTimeout(streamFlushTimerRef.current)
+      streamFlushTimerRef.current = null
+    }
+    const buffered = streamBufferRef.current
+    if (!buffered) return
+    setStreaming((current) => current && current.requestId === buffered.requestId
+      ? { ...buffered }
+      : current)
+  }
+
+  function scheduleStreamingFlush(): void {
+    if (streamFlushTimerRef.current) return
+    streamFlushTimerRef.current = setTimeout(() => {
+      streamFlushTimerRef.current = null
+      const buffered = streamBufferRef.current
+      if (!buffered) return
+      setStreaming((current) => current && current.requestId === buffered.requestId
+        ? { ...buffered }
+        : current)
+    }, 45)
+  }
+
+  // Stream chunks are merged in a ref and committed to React in small batches.
   useEffect(() => {
     const offChunk = api.on('stream:chunk', (p) => {
       if (p.chatId !== chatId) return
-      setStreaming((s) =>
-        s && s.requestId === p.requestId
-          ? { ...s, acc: s.acc + p.delta, reasoning: s.reasoning + (p.reasoningDelta ?? '') }
-          : s
-      )
+      const buffered = streamBufferRef.current
+      if (!buffered || buffered.requestId !== p.requestId) return
+      buffered.acc += p.delta
+      buffered.reasoning += p.reasoningDelta ?? ''
+      scheduleStreamingFlush()
     })
     const offDone = api.on('stream:done', (p) => {
       if (p.chatId !== chatId) return
+      flushStreamingBuffer()
+      streamBufferRef.current = null
       setStreaming((s) => (s && s.requestId === p.requestId ? null : s))
+      const streamReasoningKey = `stream:${p.requestId}`
+      const wasExpanded = !!expandedReasoningRef.current[streamReasoningKey]
+      clearReasoningExpanded(streamReasoningKey)
       if (p.aborted) {
         sentRangeRef.current = null
         pendingReasonRef.current = null
@@ -155,12 +213,29 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
         return
       }
       if (p.content) {
-        const id = `a-${p.requestId}`
-        setMessages((m) => [
-          ...m,
-          { id, role: 'assistant', content: p.content, createdAt: new Date().toISOString(), reasoning: p.reasoning }
-        ])
-        if (p.memory) setMemories((prev) => ({ ...prev, [id]: p.memory! }))
+        const id = p.messageId ?? `a-${p.requestId}`
+        const message: ChatMessage = {
+          id,
+          role: 'assistant',
+          content: p.content,
+          createdAt: new Date().toISOString(),
+          reasoning: p.reasoning,
+          memory: p.memory
+        }
+        setMessages((current) => {
+          if (p.regenerated) {
+            const index = p.messageId
+              ? current.findIndex((item) => item.id === p.messageId)
+              : [...current].map((item) => item.role).lastIndexOf('assistant')
+            if (index >= 0) {
+              const next = [...current]
+              next[index] = { ...current[index], ...message, regenerated: true }
+              return next
+            }
+          }
+          return [...current, message]
+        })
+        if (wasExpanded) setReasoningExpanded(id, true)
         if (sentRangeRef.current) {
           setLockedRange(sentRangeRef.current)
           void api.invoke('chat:patch', { chatId, patch: { lockedRange: sentRangeRef.current } })
@@ -173,10 +248,14 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     return () => {
       offChunk()
       offDone()
+      if (streamFlushTimerRef.current) {
+        clearTimeout(streamFlushTimerRef.current)
+        streamFlushTimerRef.current = null
+      }
+      streamBufferRef.current = null
     }
   }, [chatId])
 
-  // 关闭对话窗口 → 后台生成/更新聊天摘要（PRD 7.5）+ 清理全局流式状态 + 落盘防抖中的范围
   useEffect(() => {
     return () => {
       void api.invoke('summary:queueChat', chatId)
@@ -189,9 +268,29 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId, setStreamingChat])
 
+  function scheduleScrollToBottom(): void {
+    if (!followBottomRef.current || scrollRafRef.current !== null) return
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null
+      const element = scrollRef.current
+      if (element && followBottomRef.current) element.scrollTo({ top: element.scrollHeight })
+    })
+  }
+
+  function handleConversationScroll(): void {
+    const element = scrollRef.current
+    if (!element) return
+    const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight
+    followBottomRef.current = distanceFromBottom <= 40
+  }
+
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
-  }, [messages, streaming?.acc])
+    scheduleScrollToBottom()
+  }, [messages, streaming?.acc, streaming?.reasoning])
+
+  useEffect(() => () => {
+    if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current)
+  }, [])
 
   // 同步流式状态到全局（供侧栏标题按钮等判断）
   useEffect(() => {
@@ -433,6 +532,10 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       const lastA = [...messages].reverse().find((message) => message.role === 'assistant')
       if (lastA) setPrevAnswer({ content: lastA.content, reasoning: lastA.reasoning })
     }
+    followBottomRef.current = true
+    scheduleScrollToBottom()
+    streamBufferRef.current = { requestId, acc: '', reasoning: '' }
+    setReasoningExpanded(`stream:${requestId}`, false)
     setStreaming({ requestId, acc: '', reasoning: '' })
     setError(null)
     setRegeneratePrompt(false)
@@ -528,7 +631,7 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
         </div>
       )}
 
-      <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+      <div ref={scrollRef} onScroll={handleConversationScroll} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
         {!isContext && regenerateBanner}
 
         {messages.map((m) => (
@@ -552,9 +655,15 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
                   ))}
                 </div>
               )}
-              {m.role === 'assistant' && m.reasoning && <ReasoningBlock reasoning={m.reasoning} />}
+              {m.role === 'assistant' && m.reasoning && (
+                <ReasoningBlock
+                  reasoning={m.reasoning}
+                  expanded={!!expandedReasoning[m.id]}
+                  onExpandedChange={(open) => setReasoningExpanded(m.id, open)}
+                />
+              )}
               {m.content}
-              {m.role === 'assistant' && memories[m.id] && <MemoryCard memory={memories[m.id]} />}
+              {m.role === 'assistant' && m.memory && <MemoryCard memory={m.memory} />}
               {m.role === 'assistant' && (
                 <button
                   className="mt-1.5 flex items-center gap-1 text-xs opacity-60 hover:opacity-100"
@@ -584,34 +693,21 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
           </div>
         )}
 
-        {streaming && streaming.reasoning && !streaming.acc && (
-          <div className="flex justify-start">
-            <div className="max-w-[80%] rounded-xl border px-3 py-2 text-xs" style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}>
-              <div className="flex items-center gap-1" style={{ color: 'var(--muted)' }}>
-                <Brain size={12} />
-                {t('chat.thinking')}
-              </div>
-              <div className="mt-1 whitespace-pre-wrap leading-relaxed" style={{ color: 'var(--muted)' }}>
-                {streaming.reasoning}
-                <span className="animate-pulse">▍</span>
-              </div>
-            </div>
-          </div>
-        )}
-        {streaming && streaming.reasoning && streaming.acc && (
-          <div className="flex justify-start">
-            <ReasoningBlock reasoning={streaming.reasoning} />
-          </div>
-        )}
-
         {streaming && (
           <div className="flex justify-start">
             <div
               className="max-w-[80%] rounded-xl border px-3 py-2 text-sm"
               style={{ background: 'var(--panel2)', borderColor: 'var(--border)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
             >
-              {streaming.acc}
-              <span className="animate-pulse">▍</span>
+              {streaming.reasoning && (
+                <ReasoningBlock
+                  reasoning={streaming.reasoning}
+                  streaming
+                  expanded={!!expandedReasoning[`stream:${streaming.requestId}`]}
+                  onExpandedChange={(open) => setReasoningExpanded(`stream:${streaming.requestId}`, open)}
+                />
+              )}
+              {streaming.acc ? <>{streaming.acc}<span className="animate-pulse">{'\u258d'}</span></> : !streaming.reasoning && <span className="animate-pulse">{'\u258d'}</span>}
             </div>
           </div>
         )}
@@ -772,32 +868,50 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   )
 }
 
-function ReasoningBlock({ reasoning }: { reasoning: string }): JSX.Element {
-  const [open, setOpen] = useState(false)
+function ReasoningBlock({
+  reasoning,
+  streaming = false,
+  expanded = false,
+  onExpandedChange
+}: {
+  reasoning: string
+  streaming?: boolean
+  expanded?: boolean
+  onExpandedChange?: (open: boolean) => void
+}): JSX.Element {
   const t = useT()
+  const lines = reasoning.split(/\r?\n/).filter((line) => line.trim())
+  const preview = lines.length > 0 ? lines[lines.length - 1] : ''
+  const toggle = (): void => onExpandedChange?.(!expanded)
   return (
     <div className="mb-1.5 rounded-lg border px-2.5 py-1.5 text-xs" style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}>
       <button
         className="flex w-full items-center gap-1"
         style={{ color: 'var(--muted)' }}
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggle}
+        aria-expanded={expanded}
       >
-        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         <Brain size={12} />
         {t('chat.thinking')}
       </button>
-      {open && (
-        <div className="mt-1 whitespace-pre-wrap leading-relaxed" style={{ color: 'var(--muted)' }}>
-          {reasoning}
-        </div>
-      )}
+      <div
+        className="mt-1 whitespace-pre-wrap leading-relaxed"
+        style={{
+          color: 'var(--muted)',
+          ...(expanded ? {} : { maxHeight: '2.8em', overflow: 'hidden' })
+        }}
+      >
+        {expanded ? reasoning : preview}
+        {streaming && <span className="animate-pulse">{'\u258d'}</span>}
+      </div>
     </div>
   )
 }
 
 /** “本次记忆”卡：透明展示本次回答使用了哪些摘要/大摘要/向量命中 */
 function MemoryCard({ memory }: { memory: MemoryContext }): JSX.Element {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
   const t = useT()
   const small = memory.small ?? []
   const rollups = memory.rollups ?? []

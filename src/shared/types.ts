@@ -111,6 +111,8 @@ export interface ChatMessage {
   attachments?: ChatAttachment[]
   /** 思维链（推理模型的 reasoning_content），仅展示用，不进入后续提示词 */
   reasoning?: string
+  /** Memory context used by this assistant answer. */
+  memory?: MemoryContext
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +523,10 @@ export interface StreamDonePayload {
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
   /** 本次回答的记忆使用情况（透明展示） */
   memory?: MemoryContext
+  /** Persisted assistant message ID for renderer/history reconciliation. */
+  messageId?: string
+  /** Whether the latest assistant answer replaced a previous one. */
+  regenerated?: boolean
 }
 
 /** 记忆使用明细（“本次记忆”卡） */

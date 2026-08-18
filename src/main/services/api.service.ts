@@ -223,6 +223,9 @@ interface StreamRoundState {
   pending: Map<number, PendingToolCall>
   finishReason?: string | null
   usage?: UsageLike
+  /** Prefixes already exposed to the renderer; tool syntax is never exposed. */
+  publishedContentLength: number
+  publishedReasoningLength: number
 }
 
 const PROJECT_SEARCH_TOOL = {
@@ -373,17 +376,59 @@ function buildNoToolFallbackInstruction(lang: 'zh' | 'en'): ChatCompletionMessag
 }
 
 function newStreamRound(): StreamRoundState {
-  return { content: '', reasoning: '', pending: new Map() }
+  return {
+    content: '',
+    reasoning: '',
+    pending: new Map(),
+    publishedContentLength: 0,
+    publishedReasoningLength: 0
+  }
 }
 
-function publishAnswerRound(
+type ExplicitToolTextState = 'candidate' | 'answer'
+
+/**
+ * Keep a possible pseudo tool call private until the prefix is no longer
+ * compatible with the supported formats. Ordinary answer text is released
+ * immediately; this intentionally accepts the rare late native-tool signal.
+ */
+function classifyExplicitToolTextPrefix(content: string): ExplicitToolTextState {
+  const trimmed = content.trimStart()
+  if (!trimmed) return 'candidate'
+
+  const lower = trimmed.toLowerCase()
+  const functionName = 'search_project_source'
+  if (functionName.startsWith(lower) || lower.startsWith(functionName)) return 'candidate'
+
+  const xmlPrefix = '<tool_call>'
+  if (xmlPrefix.startsWith(lower) || lower.startsWith(xmlPrefix)) return 'candidate'
+
+  if (trimmed.startsWith('{')) {
+    const compact = trimmed.replace(/\s+/g, '').toLowerCase()
+    const jsonPrefix = '{"name":"search_project_source"'
+    if (jsonPrefix.startsWith(compact) || compact.startsWith(jsonPrefix)) return 'candidate'
+  }
+
+  return 'answer'
+}
+
+function publishStreamRoundProgress(
   chatId: string,
   requestId: string,
-  content: string,
-  reasoning: string
+  state: StreamRoundState,
+  forceContent = false
 ): void {
-  if (content) broadcast(EVENTS.streamChunk, { chatId, requestId, delta: content })
-  if (reasoning) broadcast(EVENTS.streamChunk, { chatId, requestId, delta: '', reasoningDelta: reasoning })
+  const nativeToolSignal = state.pending.size > 0 || isToolFinishReason(state.finishReason)
+  const textMayBeToolCall = classifyExplicitToolTextPrefix(state.content) === 'candidate'
+  const canPublishContent = forceContent || (!nativeToolSignal && !textMayBeToolCall)
+  const delta = canPublishContent ? state.content.slice(state.publishedContentLength) : ''
+  const reasoningDelta = state.reasoning.slice(state.publishedReasoningLength)
+
+  if (canPublishContent) state.publishedContentLength = state.content.length
+  state.publishedReasoningLength = state.reasoning.length
+  if (delta || reasoningDelta) {
+    broadcast(EVENTS.streamChunk, { chatId, requestId, delta, reasoningDelta: reasoningDelta || undefined })
+  }
 }
 
 function protocolDuration(startedAt: number): number {
@@ -477,10 +522,12 @@ async function streamAnswerWithTools(options: {
           if (delta.function?.arguments) current.arguments = mergeStreamFragment(current.arguments, delta.function.arguments)
           state.pending.set(index, current)
         }
+        publishStreamRoundProgress(chatId, requestId, state)
         usage = addUsage(usage, chunk.usage as UsageLike | undefined)
       }
     } catch (error) {
       if (useTools && isToolCompatibilityError(error)) {
+        reasoning += state.reasoning
         toolsDisabledForRequest = true
         toolProtocolLog('compatibility-retry', roundStartedAt, state)
         if (!noToolFallbackUsed) {
@@ -493,7 +540,10 @@ async function streamAnswerWithTools(options: {
       throw error
     }
 
-    if (controller.signal.aborted) return { content, reasoning, usage }
+    if (controller.signal.aborted) {
+      reasoning += state.reasoning
+      return { content, reasoning, usage }
+    }
 
     const nativeCalls = [...state.pending.values()].filter((call) => call.name || call.arguments)
     const explicitCall = parseExplicitTextToolCall(state.content)
@@ -503,6 +553,7 @@ async function streamAnswerWithTools(options: {
     const hasToolSignal = nativeCalls.length > 0 || hasExplicitSignal || isToolFinishReason(state.finishReason)
 
     if (validCall && useTools) {
+      reasoning += state.reasoning
       if (explicitCall && !validNativeCall) {
         toolProtocolLog('text-recovered', roundStartedAt, state, 1)
       } else {
@@ -545,6 +596,7 @@ async function streamAnswerWithTools(options: {
     }
 
     if (hasToolSignal && (!validCall || !useTools)) {
+      reasoning += state.reasoning
       const outcome = isTruncatedFinishReason(state.finishReason) ? 'truncated' : 'malformed'
       toolProtocolLog(outcome, roundStartedAt, state, nativeCalls.length)
       if (repairAttempts < MAX_TOOL_REPAIR_ATTEMPTS && useTools) {
@@ -564,6 +616,7 @@ async function streamAnswerWithTools(options: {
     }
 
     if (!state.content.trim() && !state.reasoning.trim()) {
+      reasoning += state.reasoning
       if (!noToolFallbackUsed) {
         toolsDisabledForRequest = true
         noToolFallbackUsed = true
@@ -576,7 +629,7 @@ async function streamAnswerWithTools(options: {
 
     content += state.content
     reasoning += state.reasoning
-    publishAnswerRound(chatId, requestId, state.content, state.reasoning)
+    publishStreamRoundProgress(chatId, requestId, state, true)
     return { content, reasoning, usage }
   }
 }
@@ -1093,6 +1146,7 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
   let reasoning = ''
   let usage: UsageLike | undefined
   let failed = false
+  let persistedMessageId: string | undefined
 
   try {
     const result = await streamAnswerWithTools({
@@ -1143,14 +1197,17 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
   // 成功：持久化回答（含思维链）+ 记录用量
   if (!failed && acc.length > 0) {
     if (req.regenerate) {
-      await replaceLastAssistantMessage(req.chatId, acc, reasoning || undefined)
-    } else {
+      persistedMessageId = (await replaceLastAssistantMessage(req.chatId, acc, reasoning || undefined, built.memory)) ?? undefined
+    }
+    if (!persistedMessageId) {
+      persistedMessageId = newId()
       await appendMessage(req.chatId, {
-        id: newId(),
+        id: persistedMessageId,
         role: 'assistant',
         content: acc,
         createdAt: nowIso(),
-        reasoning: reasoning || undefined
+        reasoning: reasoning || undefined,
+        memory: built.memory
       })
     }
   }
@@ -1167,7 +1224,9 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
       content: acc,
       reasoning: reasoning || undefined,
       usage: usage ? { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, total_tokens: usage.total_tokens } : undefined,
-      memory: built.memory
+      memory: built.memory,
+      messageId: persistedMessageId,
+      regenerated: req.regenerate
     })
   }
 }

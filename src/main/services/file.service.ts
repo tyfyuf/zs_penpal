@@ -407,18 +407,25 @@ export async function appendMessage(chatId: string, message: ChatMessage): Promi
   await mutateChatMeta(chatId, (current) => ({ ...current, updatedAt: nowIso() }))
 }
 
-/** 替换最近一条 assistant 回答（重新生成场景，PRD 6.6）；reasoning 为思维链（可空） */
-export async function replaceLastAssistantMessage(chatId: string, content: string, reasoning?: string): Promise<void> {
+/** Replace the latest assistant answer and return its persisted ID. */
+export async function replaceLastAssistantMessage(
+  chatId: string,
+  content: string,
+  reasoning: string | undefined,
+  memory: ChatMessage['memory']
+): Promise<string | null> {
   const { chat, messages } = await getChat(chatId)
+  let messageId: string | null = null
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === 'assistant') {
-      messages[i] = { ...messages[i], content, regenerated: true }
-      if (reasoning) messages[i].reasoning = reasoning
+      messages[i] = { ...messages[i], content, regenerated: true, reasoning, memory }
+      messageId = messages[i].id
       break
     }
   }
   await atomicWrite(chatJsonlPath(chat.projectId, chatId), messages.map((m) => JSON.stringify(m)).join('\n') + (messages.length ? '\n' : ''))
   await mutateChatMeta(chatId, (current) => ({ ...current, updatedAt: nowIso() }))
+  return messageId
 }
 
 /** 用户归档对话（PRD 4.2.1） */
