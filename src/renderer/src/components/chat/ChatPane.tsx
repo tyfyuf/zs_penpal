@@ -50,13 +50,51 @@ interface InjectionItem {
   label: string
 }
 
-export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
+interface ChatDraft {
+  input: string
+  attachments: ChatAttachment[]
+}
+
+const CHAT_DRAFTS_KEY = 'writing-agent:chat-drafts'
+
+function readChatDraft(chatId: string): ChatDraft {
+  try {
+    const raw = localStorage.getItem(CHAT_DRAFTS_KEY)
+    if (!raw) return { input: '', attachments: [] }
+    const all = JSON.parse(raw) as Record<string, Partial<ChatDraft>>
+    const draft = all[chatId]
+    if (!draft || typeof draft.input !== 'string' || !Array.isArray(draft.attachments)) {
+      return { input: '', attachments: [] }
+    }
+    const attachments = draft.attachments.filter((item): item is ChatAttachment =>
+      !!item && typeof item === 'object' && typeof item.name === 'string'
+    )
+    return { input: draft.input, attachments }
+  } catch {
+    return { input: '', attachments: [] }
+  }
+}
+
+function writeChatDraft(chatId: string, draft: ChatDraft): void {
+  try {
+    const raw = localStorage.getItem(CHAT_DRAFTS_KEY)
+    const all = raw ? (JSON.parse(raw) as Record<string, ChatDraft>) : {}
+    if (!draft.input && draft.attachments.length === 0) delete all[chatId]
+    else all[chatId] = draft
+    localStorage.setItem(CHAT_DRAFTS_KEY, JSON.stringify(all))
+  } catch {
+    // Draft persistence is best effort and must never affect chat operation.
+  }
+}
+
+export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?: boolean }): JSX.Element {
   const t = useT()
   const chatId = tab.refId!
   const [chat, setChat] = useState<ChatMeta | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [input, setInput] = useState('')
-  const [attachments, setAttachments] = useState<ChatAttachment[]>([])
+  const initialDraft = useMemo(() => readChatDraft(chatId), [chatId])
+  const [input, setInput] = useState(initialDraft.input)
+  const [attachments, setAttachments] = useState<ChatAttachment[]>(initialDraft.attachments)
   const [range, setRange] = useState<ContextRange | null>(tab.contextRange ?? null)
   const [streaming, setStreaming] = useState<{ requestId: string; acc: string; reasoning: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -96,6 +134,9 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   const scrollRafRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const scrollContentRef = useRef<HTMLDivElement>(null)
+  const [historyLoaded, setHistoryLoaded] = useState(false)
+  const initialScrollDoneRef = useRef(false)
+  const hiddenContentChangedRef = useRef(false)
 
   const config = useAppStore((s) => s.config)
   const workspace = useAppStore((s) => s.workspace)
@@ -119,9 +160,12 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
       streamFlushTimerRef.current = null
     }
     followBottomRef.current = true
+    initialScrollDoneRef.current = false
+    setHistoryLoaded(false)
     void api.invoke('chat:get', chatId).then(({ chat, messages }) => {
       setChat(chat)
       setMessages(messages)
+      setHistoryLoaded(true)
       if (chat.contextRange) setRange(chat.contextRange)
       if (chat.lockedRange) setLockedRange(chat.lockedRange)
       setDisabledInjections(chat.injectionOverrides?.disabled ?? [])
@@ -322,8 +366,43 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   }
 
   useEffect(() => {
+    if (!isActive) hiddenContentChangedRef.current = true
     scheduleScrollToBottom()
-  }, [messages, streaming?.acc, streaming?.reasoning])
+  }, [messages, streaming?.acc, streaming?.reasoning, isActive])
+
+  // History is loaded asynchronously and inactive chat panes are kept mounted.
+  // Wait until the pane is visible and the browser has laid out the message
+  // list before forcing the initial position to the last message.
+  useEffect(() => {
+    if (!isActive || !historyLoaded || initialScrollDoneRef.current) return
+    let raf1: number | null = null
+    let raf2: number | null = null
+    let raf3: number | null = null
+    raf1 = requestAnimationFrame(() => {
+      scheduleScrollToBottom(true)
+      raf2 = requestAnimationFrame(() => {
+        scheduleScrollToBottom(true)
+        raf3 = requestAnimationFrame(() => {
+          scheduleScrollToBottom(true)
+          initialScrollDoneRef.current = true
+        })
+      })
+    })
+    return () => {
+      if (raf1 !== null) cancelAnimationFrame(raf1)
+      if (raf2 !== null) cancelAnimationFrame(raf2)
+      if (raf3 !== null) cancelAnimationFrame(raf3)
+    }
+  }, [historyLoaded, isActive, messages.length, chatId])
+
+  // Re-anchor after returning from another tab so content streamed while
+  // hidden is immediately visible. User scrolls remain respected afterwards.
+  useEffect(() => {
+    if (!isActive || !historyLoaded) return
+    if (!initialScrollDoneRef.current || !hiddenContentChangedRef.current) return
+    hiddenContentChangedRef.current = false
+    scheduleScrollToBottom(true)
+  }, [isActive, historyLoaded])
 
   // Streaming text, reasoning expansion, memory cards and late font/layout
   // changes can all alter the content height without changing scroll state.
@@ -332,16 +411,24 @@ export default function ChatPane({ tab }: { tab: Tab }): JSX.Element {
   useEffect(() => {
     const content = scrollContentRef.current
     if (!content || typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(() => scheduleScrollToBottom())
+    const observer = new ResizeObserver(() => {
+      if (!isActive) hiddenContentChangedRef.current = true
+      scheduleScrollToBottom()
+    })
     observer.observe(content)
     return () => observer.disconnect()
-  }, [chatId])
+  }, [chatId, isActive])
 
   useEffect(() => () => {
     if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current)
   }, [])
 
   // 同步流式状态到全局（供侧栏标题按钮等判断）
+  // Drafts stay local to this renderer and never enter chat history, logs, or model requests.
+  useEffect(() => {
+    writeChatDraft(chatId, { input, attachments })
+  }, [chatId, input, attachments])
+
   useEffect(() => {
     setStreamingChat(chatId, !!streaming)
   }, [streaming, chatId, setStreamingChat])
