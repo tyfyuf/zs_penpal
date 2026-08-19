@@ -150,6 +150,107 @@ export interface StorySummary {
   keyQuotes: string[]
 }
 
+export type ResourceDistillType = 'story' | 'setting' | 'other'
+export type SummaryKnowledgeStatus = 'confirmed' | 'ambiguous' | 'conflict' | 'unverified'
+export type SummaryEntityKind =
+  | 'character'
+  | 'faction'
+  | 'place'
+  | 'item'
+  | 'species'
+  | 'occupation'
+  | 'ability'
+  | 'system'
+  | 'term'
+  | 'event'
+  | 'other'
+export type SummaryFactKind =
+  | 'identity'
+  | 'relationship'
+  | 'rule'
+  | 'constraint'
+  | 'exception'
+  | 'timeline'
+  | 'event'
+  | 'other'
+
+export interface SummaryEvidence {
+  sourceChunkId: string
+  quote: string
+}
+
+export interface SummaryEntity {
+  id: string
+  kind: SummaryEntityKind
+  name: string
+  aliases: string[]
+  status: SummaryKnowledgeStatus
+  evidence: SummaryEvidence[]
+}
+
+export interface SummaryFact {
+  id: string
+  kind: SummaryFactKind
+  subject: string
+  predicate: string
+  object: string
+  status: SummaryKnowledgeStatus
+  evidence: SummaryEvidence[]
+}
+
+export interface SummaryKnowledgeBase {
+  entities: SummaryEntity[]
+  facts: SummaryFact[]
+}
+
+export interface SettingEntry {
+  name: string
+  category: string
+  description: string
+}
+
+export interface SettingTerm {
+  term: string
+  definition: string
+}
+
+export interface SettingSummary {
+  type: 'setting'
+  overview: string
+  scope: string
+  entries: SettingEntry[]
+  terms: SettingTerm[]
+  rules: string[]
+  relationships: string[]
+  timeline: string[]
+  constraints: string[]
+  unresolved: string[]
+}
+
+export interface SummaryChunkResult {
+  id: string
+  index: number
+  sourceFingerprint: string
+  summary: StorySummary | SettingSummary | GenericResourceSummary
+  knowledge: SummaryKnowledgeBase
+}
+
+export interface SummaryChunkPayload {
+  chunkResults: SummaryChunkResult[]
+}
+
+export interface SummaryGenerationInfo {
+  state: 'complete' | 'incomplete'
+  totalChunks: number
+  completedChunks: number
+  failedChunkIds: string[]
+}
+
+export interface SummaryAnalysisMeta extends SummaryChunkPayload {
+  knowledge: SummaryKnowledgeBase
+  generation: SummaryGenerationInfo
+}
+
 /** 摘要源内容指纹（三级新鲜度判定 FRESH/STALE/NEEDS_REBUILD 的信号源，替代内嵌全文快照） */
 export interface SummarySourceInfo {
   schemaVersion: number
@@ -161,8 +262,8 @@ export interface SummarySourceInfo {
   sourceNormalizedLength: number
 }
 
-/** 写作文档摘要 = 故事拆解 + 源指纹（不再内嵌全文快照） */
-export interface DocSummary extends StorySummary, SummarySourceInfo {
+/** 写作文档摘要 = 故事拆解 + 经验证的知识 + 源指纹 */
+export interface DocSummary extends StorySummary, SummarySourceInfo, SummaryAnalysisMeta {
   updatedAt: string
 }
 
@@ -205,8 +306,8 @@ export interface GenericResourceSummary {
   structure: string
 }
 
-/** 资源摘要：故事拆解 或 通用拆解 */
-export type ResourceSummary = SummarySourceInfo & { updatedAt: string } & (StorySummary | GenericResourceSummary)
+/** 资源摘要：故事、设定或通用拆解，均带原文验证知识与分块生成状态 */
+export type ResourceSummary = SummarySourceInfo & { updatedAt: string } & SummaryAnalysisMeta & (StorySummary | SettingSummary | GenericResourceSummary)
 
 export interface DistillResult {
   ok: boolean
@@ -214,7 +315,7 @@ export interface DistillResult {
   mismatch?: boolean
   /** 分类置信度不足（<0.8），需用户确认是否仍按所选类型生成 */
   uncertain?: boolean
-  detectedType?: 'story' | 'other'
+  detectedType?: ResourceDistillType
   /** 判定理由（用于提示用户） */
   reasons?: string[]
   summary?: ResourceSummary
@@ -381,9 +482,11 @@ export interface ProjectSummariesOverview {
     resourceId: string
     name: string
     distilled: boolean
-    type?: 'story' | 'other'
+    type?: ResourceDistillType
     updatedAt?: string
     generating: boolean
+    /** 存在部分生成结果，但仍有块或合并层级失败 */
+    incomplete?: boolean
     /** 源内容已显著变化，摘要待更新（黄标） */
     stale?: boolean
   }[]

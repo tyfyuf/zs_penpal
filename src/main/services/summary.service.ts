@@ -9,8 +9,12 @@ import type {
   DocSummary,
   GenericResourceSummary,
   ProjectSummariesOverview,
+  ResourceDistillType,
   ResourceSummary,
+  SettingSummary,
   StorySummary,
+  SummaryChunkResult,
+  SummaryKnowledgeBase,
   SummarySearchResult
 } from '@shared/types'
 import { loadApiSettings, type ApiSettings } from './api-settings'
@@ -41,6 +45,8 @@ import { executeStructuredTask } from './structured-generation.service'
 import { EVENTS } from '@shared/ipc'
 import { broadcast } from '../window'
 import { analyzeTextIntegrity, assertTextIntegrity } from './text-decoding.service'
+import { confirmedKnowledge, hasExplicitAliasRelation, mergeKnowledgeBases, normalizeKnowledgeName, sourceContainsEvidence, sourceContainsName, validateKnowledge } from './summary-knowledge'
+import { generationInfo, reusableChunkResults, splitSourceByTokenBudget, type SourceChunk } from './summary-hierarchy'
 
 // ---------------------------------------------------------------------------
 // 摘要生成状态（供摘要区显示“生成中”黄点，生成完毕转绿并解锁）
@@ -120,20 +126,61 @@ Leave a field empty ([] or "") when absent — DO NOT invent. All content in Eng
 信息不足的字段留空数组或空字符串，禁止编造。只输出合法 JSON。${cap}`
 }
 
+function settingPrompt(lang: Lang, bounded = false): string {
+  const cap = bounded
+    ? (lang === 'en'
+      ? '\nKeep each list concise: at most 30 entries, 40 terms, and 30 items for every other list.'
+      : '\n每个列表保持精简：entries 最多 30 条、terms 最多 40 条，其他列表最多 30 条。')
+    : ''
+  return lang === 'en'
+    ? `You are a world-setting distillation assistant. Extract the stable setting knowledge from the text and output exactly one JSON object:
+- "overview": a concise overview of the setting
+- "scope": what part of the world/system this text covers
+- "entries": [{"name":"exact source name","category":"character/faction/place/item/system/other","description":"precise description"}]
+- "terms": [{"term":"exact source term","definition":"precise definition"}]
+- "rules": explicit rules and mechanisms
+- "relationships": explicit relationships among entities
+- "timeline": explicit chronology or historical milestones
+- "constraints": limitations, costs, conditions, exceptions
+- "unresolved": questions or contradictions not settled by the text
+Preserve names and terms exactly as written whenever possible. Do not invent. Narrative examples inside a setting document are evidence, not a reason to classify it as a story. Output valid JSON only.${cap}`
+    : `你是世界观设定蒸馏助手。请从文本中提取稳定的设定知识，并且只输出一个 JSON 对象：
+- "overview"：设定概览
+- "scope"：本文覆盖的世界、系统或主题范围
+- "entries"：[{"name":"原文中的准确名称","category":"人物/势力/地点/物品/体系/其他","description":"准确描述"}]
+- "terms"：[{"term":"原文中的准确术语","definition":"准确释义"}]
+- "rules"：明确写出的规则和机制
+- "relationships"：实体之间明确写出的关系
+- "timeline"：明确写出的时间线和历史节点
+- "constraints"：限制、代价、条件和例外
+- "unresolved"：原文尚未解决的问题或矛盾
+尽可能保持名称和术语的原文写法。禁止编造。设定文档中的叙事示例是证据，不应因此将文档归类为故事。只输出合法 JSON。${cap}`
+}
+
+function knowledgePrompt(lang: Lang): string {
+  return lang === 'en'
+    ? `Extract only source-verifiable knowledge from the text. Output exactly one JSON object:
+{"entities":[{"kind":"character|faction|place|item|species|occupation|ability|system|term|event|other","name":"exact name","aliases":["only explicit aliases"],"status":"confirmed|ambiguous|conflict","evidence":[{"quote":"short exact quote"}]}],"facts":[{"kind":"identity|relationship|rule|constraint|exception|timeline|event|other","subject":"exact source name","predicate":"explicit relation","object":"exact source value","status":"confirmed|ambiguous|conflict","evidence":[{"quote":"short exact quote"}]}]}
+Names, aliases, facts, and evidence must be present in the source text. Only mark an alias when the source explicitly says alias/also called/aka. Never infer or invent. Output valid JSON only.`
+    : `请只提取能够在原文中核验的知识。只输出一个 JSON 对象：
+{"entities":[{"kind":"character|faction|place|item|species|occupation|ability|system|term|event|other","name":"原文中的准确名称","aliases":["仅填写原文明确给出的别名"],"status":"confirmed|ambiguous|conflict","evidence":[{"quote":"简短的原文证据"}]}],"facts":[{"kind":"identity|relationship|rule|constraint|exception|timeline|event|other","subject":"原文主体","predicate":"明确关系","object":"原文对象","status":"confirmed|ambiguous|conflict","evidence":[{"quote":"简短的原文证据"}]}]}
+名称、别名、事实和证据必须出现在原文中。只有原文明确写出“别名”“又称”“也称”等关系时，才标记 alias。禁止推断和编造。只输出合法 JSON。`
+}
+
 function classifyPrompt(lang: Lang): string {
   return lang === 'en'
-    ? `Classify the content type of the text below and output JSON (nothing else):
-{ "type": "story" or "other", "confidence": a number from 0 to 1, "reasons": ["reason1", "reason2"] }
-Criteria (judge by the nature of the content, not formatting):
-- "story": novels, scripts, narrative works with characters, plot progression. Dialogue-driven stories/scripts also count as story. Headings, lists, bold text are not evidence for "other".
-- "other": informational/structured text — code, data lists, reports, emails, legal text, encyclopedia entries, tables, and non-narrative chat logs/meeting transcripts.
-Write the reasons in English. Output valid JSON only.`
-    : `请判断下面文本的内容类型，输出 JSON（不要输出其他任何内容）：
-{ "type": "story" 或 "other", "confidence": 0到1之间的数字, "reasons": ["理由1", "理由2"] }
-判定标准（以内容本质为准，排版格式不是依据）：
-- "story"：小说、剧本、故事类叙事作品——有人物、有情节推进、有叙事。注意：主要由人物对话构成的对话体故事/剧本也属于 story；标题层级、列表、加粗等格式特征不能作为"other"的理由。
-- "other"：信息性/结构化文本——代码、数据列表、报告、邮件、法律条款、百科条目、表格，以及非叙事的聊天记录/会议转写等。
-只依据文本内容本质判断，输出必须是合法 JSON。`
+    ? `Classify the content type and output JSON only:
+{ "type": "story" or "setting" or "other", "confidence": 0 to 1, "reasons": ["reason1", "reason2"] }
+- "story": narrative work whose primary purpose is plot progression and scenes.
+- "setting": worldbuilding, reference, character/faction/system lore, rules, terminology, history, or mixed setting material. Narrative examples inside a setting document still count as setting.
+- "other": code, data, reports, email, legal text, tables, or non-narrative transcripts.
+Judge the content's purpose, not headings or formatting. Output valid JSON only.`
+    : `请只输出 JSON，对内容类型进行分类：
+{ "type": "story"、"setting" 或 "other"，"confidence": 0 到 1 之间的数字，"reasons": ["理由1", "理由2"] }
+- "story"：主要目的为推进情节和呈现场景的叙事作品。
+- "setting"：世界观、人物/势力/体系设定、规则、术语、历史或混合设定资料。设定文档中的叙事示例仍归入 setting。
+- "other"：代码、数据、报告、邮件、法律文本、表格或非叙事记录。
+请根据内容目的判断，不要只根据标题或格式。只输出合法 JSON。`
 }
 
 function chatPrompt(lang: Lang): string {
@@ -293,6 +340,39 @@ function validGeneric(parsed: unknown, compact = false): GenericResourceSummary 
   return summary.overview && summary.keyPoints.length > 0 ? summary : null
 }
 
+
+function normalizeSetting(parsed: unknown, compact = false): SettingSummary {
+  const p = (parsed ?? {}) as Record<string, unknown>
+  const entries = Array.isArray(p.entries) ? (p.entries as Record<string, unknown>[]) : []
+  const terms = Array.isArray(p.terms) ? (p.terms as Record<string, unknown>[]) : []
+  const itemLimit = compact ? 12 : 30
+  return {
+    type: 'setting',
+    overview: cleanText(p.overview, 1000),
+    scope: cleanText(p.scope, 600),
+    entries: entries.map((entry) => ({
+      name: cleanText(entry.name, 120),
+      category: cleanText(entry.category, 80) || 'other',
+      description: cleanText(entry.description, 600)
+    })).filter((entry) => entry.name && entry.description).slice(0, itemLimit),
+    terms: terms.map((term) => ({
+      term: cleanText(term.term, 120),
+      definition: cleanText(term.definition, 600)
+    })).filter((term) => term.term && term.definition).slice(0, compact ? 16 : 40),
+    rules: cleanStrings(p.rules, itemLimit, 600),
+    relationships: cleanStrings(p.relationships, itemLimit, 600),
+    timeline: cleanStrings(p.timeline, itemLimit, 600),
+    constraints: cleanStrings(p.constraints, itemLimit, 600),
+    unresolved: cleanStrings(p.unresolved, compact ? 8 : 20, 480)
+  }
+}
+
+function validSetting(parsed: unknown, compact = false): SettingSummary | null {
+  const summary = normalizeSetting(parsed, compact)
+  const hasStructuredContent = summary.entries.length > 0 || summary.terms.length > 0 || summary.rules.length > 0 || summary.relationships.length > 0 || summary.timeline.length > 0 || summary.constraints.length > 0
+  return summary.overview && hasStructuredContent ? summary : null
+}
+
 // ---------------------------------------------------------------------------
 // 全局 LLM 调用串行队列：摘要/蒸馏/分类共用并发 1，避免并发请求互相堵塞
 // ---------------------------------------------------------------------------
@@ -324,48 +404,288 @@ function estimateInputTokens(content: string, model: string): number {
   return estimateTokens(content, model)
 }
 
-async function callStoryDecomposition(content: string, cfg: ApiSettings): Promise<StorySummary> {
+type SummaryBody = StorySummary | SettingSummary | GenericResourceSummary
+
+function summaryParser(type: ResourceDistillType, raw: string, compact = false): SummaryBody | null {
+  const parsed = parseJson(raw)
+  if (type === 'story') return validStory(parsed, compact)
+  if (type === 'setting') return validSetting(parsed, compact)
+  return validGeneric(parsed, compact)
+}
+
+function summarySystemPrompt(type: ResourceDistillType, lang: Lang, bounded = true): string {
+  if (type === 'story') return storyPrompt(lang, bounded)
+  if (type === 'setting') return settingPrompt(lang, bounded)
+  return genericPrompt(lang, bounded)
+}
+
+async function callTypedDecomposition(type: ResourceDistillType, content: string, cfg: ApiSettings, task: string): Promise<SummaryBody> {
   const tokens = estimateInputTokens(content, cfg.model)
-  const budget = inputBudget(cfg)
-  if (tokens > budget) {
-    throw new Error('Document exceeds the configured input-context budget (60%).')
-  }
-  const userContent = content || '(empty document)'
+  if (tokens > inputBudget(cfg)) throw new Error('Summary chunk exceeds the configured input-context budget.')
+  const prompt = summarySystemPrompt(type, cfg.language, true)
   return enqueueLlm(() => executeStructuredTask({
-    task: 'story_decomposition', settings: cfg,
+    task, settings: cfg,
     messages: [
-      { role: 'system', content: storyPrompt(cfg.language, true) },
-      { role: 'user', content: userContent }
+      { role: 'system', content: prompt },
+      { role: 'user', content: content || '(empty content)' }
     ],
     compactMessages: [
-      { role: 'system', content: `${storyPrompt(cfg.language, true)}\nUse half as many items as the stated limits. Prefer a closed valid result over exhaustive coverage.` },
-      { role: 'user', content: userContent }
+      { role: 'system', content: `${prompt}\nUse about half as many list items. Prefer a complete valid JSON result over exhaustive coverage.` },
+      { role: 'user', content: content || '(empty content)' }
     ],
-    outputTokens: 4096, compactOutputTokens: 2048,
-    parseAndValidate: (raw) => validStory(parseJson(raw), false)
+    outputTokens: type === 'story' ? 4096 : 3072,
+    compactOutputTokens: type === 'story' ? 2048 : 1536,
+    parseAndValidate: (raw) => summaryParser(type, raw, false)
   }))
 }
 
-async function callGenericDecomposition(content: string, cfg: ApiSettings): Promise<GenericResourceSummary> {
-  const tokens = estimateInputTokens(content, cfg.model)
-  const budget = inputBudget(cfg)
-  if (tokens > budget) {
-    throw new Error('Document exceeds the configured input-context budget (60%).')
-  }
-  const userContent = content || '(empty content)'
+async function callKnowledgeExtraction(chunk: SourceChunk, cfg: ApiSettings): Promise<SummaryKnowledgeBase> {
   return enqueueLlm(() => executeStructuredTask({
-    task: 'generic_decomposition', settings: cfg,
+    task: 'summary_knowledge_extraction', settings: cfg,
     messages: [
-      { role: 'system', content: genericPrompt(cfg.language, true) },
-      { role: 'user', content: userContent }
+      { role: 'system', content: knowledgePrompt(cfg.language) },
+      { role: 'user', content: chunk.text }
     ],
     compactMessages: [
-      { role: 'system', content: `${genericPrompt(cfg.language, true)}\nUse half as many items as the stated limits. Prefer a closed valid result over exhaustive coverage.` },
-      { role: 'user', content: userContent }
+      { role: 'system', content: `${knowledgePrompt(cfg.language)}\nKeep only the highest-value entities and facts, with one short exact evidence quote each.` },
+      { role: 'user', content: chunk.text }
     ],
-    outputTokens: 3072, compactOutputTokens: 1536,
-    parseAndValidate: (raw) => validGeneric(parseJson(raw), false)
+    outputTokens: 4096, compactOutputTokens: 2048,
+    parseAndValidate: (raw) => {
+      const parsed = parseJson(raw)
+      if (!parsed || typeof parsed !== 'object') return null
+      return validateKnowledge(parsed, chunk.text, chunk.id)
+    }
   }))
+}
+
+function sanitizeSummary(summary: SummaryBody, source: string, knowledge: SummaryKnowledgeBase): SummaryBody {
+  const confirmed = confirmedKnowledge(knowledge)
+  const confirmedNames = new Set(confirmed.entities.map((entity) => normalizeKnowledgeName(entity.name)))
+  if (summary.type === 'story') {
+    return {
+      ...summary,
+      characters: summary.characters.filter((character) => sourceContainsName(source, character.name)).map((character) => ({
+        ...character,
+        aliases: character.aliases.filter((alias) => hasExplicitAliasRelation(source, character.name, alias))
+      })),
+      keyQuotes: summary.keyQuotes.filter((quote) => sourceContainsEvidence(source, quote))
+    }
+  }
+  if (summary.type === 'setting') {
+    return {
+      ...summary,
+      entries: summary.entries.filter((entry) => sourceContainsName(source, entry.name) && (confirmedNames.size === 0 || confirmedNames.has(normalizeKnowledgeName(entry.name)))),
+      terms: summary.terms.filter((term) => sourceContainsName(source, term.term) && (confirmedNames.size === 0 || confirmedNames.has(normalizeKnowledgeName(term.term))))
+    }
+  }
+  return {
+    ...summary,
+    keyTerms: summary.keyTerms.filter((term) => sourceContainsName(source, term))
+  }
+}
+
+function uniqueBy<T>(items: T[], keyOf: (item: T) => string, limit: number): T[] {
+  const seen = new Set<string>()
+  const result: T[] = []
+  for (const item of items) {
+    const key = keyOf(item)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    result.push(item)
+    if (result.length >= limit) break
+  }
+  return result
+}
+
+function deterministicMerge(type: ResourceDistillType, summaries: SummaryBody[]): SummaryBody {
+  const matching = summaries.filter((summary) => summary.type === type)
+  if (type === 'story') {
+    const stories = matching as StorySummary[]
+    return {
+      type: 'story',
+      overview: stories.map((item) => item.overview).filter(Boolean).join('\n').slice(0, 4000),
+      characters: uniqueBy(stories.flatMap((item) => item.characters), (item) => normalizeKnowledgeName(item.name), 40),
+      plot: stories.flatMap((item) => item.plot).slice(0, 100).map((item, index) => ({ ...item, id: `s${index + 1}` })),
+      foreshadowing: uniqueBy(stories.flatMap((item) => item.foreshadowing), (item) => normalizeKnowledgeName(item.planted), 60),
+      keySettings: uniqueBy(stories.flatMap((item) => item.keySettings), normalizeKnowledgeName, 80),
+      keyQuotes: uniqueBy(stories.flatMap((item) => item.keyQuotes), normalizeKnowledgeName, 40)
+    }
+  }
+  if (type === 'setting') {
+    const settings = matching as SettingSummary[]
+    return {
+      type: 'setting',
+      overview: settings.map((item) => item.overview).filter(Boolean).join('\n').slice(0, 4000),
+      scope: settings.map((item) => item.scope).filter(Boolean).join('\n').slice(0, 1600),
+      entries: uniqueBy(settings.flatMap((item) => item.entries), (item) => normalizeKnowledgeName(item.name), 80),
+      terms: uniqueBy(settings.flatMap((item) => item.terms), (item) => normalizeKnowledgeName(item.term), 100),
+      rules: uniqueBy(settings.flatMap((item) => item.rules), normalizeKnowledgeName, 80),
+      relationships: uniqueBy(settings.flatMap((item) => item.relationships), normalizeKnowledgeName, 80),
+      timeline: uniqueBy(settings.flatMap((item) => item.timeline), normalizeKnowledgeName, 80),
+      constraints: uniqueBy(settings.flatMap((item) => item.constraints), normalizeKnowledgeName, 80),
+      unresolved: uniqueBy(settings.flatMap((item) => item.unresolved), normalizeKnowledgeName, 40)
+    }
+  }
+  const generic = matching as GenericResourceSummary[]
+  return {
+    type: 'other',
+    docType: generic[0]?.docType ?? 'reference',
+    overview: generic.map((item) => item.overview).filter(Boolean).join('\n').slice(0, 4000),
+    keyPoints: uniqueBy(generic.flatMap((item) => item.keyPoints), normalizeKnowledgeName, 100),
+    keyTerms: uniqueBy(generic.flatMap((item) => item.keyTerms), normalizeKnowledgeName, 80),
+    structure: generic.map((item) => item.structure).filter(Boolean).join('\n').slice(0, 2400)
+  }
+}
+
+interface MergeNode {
+  summary: SummaryBody
+  knowledge: SummaryKnowledgeBase
+}
+
+function mergeInput(node: MergeNode): unknown {
+  const knowledge = confirmedKnowledge(node.knowledge)
+  return {
+    summary: node.summary,
+    verifiedEntities: knowledge.entities.map(({ kind, name, aliases }) => ({ kind, name, aliases })),
+    verifiedFacts: knowledge.facts.map(({ kind, subject, predicate, object }) => ({ kind, subject, predicate, object }))
+  }
+}
+
+async function callSummarySynthesis(type: ResourceDistillType, nodes: MergeNode[], cfg: ApiSettings): Promise<SummaryBody> {
+  const prompt = summarySystemPrompt(type, cfg.language, true)
+  const input = JSON.stringify(nodes.map(mergeInput))
+  return enqueueLlm(() => executeStructuredTask({
+    task: `summary_hierarchy_${type}`, settings: cfg,
+    messages: [
+      { role: 'system', content: `${prompt}\nSynthesize the supplied partial summaries into one document-level result. Treat verifiedEntities and verifiedFacts as the authority for exact names and factual claims. Do not add unsupported details.` },
+      { role: 'user', content: input }
+    ],
+    compactMessages: [
+      { role: 'system', content: `${prompt}\nMerge the partial summaries conservatively. Keep only facts supported by verifiedEntities and verifiedFacts.` },
+      { role: 'user', content: input }
+    ],
+    outputTokens: type === 'story' ? 4096 : 3072,
+    compactOutputTokens: type === 'story' ? 2048 : 1536,
+    parseAndValidate: (raw) => summaryParser(type, raw, false)
+  }))
+}
+
+function groupMergeNodes(nodes: MergeNode[], cfg: ApiSettings): MergeNode[][] {
+  const budget = Math.max(1800, Math.floor(inputBudget(cfg) * 0.65))
+  const groups: MergeNode[][] = []
+  let current: MergeNode[] = []
+  let currentTokens = 0
+  for (const node of nodes) {
+    const tokens = estimateInputTokens(JSON.stringify(mergeInput(node)), cfg.model)
+    if (current.length > 0 && (current.length >= 6 || currentTokens + tokens > budget)) {
+      groups.push(current)
+      current = []
+      currentTokens = 0
+    }
+    current.push(node)
+    currentTokens += tokens
+  }
+  if (current.length) groups.push(current)
+  if (nodes.length > 1 && groups.length === nodes.length) {
+    const paired: MergeNode[][] = []
+    for (let index = 0; index < nodes.length; index += 2) paired.push(nodes.slice(index, index + 2))
+    return paired
+  }
+  return groups
+}
+
+function generationFailureId(id: string, error: unknown): string {
+  const code = error instanceof Error && 'code' in error ? String((error as Error & { code?: unknown }).code ?? 'error') : 'error'
+  return `${id}:${code.replace(/[^a-z0-9_-]/gi, '').slice(0, 24) || 'error'}`
+}
+
+interface HierarchicalResult {
+  summary: SummaryBody
+  knowledge: SummaryKnowledgeBase
+  chunkResults: SummaryChunkResult[]
+  failedChunkIds: string[]
+  totalChunks: number
+}
+
+async function generateHierarchicalSummary(
+  type: ResourceDistillType,
+  content: string,
+  cfg: ApiSettings,
+  previous?: ResourceSummary | DocSummary | null,
+  checkpoint?: (result: HierarchicalResult) => Promise<void>
+): Promise<HierarchicalResult> {
+  const targetTokens = Math.max(1200, Math.min(24000, Math.floor(inputBudget(cfg) * 0.55)))
+  const chunks = splitSourceByTokenBudget(content, cfg.model, targetTokens)
+  const reusable = reusableChunkResults(chunks, previous?.type === type ? previous.chunkResults : undefined, type)
+  const completed: SummaryChunkResult[] = []
+  const failed: string[] = []
+
+  for (const chunk of chunks) {
+    const cached = reusable.get(chunk.id)
+    if (cached) {
+      completed.push(cached)
+      continue
+    }
+    try {
+      const knowledge = await callKnowledgeExtraction(chunk, cfg)
+      const rawSummary = await callTypedDecomposition(type, chunk.text, cfg, `summary_chunk_${type}`)
+      const summary = sanitizeSummary(rawSummary, chunk.text, knowledge)
+      completed.push({ id: chunk.id, index: chunk.index, sourceFingerprint: chunk.sourceFingerprint, summary, knowledge })
+    } catch (error) {
+      failed.push(generationFailureId(chunk.id, error))
+    }
+    if (checkpoint && completed.length > 0) {
+      const knowledge = mergeKnowledgeBases(completed.map((item) => item.knowledge))
+      await checkpoint({
+        summary: sanitizeSummary(deterministicMerge(type, completed.map((item) => item.summary)), content, knowledge),
+        knowledge,
+        chunkResults: [...completed].sort((a, b) => a.index - b.index),
+        failedChunkIds: [...failed, 'generation:pending'],
+        totalChunks: chunks.length
+      })
+    }
+  }
+  if (completed.length === 0) throw new Error('No summary chunk completed successfully.')
+
+  let nodes: MergeNode[] = completed.sort((a, b) => a.index - b.index).map((item) => ({ summary: item.summary, knowledge: item.knowledge }))
+  let level = 0
+  while (nodes.length > 1) {
+    const groups = groupMergeNodes(nodes, cfg)
+    const next: MergeNode[] = []
+    for (let index = 0; index < groups.length; index++) {
+      const group = groups[index]
+      const knowledge = mergeKnowledgeBases(group.map((item) => item.knowledge))
+      if (group.length === 1) {
+        next.push({ summary: group[0].summary, knowledge })
+        continue
+      }
+      try {
+        next.push({ summary: await callSummarySynthesis(type, group, cfg), knowledge })
+      } catch (error) {
+        failed.push(generationFailureId(`merge_${level}_${index}`, error))
+        next.push({ summary: deterministicMerge(type, group.map((item) => item.summary)), knowledge })
+      }
+    }
+    nodes = next
+    level++
+  }
+  const knowledge = mergeKnowledgeBases(completed.map((item) => item.knowledge))
+  return {
+    summary: sanitizeSummary(nodes[0].summary, content, knowledge),
+    knowledge,
+    chunkResults: completed,
+    failedChunkIds: failed,
+    totalChunks: chunks.length
+  }
+}
+
+async function callStoryDecomposition(content: string, cfg: ApiSettings): Promise<StorySummary> {
+  return callTypedDecomposition('story', content, cfg, 'story_decomposition') as Promise<StorySummary>
+}
+
+async function callGenericDecomposition(content: string, cfg: ApiSettings): Promise<GenericResourceSummary> {
+  return callTypedDecomposition('other', content, cfg, 'generic_decomposition') as Promise<GenericResourceSummary>
 }
 
 /** Three-section sampling: beginning / middle / end avoids a head-only classification. */
@@ -379,7 +699,7 @@ function sampleSections(content: string, per = 2000): string {
 }
 
 interface ClassifyDecision {
-  type: 'story' | 'other'
+  type: ResourceDistillType
   confidence: number
   reasons: string[]
 }
@@ -397,6 +717,8 @@ function heuristicClassify(content: string): ClassifyDecision | null {
   const pronouns = (content.match(/[他她它]/g) ?? []).length
   const dialogue = (content.match(/[：:]\s*["“「]/g) ?? []).length
 
+  const settingTerms = (content.match(/(?:设定|世界观|势力|阵营|种族|职业|能力|体系|规则|术语|地理|历史|年表|lore|worldbuilding|faction|terminology|rules?)/gi) ?? []).length
+  const definitionLines = (content.match(/^(?:[-*]\s*)?[^\n：:]{1,40}[：:]\s*[^\n]+$/gm) ?? []).length
   const code = (content.match(/\b(function|class|import|export|const|let|var|def|return|typedef|struct|public|private|interface|namespace)\b/g) ?? []).length
   const headings = (content.match(/^#{1,6}\s/gm) ?? []).length
   const tableRows = (content.match(/^\|/gm) ?? []).length
@@ -409,6 +731,10 @@ function heuristicClassify(content: string): ClassifyDecision | null {
   if (per1k(pronouns) >= 10) storyFlags.push('人物指代密度高')
   if (dialogue > 0) storyFlags.push('存在对话段落')
 
+  const settingFlags: string[] = []
+  if (settingTerms >= 3) settingFlags.push('设定/规则/术语信号密集')
+  if (definitionLines >= 4) settingFlags.push('存在多条定义式条目')
+
   const otherFlags: string[] = []
   if (code > 0) otherFlags.push('存在代码特征')
   if (headings > 0) otherFlags.push('存在标题层级')
@@ -417,10 +743,15 @@ function heuristicClassify(content: string): ClassifyDecision | null {
   if (per1k(digits) >= 30) otherFlags.push('数字密度高')
 
   const storyScore = per1k(quoteChars) * 2 + chapter * 5 + per1k(pronouns) * 1.5 + dialogue * 3
-  const otherScore = code * 6 + headings * 4 + tableRows * 2 + urls * 4 + per1k(digits) * 1.5
+  const settingScore = settingTerms * 3 + definitionLines * 2 + headings
+  const otherScore = code * 6 + tableRows * 2 + urls * 4 + per1k(digits) * 1.5
 
-  // 极保守：仅当另一类信号完全为零时才直接判定
-  if (storyScore >= 6 && otherFlags.length === 0) {
+  // 设定信号明确时优先 setting，即使其中包含故事示例。
+  if (settingScore >= 12 && code === 0 && tableRows < 4) {
+    return { type: 'setting', confidence: 0.95, reasons: settingFlags.length ? settingFlags : ['设定资料特征明显'] }
+  }
+  // 极保守：仅当另一类信号很弱时才直接判定
+  if (storyScore >= 6 && otherFlags.length === 0 && settingFlags.length === 0) {
     return { type: 'story', confidence: 0.95, reasons: storyFlags.length ? storyFlags : ['叙事文本特征明显'] }
   }
   if (otherScore >= 6 && storyFlags.length === 0) {
@@ -442,7 +773,7 @@ async function classifyByLlm(content: string, cfg: ApiSettings): Promise<Classif
       const parsed = parseJson<{ type?: unknown; confidence?: unknown; reasons?: unknown }>(raw)
       if (!parsed) return null
       const typeText = String(parsed.type ?? '').toLowerCase()
-      const type = typeText === 'story' ? 'story' : typeText === 'other' ? 'other' : null
+      const type = typeText === 'story' ? 'story' : typeText === 'setting' ? 'setting' : typeText === 'other' ? 'other' : null
       const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : Number(parsed.confidence)
       if (!type || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) return null
       return { type, confidence, reasons: cleanStrings(parsed.reasons, 4, 240) }
@@ -471,8 +802,15 @@ async function generateDocSummary(projectId: string, docId: string, content: str
   assertTextIntegrity(analyzeTextIntegrity(content), '\u6587\u6863')
   void projectId
   void docId
-  const story = await callStoryDecomposition(content, cfg)
-  return { ...story, ...computeSourceInfo(content), updatedAt: nowIso() }
+  const result = await generateHierarchicalSummary('story', content, cfg)
+  return {
+    ...(result.summary as StorySummary),
+    ...computeSourceInfo(content),
+    knowledge: result.knowledge,
+    chunkResults: result.chunkResults,
+    generation: generationInfo(result.totalChunks, result.chunkResults, result.failedChunkIds),
+    updatedAt: nowIso()
+  }
 }
 
 /**
@@ -734,7 +1072,7 @@ export async function waitForSummaryQueue(timeoutMs: number): Promise<boolean> {
 export async function distillResource(
   projectId: string,
   resourceId: string,
-  type: 'story' | 'other',
+  type: ResourceDistillType,
   force = false
 ): Promise<DistillResult> {
   const key = `res:${resourceId}`
@@ -749,61 +1087,70 @@ export async function distillResource(
 async function distillResourceInner(
   projectId: string,
   resourceId: string,
-  type: 'story' | 'other',
+  type: ResourceDistillType,
   force: boolean
 ): Promise<DistillResult> {
   const cfg = await loadConfig()
-  if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未开启' }
+  if (!cfg.summaryEnabled) return { ok: false, error: '\u6458\u8981\u529f\u80fd\u672a\u5f00\u542f' }
   const settings = await loadApiSettings()
-  if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }
+  if (!settings.apiKey) return { ok: false, error: '\u672a\u914d\u7f6e API Key' }
 
   let content: string
+  let resourceName = resourceId
   try {
     const resource = await readResource(projectId, resourceId)
+    resourceName = resource.name
     assertTextIntegrity(resource.encoding, resource.name)
     content = resource.content
   } catch (err) {
     return { ok: false, error: (err as Error).message }
   }
-  if (!content.trim()) return { ok: false, error: '资源内容为空' }
+  if (!content.trim()) return { ok: false, error: '\u8d44\u6e90\u5185\u5bb9\u4e3a\u7a7a' }
 
-  // 类型判定（force 时跳过，直接按用户所选类型生成）
+  // \u5206\u7c7b\u5668\u4ec5\u63d0\u4f9b\u9996\u6b21\u5efa\u8bae\uff1bforce \u540e\u4e25\u683c\u9075\u5faa\u7528\u6237\u9009\u62e9\u3002
   if (!force) {
-    // 1. 启发式预筛（零成本，强信号直接判定）
     let decision: ClassifyDecision | null = heuristicClassify(content)
-
-    // 2. 弱信号 → 模型结构化判定（三段采样）
     if (!decision) {
       try {
         decision = await classifyByLlm(content, settings)
       } catch {
-        return { ok: false, error: '类型判定失败，请重试' }
+        return { ok: false, error: '\u7c7b\u578b\u5224\u5b9a\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5' }
       }
-      if (!decision) {
-        return { ok: false, error: '类型判定失败，请重试' }
-      }
+      if (!decision) return { ok: false, error: '\u7c7b\u578b\u5224\u5b9a\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5' }
     }
-
-    // 3. 置信度兜底：< 0.8 → 让用户确认
     if (decision.confidence < 0.8) {
       return { ok: false, uncertain: true, detectedType: decision.type, reasons: decision.reasons }
     }
-
-    // 4. 与所选不符 → 提示重新选择
     if (decision.type !== type) {
       return { ok: false, mismatch: true, detectedType: decision.type, reasons: decision.reasons }
     }
   }
 
-  // 生成对应摘要
   try {
-    const summary: ResourceSummary =
-      type === 'story'
-        ? { ...(await callStoryDecomposition(content, settings)), ...computeSourceInfo(content), updatedAt: nowIso() }
-        : { ...(await callGenericDecomposition(content, settings)), ...computeSourceInfo(content), updatedAt: nowIso() }
+    const previous = await readResourceSummary(projectId, resourceId)
+    const result = await generateHierarchicalSummary(type, content, settings, previous, async (checkpoint) => {
+      const partial: ResourceSummary = {
+        ...(checkpoint.summary as ResourceSummary),
+        ...computeSourceInfo(content),
+        knowledge: checkpoint.knowledge,
+        chunkResults: checkpoint.chunkResults,
+        generation: generationInfo(checkpoint.totalChunks, checkpoint.chunkResults, checkpoint.failedChunkIds),
+        updatedAt: nowIso()
+      }
+      await writeResourceSummary(projectId, resourceId, partial)
+    })
+    const summary: ResourceSummary = {
+      ...(result.summary as ResourceSummary),
+      ...computeSourceInfo(content),
+      knowledge: result.knowledge,
+      chunkResults: result.chunkResults,
+      generation: generationInfo(result.totalChunks, result.chunkResults, result.failedChunkIds),
+      updatedAt: nowIso()
+    }
     await writeResourceSummary(projectId, resourceId, summary)
     return { ok: true, summary, detectedType: type }
   } catch (err) {
+    logError('summary:resource', `\u8d44\u6e90\u84b8\u998f\u5931\u8d25 resourceId=${resourceId} name=${resourceName}`, (err as Error).message)
     return { ok: false, error: (err as Error).message }
   }
 }
@@ -812,18 +1159,13 @@ export async function undistillResource(projectId: string, resourceId: string): 
   await removeResourceSummary(projectId, resourceId)
 }
 
-/** 读时惰性检测资源摘要是否过期；旧摘要无指纹则用当前内容补算落盘（视为新鲜，此后可检测） */
+/** 读时惰性检测资源摘要是否过期；旧 schema 不会被 readResourceSummary 接受。 */
 export async function checkResourceSummaryStale(projectId: string, resourceId: string): Promise<boolean> {
   const s = await readResourceSummary(projectId, resourceId)
   if (!s) return false
   try {
     const { content, encoding } = await readResource(projectId, resourceId)
     if (encoding.suspicious) return true
-    if (!s.sourceFingerprint) {
-      const patched: ResourceSummary = { ...s, ...computeSourceInfo(content) }
-      await writeResourceSummary(projectId, resourceId, patched)
-      return false
-    }
     return isSourceStale(s, content)
   } catch {
     return false
@@ -947,7 +1289,16 @@ export async function listProjectSummaries(projectId: string): Promise<ProjectSu
       const summary = await readResourceSummary(projectId, r.id)
       const generating = isSummaryGenerating(`res:${r.id}`)
       const stale = summary ? await checkResourceSummaryStale(projectId, r.id) : false
-      return { resourceId: r.id, name: r.name, distilled: !!summary, type: summary?.type, updatedAt: summary?.updatedAt, generating, stale }
+      return {
+        resourceId: r.id,
+        name: r.name,
+        distilled: !!summary,
+        type: summary?.type,
+        updatedAt: summary?.updatedAt,
+        generating,
+        incomplete: summary?.generation.state === 'incomplete',
+        stale
+      }
     })
   )
   return { docs, chats, resources: resources.filter((resource): resource is NonNullable<typeof resource> => !!resource && (resource.distilled || resource.generating)) }
@@ -981,6 +1332,11 @@ function summarySearchText(s: ResourceSummary | DocSummary | ChatSummary | null)
     }
   }
   if (Array.isArray(o.plot)) parts.push((o.plot as Record<string, unknown>[]).map((p) => String(p.summary ?? '')).join(' '))
+  if (Array.isArray(o.entries)) parts.push((o.entries as Record<string, unknown>[]).map((entry) => `${String(entry.name ?? '')} ${String(entry.description ?? '')}`).join(' '))
+  if (Array.isArray(o.terms)) parts.push((o.terms as Record<string, unknown>[]).map((term) => `${String(term.term ?? '')} ${String(term.definition ?? '')}`).join(' '))
+  const knowledge = o.knowledge as Record<string, unknown> | undefined
+  if (Array.isArray(knowledge?.entities)) parts.push((knowledge.entities as Record<string, unknown>[]).map((entity) => String(entity.name ?? '')).join(' '))
+  if (Array.isArray(knowledge?.facts)) parts.push((knowledge.facts as Record<string, unknown>[]).map((fact) => `${String(fact.subject ?? '')} ${String(fact.predicate ?? '')} ${String(fact.object ?? '')}`).join(' '))
   return parts.join(' ')
 }
 
@@ -1203,8 +1559,32 @@ function storyBlock(s: StorySummary, lang: Lang): string {
   return `总览：${s.overview || none}\n\n人物：\n${chars || none}\n\n情节链：\n${plot || none}\n\n伏笔：\n${fs || none}\n\n关键设定：${settings.join('、') || none}\n关键台词：${quotes.join(' / ') || none}`
 }
 
+function knowledgeBlock(knowledge: SummaryKnowledgeBase, lang: Lang): string {
+  const confirmed = confirmedKnowledge(knowledge)
+  const en = lang === 'en'
+  const entities = confirmed.entities.slice(0, 60).map((entity) => {
+    const aliases = entity.aliases.length > 0 ? ` (${entity.aliases.join(en ? ', ' : '、')})` : ''
+    return `- ${entity.name}${aliases}`
+  }).join('\n')
+  const facts = confirmed.facts.slice(0, 80).map((fact) => `- ${fact.subject} ${fact.predicate} ${fact.object}`).join('\n')
+  const none = en ? '(none)' : '（无）'
+  return en
+    ? `Verified entities:
+${entities || none}
+Verified facts:
+${facts || none}`
+    : `已验证实体：
+${entities || none}
+已验证事实：
+${facts || none}`
+}
+
 export function buildDocSummaryBlock(s: DocSummary, lang: Lang = 'zh'): string {
-  return lang === 'en' ? `【Document summary】\n${storyBlock(s, lang)}` : `【文档摘要】\n${storyBlock(s, lang)}`
+  const head = lang === 'en' ? '【Document verified memory】' : '【文档已验证记忆】'
+  const rule = lang === 'en' ? 'Only source-verified facts are included; consult original text when details are missing.' : '以下仅包含已在原文中验证的高价值事实；缺失细节时应以原文为准。'
+  return `${head}
+${rule}
+${knowledgeBlock(s.knowledge, lang)}`
 }
 
 export function buildChatSummaryBlock(s: ChatSummary, lang: Lang = 'zh'): string {
@@ -1225,17 +1605,13 @@ export function buildChatSummaryBlock(s: ChatSummary, lang: Lang = 'zh'): string
 }
 
 export function buildResourceSummaryBlock(s: ResourceSummary, name: string, lang: Lang = 'zh'): string {
-  const en = lang === 'en'
-  if (s.type === 'story') {
-    return en ? `【Resource summary: ${name}】\n${storyBlock(s, lang)}` : `【资源摘要：${name}】\n${storyBlock(s, lang)}`
-  }
-  const keyPoints = Array.isArray(s.keyPoints) ? s.keyPoints : []
-  const keyTerms = Array.isArray(s.keyTerms) ? s.keyTerms : []
-  const none = en ? '(none)' : '（无）'
-  if (en) {
-    return `【Resource summary: ${name}】\nType: ${s.docType || 'unknown'}\nOverview: ${s.overview || none}\nKey points:\n${keyPoints.map((p) => `- ${p}`).join('\n') || none}\nTerms: ${keyTerms.join(', ') || none}\nStructure: ${s.structure || none}`
-  }
-  return `【资源摘要：${name}】\n类型：${s.docType || '未知'}\n概述：${s.overview || none}\n要点：\n${keyPoints.map((p) => `- ${p}`).join('\n') || none}\n术语：${keyTerms.join('、') || none}\n结构：${s.structure || none}`
+  const head = lang === 'en' ? `【Resource verified memory: ${name}】` : `【资源已验证记忆：${name}】`
+  const type = lang === 'en' ? `Type: ${s.type}` : `类型：${s.type === 'story' ? '故事' : s.type === 'setting' ? '设定' : '其他'}`
+  const rule = lang === 'en' ? 'Only source-verified facts are included; consult original text when details are missing.' : '以下仅包含已在原文中验证的高价值事实；缺失细节时应以原文为准。'
+  return `${head}
+${type}
+${rule}
+${knowledgeBlock(s.knowledge, lang)}`
 }
 
 /** 大摘要（rollup）注入块 */

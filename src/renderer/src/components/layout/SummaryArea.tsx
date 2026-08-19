@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Eye, FlaskConical, RefreshCw, Trash2 } from 'lucide-react'
-import type { ChatSummary, ConsistencyIssue, DocSummary, ProjectSummariesOverview, ResourceSummary } from '@shared/types'
+import type { ChatSummary, ConsistencyIssue, DocSummary, ProjectSummariesOverview, ResourceDistillType, ResourceSummary } from '@shared/types'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
 import { useAppStore } from '../../store/app.store'
@@ -37,9 +37,45 @@ function chatText(s: ChatSummary): string {
 
 function resourceText(s: ResourceSummary): string {
   if (s.type === 'story') return storyText(s)
-  const keyPoints = Array.isArray(s.keyPoints) ? s.keyPoints : []
-  const keyTerms = Array.isArray(s.keyTerms) ? s.keyTerms : []
-  return `类型：${s.docType || '未知'}\n概述：${s.overview || '（无）'}\n要点：\n${keyPoints.map((p) => `- ${p}`).join('\n') || '（无）'}\n术语：${keyTerms.join('、') || '（无）'}\n结构：${s.structure || '（无）'}`
+  if (s.type === 'setting') {
+    const list = (items: string[]): string => items.map((item) => `- ${item}`).join('\n') || '（无）'
+    const entries = s.entries.map((entry) => `- ${entry.name} [${entry.category}]：${entry.description}`).join('\n') || '（无）'
+    const terms = s.terms.map((term) => `- ${term.term}：${term.definition}`).join('\n') || '（无）'
+    return `设定概览：${s.overview || '（无）'}
+
+覆盖范围：${s.scope || '（无）'}
+
+实体：
+${entries}
+
+术语：
+${terms}
+
+规则：
+${list(s.rules)}
+
+关系：
+${list(s.relationships)}
+
+时间线：
+${list(s.timeline)}
+
+约束：
+${list(s.constraints)}
+
+未决问题：
+${list(s.unresolved)}`
+  }
+  return `类型：${s.docType || '其他'}
+
+概述：${s.overview || '（无）'}
+
+核心要点：
+${s.keyPoints.map((point) => `- ${point}`).join('\n') || '（无）'}
+
+关键术语：${s.keyTerms.join('、') || '（无）'}
+
+结构：${s.structure || '（无）'}`
 }
 
 export default function SummaryArea({ projectId }: { projectId: string }): JSX.Element {
@@ -136,6 +172,21 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
     }
   }
 
+  async function regenResource(resourceId: string, type: ResourceDistillType): Promise<void> {
+    setBusy(true)
+    try {
+      const res = await api.invoke('resource:distill', { projectId, resourceId, type, force: true })
+      if (res.ok) {
+        if (res.summary?.generation.state === 'incomplete') toast.error(t('summary.incomplete'))
+        else toast.success(t('distill.ok'))
+        useAppStore.getState().bumpSummary()
+        await load()
+      } else toast.error(res.error ?? t('distill.fail'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   if (!overview) {
     return <div className="px-6 py-2 text-xs" style={{ color: 'var(--muted)' }}>{t('summary.loading')}</div>
   }
@@ -196,7 +247,7 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
         <div key={r.resourceId} className="flex items-center gap-1 text-[12px]">
           <span
             className="h-1.5 w-1.5 rounded-full"
-            style={{ background: r.generating ? 'var(--warn)' : r.stale ? 'var(--warn)' : 'var(--ok)' }}
+            style={{ background: r.generating || r.stale || r.incomplete ? 'var(--warn)' : 'var(--ok)' }}
           />
           <span className="min-w-0 flex-1 truncate" title={r.name}>
             {r.name}
@@ -205,13 +256,15 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
             ) : (
               <>
                 <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
-                  （{r.type === 'story' ? t('summary.typeStory') : t('summary.typeOther')}）
+                  （{r.type === 'story' ? t('summary.typeStory') : r.type === 'setting' ? t('summary.typeSetting') : t('summary.typeOther')}）
                 </span>
                 {r.stale && <span className="text-[10px]" style={{ color: 'var(--warn)' }}> · {t('summary.stale')}</span>}
+                {r.incomplete && <span className="text-[10px]" style={{ color: 'var(--warn)' }}> · {t('summary.incomplete')}</span>}
               </>
             )}
           </span>
           {!r.generating && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewResource(r.resourceId)} />}
+          {!r.generating && r.type && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.retryDistill')} disabled={busy} onClick={() => void regenResource(r.resourceId, r.type!)} />}
           {!r.generating && (
             <IconBtn icon={<Trash2 size={12} />} title={t('summary.undistill')} onClick={() => void runUndistill(projectId, r.resourceId).then(load)} />
           )}

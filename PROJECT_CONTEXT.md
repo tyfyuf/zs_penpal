@@ -53,9 +53,9 @@
 | --- | --- |
 | `<workspace>/app-index.json` | 项目索引 |
 | `<workspace>/<projectId>/{meta.json, docs/, chats/, summaries/, resources/, .git/}` | 项目全部数据 |
-| `<workspace>/<projectId>/summaries/docs/<docId>.json` | 文档摘要（故事拆解 + 源指纹） |
+| `<workspace>/<projectId>/summaries/docs/<docId>.json` | 文档摘要 schema v2（故事拆解 + 验证知识 + 分块结果 + 源指纹） |
 | `<workspace>/<projectId>/summaries/chats/<chatId>.json` | 对话摘要（尾部逐条 + 历史压缩区间） |
-| `<workspace>/<projectId>/summaries/resources/<resId>.json` | 资源摘要（源指纹 + 故事/通用拆解） |
+| `<workspace>/<projectId>/summaries/resources/<resId>.json` | 资源摘要 schema v2（story/setting/other + 验证知识 + 分块结果 + 源指纹） |
 | `<workspace>/<projectId>/resources/<resId>/source.bin` | Original bytes of an imported external resource; `content` is normalized to UTF-8 |
 | `<workspace>/<projectId>/summaries/rollups/<projectId>.json` | 大摘要（每 10 文档聚合，设置页管理） |
 | `<workspace>/<projectId>/summaries/vector-index/<projectId>.json` | 本地向量索引（原文分块嵌入） |
@@ -160,8 +160,8 @@ export interface SummarySourceInfo {
 // 生成工具：src/main/summary-source.ts（computeSourceInfo / isSourceStale）
 // 失效判定：指纹变化 且（原始长度变化>30% 或 规范化长度差>100 字符）→ STALE
 
-// 文档摘要 = 故事拆解 + 源指纹（不再内嵌全文快照；旧格式读取时自动迁移）
-export interface DocSummary extends StorySummary, SummarySourceInfo { updatedAt: string }
+// schema v2：文档摘要 = 故事拆解 + 验证知识 + 分块结果/生成状态 + 源指纹
+export interface DocSummary extends StorySummary, SummarySourceInfo, SummaryAnalysisMeta { updatedAt: string }
 
 // 对话摘要：尾部窗口逐条 + 历史压缩区间（增量）
 export interface ChatSummary {
@@ -171,8 +171,10 @@ export interface ChatSummary {
   updatedAt: string; lastMessageId: string; messageCount: number
 }
 
-// 资源摘要 = 源指纹 + 故事/通用拆解
-export type ResourceSummary = SummarySourceInfo & { updatedAt: string } & (StorySummary | GenericResourceSummary)
+// schema v2：资源摘要 = story/setting/other + 验证知识 + 分块结果/生成状态 + 源指纹
+export type ResourceDistillType = 'story' | 'setting' | 'other'
+export type ResourceSummary = SummarySourceInfo & SummaryAnalysisMeta & { updatedAt: string } & (StorySummary | SettingSummary | GenericResourceSummary)
+// SummaryKnowledgeBase 保存实体/事实、短证据片段与 sourceChunkId；SummaryGenerationInfo 标记 complete/incomplete。
 
 // 大摘要（rollup）：每 10 个写作文档聚合（阈值 50，设置页管理）
 export interface DocRollup { id; projectId; docIds; rangeLabel; overview; stateChanges[]; causality[]; schemaVersion; sourceFingerprints: Record<string,string>; updatedAt }
@@ -221,8 +223,8 @@ export interface ChatMeta {
 - [x] 流式对话（OpenAI 兼容、include_usage、取消、失败提示、思维链 reasoning 可视化）
 - [x] 重新生成（范围/摘要变化联动提示，不重复调用，上一版对照，告知 LLM 新增上下文）
 - [x] **三层记忆架构（docs/summary-distillation-refactor-plan-v2.md 定稿）**：
-  - [x] P0 摘要元数据：`SummarySourceInfo` 源指纹 + 三级新鲜度；DocSummary 去内嵌全文快照换指纹（旧格式读取自动迁移）；资源摘要读时惰性失效检测 + 摘要区“待更新”黄标
-  - [x] P3 生成协议：枚举/字数/负例约束 + 长文档（>2 万字）有界摘要（角色≤20/情节≤40/伏笔≤30/设定台词≤40）；自动文档摘要失败写日志，手动文档/资源/聊天路径仍不完整
+  - [x] P0 Summary metadata: SummarySourceInfo source fingerprints + freshness levels; DocSummary no longer embeds full snapshots (legacy formats are treated as absent); resource summaries use lazy stale detection + a stale indicator.
+  - [x] P3 Generation protocol: enum/length/negative constraints + schema v2 token-aware chunking, knowledge verification, hierarchical merge, and incomplete retry; document/resource paths support unchanged-chunk reuse.
   - [x] P1′ 注入：**内容相关度采样**（实体重叠+新鲜度，每类型默认最相关 10 条，替代“全部注入”）；默认激活集（`summary:defaultActive`）；注入面板**搜索框**（`summary:search` 手动激活）；首条消息冻结 = (默认采样 ∪ pending) − disabled
   - [x] P2′ 大摘要 rollup：写作文档 >50 时每 10 篇聚合成整体摘要（状态变化/因果/伏笔账本），设置页按项目管理（预览/单条重生成/无移除），三级新鲜度
   - [x] P2′ 聊天小摘要增量：尾部窗口 20 条逐条 + 历史区间压缩（触发：消息数 >40 或对话 token 估算 >60% 预算），每 10 条一个压缩区间，增量维护
@@ -271,7 +273,7 @@ export interface ChatMeta {
 
 - 2026-08-17 已提交 `1b235ef fix: harden summary structured generation`：统一 structured-task 执行器、端点/模型能力自适应、结构化输出降级、reasoning 控制、严格校验、自适应重试和逐次日志。
 - 用户已确认摘要/蒸馏系统当前运转正常；此前“硝烟粉笔灰”稳定失败与“龙常剧情书”概率失败样本用于根因验证，失败文档目录已 gitignore，禁止入库。
-- 仍可继续增强但不属于当前故障修复：超长文档分级提取、能力覆盖 UI/状态历史、更多供应商真实端点回归矩阵。
+- Further improvements outside the current fix: real-corpus accuracy/performance regression for summary v2, capability coverage UI/history, and more provider endpoint regression tests.
 - 完整证据与方案：`docs/summary-distillation-failure-root-cause-and-solution-2026-08-17.md`。
 
 ### 6.3 宿主驱动原文检索（已实施，待真实端点验收）
@@ -305,7 +307,7 @@ export interface ChatMeta {
 - **向量索引尚未自动刷新**：索引已记录每个文档/资源的源指纹，设置页会显示 indexed/stale/not-indexed 并可手动重建；正文修改后尚不会自动或增量刷新。
 - **大摘要规划仍可能增加一次 LLM 调用**：仅在摘要开启、非重新生成且项目存在 rollup 时执行 provider-neutral 结构化任务；无 rollup 时零调用。
 - **中文模型 token 估算为近似**：DeepSeek/GLM/Qwen 按 ~1.1 token/字（`estimateInputTokens`），可能边界误判（可调大上下文上限）。
-- **旧版本摘要格式**：三字段版/单标签版读取时按无效丢弃并重新生成；v1 带全文快照版读取时自动迁移为指纹（`file.service.ts readDocSummary`）。
+- **Legacy summary formats**: three-field, single-tag, and v1 snapshot formats are discarded as invalid; v2 reads require knowledge, generation, and chunkResults. No migration or automatic rebuild is performed; users regenerate manually (file.service.ts).
 - **重新生成“上一版回答”仅在内存**：不持久化，重开窗口后对照块消失。
 - **对话摘要重新生成的 UI 刷新用 2.5s 定时器兜底**（`SummaryArea regenChat`），正常由 `summary:status` 事件驱动。
 - **dev 模式关命令行窗口会强杀进程**：自动提交可能丢失；请用窗口 × 正常关闭或“立即提交”按钮。
@@ -362,7 +364,11 @@ export interface ChatMeta {
 
 ### 7.6 蒸馏判定状态机（`summary.service.ts distillResource`）
 
-`heuristicClassify`（零成本，极保守）→ 弱信号走 `classifyByLlm`（头/中/尾三段采样，`{type, confidence, reasons}`）→ 置信度 <0.8 返回 `uncertain`（用户确认后 force）→ 与所选不符返回 `mismatch` → 生成对应摘要（故事/通用，均带源指纹）。所有摘要 LLM 调用走 `enqueueLlm` 全局串行队列（并发 1）；空结果/`finish_reason=length` 会用相同参数重试一次；>2 万字符只切换有界 prompt 和 8192 输出预算，尚未实现分级提取。
+`heuristicClassify`（零成本、极保守）→ 弱信号走 `classifyByLlm`（头/中/尾三段采样，`{type, confidence, reasons}`）→ 分类器只提供首次建议，用户确认后 `force` 严格遵循手动选择。`setting` 作为独立类型，对世界观、势力、术语、规则、关系、时间线和约束使用专用结构。
+
+文档/资源摘要使用 token-aware 标题/段落/句子优先分块，每块分别抽取 `SummaryKnowledgeBase` 和类型摘要，再按输入预算递归合并为文档级摘要。名称、别名、事实和短证据必须能在当前原文块核验；别名只在原文明示关系时保留。普通 LLM 上下文只注入 `confirmed` 高价值实体和事实，不注入证据、块 ID 或未验证的 overview。
+
+块指纹支持未变块复用；部分块或合并失败时保留已完成块和确定性合并结果，写入 `generation.state=incomplete`，摘要区只显示“资源蒸馏未完成，可重试”和文档级预览，不暴露分块细节。旧 schema 不迁移、不自动全量重建，需用户手动重新生成。
 
 ### 7.7 一致性扫描（`summary.service.ts scanConsistency`）
 
@@ -403,7 +409,7 @@ export interface ChatMeta {
 | 债务 | 现状 | 计划 |
 | --- | --- | --- |
 | 本地嵌入真实语料验收 | BGE/回退/打包链路已接通并通过隔离烟测 | 用实际小说项目比较语义命中；据结果决定是否调分块、查询指令、阈值或模型 |
-| 摘要/蒸馏 P0 后续 | 兼容层已实施，当前用户回归正常 | 需要时继续做超长文档分级提取、能力覆盖 UI 和更多供应商回归 |
+| 摘要/蒸馏 v2 真实语料验收 | schema v2、setting、原文验证和分级摘要已实施 | 用实际故事/设定/超长资源评估准确性、耗时和 incomplete 重试；据结果调整块/输出预算 |
 | 向量索引自动刷新 | 已有源指纹、逐文件状态和手动重建；正文修改可显示 stale | 增加保存后增量/防抖重建 |
 | 无应用图标 / 无签名 | 默认图标；`signAndEditExecutable=false` | 图标与证书就绪后补齐 |
 | 主进程错误文案中文 | 界面 i18n 完成 | 计划在语言设置完善时统一 |
@@ -412,7 +418,7 @@ export interface ChatMeta {
 | 摘要区对话摘要刷新兜底定时器 | setTimeout(2.5s) | 事件驱动已覆盖，可后续移除 |
 | “上一版回答”对照不持久化 | 仅内存 | 如需历史对照，给 ChatMessage 增加 prevContent |
 | 沙箱缓存目录占用仓库空间 | 三个缓存目录 | 已 gitignore；仓库迁移可删除后重装 |
-| 旧摘要格式只读不迁移 | 三字段/单标签版丢弃重生成；快照版自动迁移指纹 | 无进一步迁移计划 |
+| 旧摘要 schema | v2 仅接受带 knowledge/generation/chunkResults 的当前格式；旧格式视为未生成 | 不迁移、不自动重建，由用户手动重新生成 |
 | 大摘要规划额外 LLM 调用 | 仅存在 rollup 时每个非重新生成消息一次结构化调用 | 可增加用户开关或规则优先，继续降低延迟 |
 | 工具能力缓存 | 当前按 baseURL + model 仅保存在进程内 | 持久化能力状态并提供重新探测入口 |
 | 混合召回阈值 | 当前返回 top-k 正分结果，未设最低相关性阈值 | 用真实设定集调分并增加低相关性抑制/多样性重排 |

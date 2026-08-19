@@ -3,15 +3,17 @@ import { toast } from '../store/toast.store'
 import { chooseOption, confirmDialog } from '../store/dialog.store'
 import { useAppStore } from '../store/app.store'
 import { tGlobal } from '../i18n'
+import type { ResourceDistillType } from '@shared/types'
 
 export async function runDistill(projectId: string, resourceId: string): Promise<void> {
   try {
     const type = await chooseOption(tGlobal('distill.chooseType'), [
       { value: 'story', label: tGlobal('distill.story') },
+      { value: 'setting', label: tGlobal('distill.setting') },
       { value: 'other', label: tGlobal('distill.other') }
     ])
     if (!type) return
-    await doDistill(projectId, resourceId, type as 'story' | 'other', false)
+    await doDistill(projectId, resourceId, type as ResourceDistillType, false)
   } catch (err) {
     toast.error((err as Error).message)
   }
@@ -19,31 +21,35 @@ export async function runDistill(projectId: string, resourceId: string): Promise
   useAppStore.getState().bumpSummary()
 }
 
+function typeLabel(type: ResourceDistillType | undefined): string {
+  if (type === 'story') return tGlobal('distill.story')
+  if (type === 'setting') return tGlobal('distill.setting')
+  return tGlobal('distill.other')
+}
+
 async function doDistill(
   projectId: string,
   resourceId: string,
-  type: 'story' | 'other',
+  type: ResourceDistillType,
   force: boolean
 ): Promise<void> {
   const res = await api.invoke('resource:distill', { projectId, resourceId, type, force })
   if (res.ok) {
-    toast.success(tGlobal('distill.ok'))
+    if (res.summary?.generation.state === 'incomplete') toast.error(tGlobal('summary.incomplete'))
+    else toast.success(tGlobal('distill.ok'))
     return
   }
+  const detected = typeLabel(res.detectedType)
+  const chosen = typeLabel(type)
+  const reasons = res.reasons?.length ? `（${res.reasons.join('；')}）` : ''
   if (res.mismatch) {
-    const detected = res.detectedType === 'story' ? tGlobal('distill.story') : tGlobal('distill.other')
-    const reasons = res.reasons?.length ? `\n${res.reasons.join('；')}` : ''
-    toast.error(tGlobal('distill.mismatch', { type: detected, reasons }))
+    const proceed = await confirmDialog(tGlobal('distill.mismatch', { type: detected, chosen, reasons }))
+    if (proceed) await doDistill(projectId, resourceId, type, true)
     return
   }
   if (res.uncertain) {
-    const detected = res.detectedType === 'story' ? tGlobal('distill.story') : tGlobal('distill.other')
-    const chosen = type === 'story' ? tGlobal('distill.story') : tGlobal('distill.other')
-    const reasons = res.reasons?.length ? `（${res.reasons.join('；')}）` : ''
     const proceed = await confirmDialog(tGlobal('distill.uncertain', { type: detected, chosen, reasons }))
-    if (proceed) {
-      await doDistill(projectId, resourceId, type, true)
-    }
+    if (proceed) await doDistill(projectId, resourceId, type, true)
     return
   }
   toast.error(res.error ?? tGlobal('distill.fail'))

@@ -22,6 +22,7 @@ import type {
   ProjectSummariesOverview,
   RecoveryState,
   ResourceMeta,
+  ResourceDistillType,
   ResourceSummary,
   TextEncodingInfo,
   StreamDonePayload,
@@ -219,7 +220,7 @@ export interface IpcApi {
   }
   [IPC.resourceDelete]: { req: { resourceId: string; projectId: string }; res: void }
   [IPC.resourceDistill]: {
-    req: { projectId: string; resourceId: string; type: 'story' | 'other'; force?: boolean }
+    req: { projectId: string; resourceId: string; type: ResourceDistillType; force?: boolean }
     res: DistillResult
   }
   [IPC.resourceUndistill]: { req: { projectId: string; resourceId: string }; res: void }

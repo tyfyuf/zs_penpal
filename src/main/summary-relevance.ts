@@ -93,6 +93,20 @@ export function extractSummaryEntities(s: unknown): string[] {
   }
   push(o.keySettings)
   push(o.keyTerms)
+  if (Array.isArray(o.entries)) for (const entry of o.entries as Record<string, unknown>[]) {
+    const name = String(entry.name ?? '').trim().toLowerCase()
+    if (name) ents.add(name)
+  }
+  if (Array.isArray(o.terms)) for (const term of o.terms as Record<string, unknown>[]) {
+    const name = String(term.term ?? '').trim().toLowerCase()
+    if (name) ents.add(name)
+  }
+  const knowledge = o.knowledge as Record<string, unknown> | undefined
+  if (Array.isArray(knowledge?.entities)) for (const entity of knowledge.entities as Record<string, unknown>[]) {
+    if (entity.status !== 'confirmed') continue
+    const name = String(entity.name ?? '').trim().toLowerCase()
+    if (name) ents.add(name)
+  }
   return [...ents]
 }
 

@@ -20,7 +20,7 @@ import type {
 } from '@shared/types'
 import { getConfigCached } from './config.service'
 import { appendJsonl, atomicWrite, atomicWriteJson, newId, nowIso, readJson, readJsonl } from '../util'
-import { computeSourceInfo } from '../summary-source'
+import { computeSourceInfo, SUMMARY_SCHEMA_VERSION } from '../summary-source'
 import { assertTextIntegrity, decodeTextBuffer, readDecodedTextFile } from './text-decoding.service'
 
 // ---------------------------------------------------------------------------
@@ -693,23 +693,11 @@ export async function readSnapshot(projectId: string, chatId: string, snapshotId
 // 摘要读写
 // ---------------------------------------------------------------------------
 
-/** 读取文档摘要；旧格式（三字段版）视为无摘要；v1 内嵌全文快照版迁移为指纹 */
+/** 读取文档摘要；仅接受当前 schema，旧格式视为未生成。 */
 export async function readDocSummary(projectId: string, docId: string): Promise<DocSummary | null> {
-  const s = await readJson<DocSummary & { snapshot?: string; snapshotLength?: number }>(
-    docSummaryPath(projectId, docId)
-  )
-  if (!s || !Array.isArray(s.characters)) return null
-  // 旧格式迁移：剥离内嵌全文快照，换为源指纹（省约一半存储）
-  if (!s.sourceFingerprint && typeof s.snapshot === 'string') {
-    const { snapshot: _snap, snapshotLength: _len, ...rest } = s
-    const migrated: DocSummary = {
-      ...rest,
-      ...computeSourceInfo(s.snapshot),
-      updatedAt: s.updatedAt ?? nowIso()
-    }
-    await writeDocSummary(projectId, docId, migrated)
-    return migrated
-  }
+  const s = await readJson<DocSummary>(docSummaryPath(projectId, docId))
+  if (!s || s.schemaVersion !== SUMMARY_SCHEMA_VERSION) return null
+  if (!Array.isArray(s.characters) || !s.knowledge || !s.generation || !Array.isArray(s.chunkResults)) return null
   return s
 }
 
@@ -729,7 +717,10 @@ export async function writeChatSummary(projectId: string, chatId: string, summar
 }
 
 export async function readResourceSummary(projectId: string, resourceId: string): Promise<ResourceSummary | null> {
-  return readJson<ResourceSummary>(resourceSummaryPath(projectId, resourceId))
+  const s = await readJson<ResourceSummary>(resourceSummaryPath(projectId, resourceId))
+  if (!s || s.schemaVersion !== SUMMARY_SCHEMA_VERSION) return null
+  if (!s.knowledge || !s.generation || !Array.isArray(s.chunkResults)) return null
+  return s
 }
 
 export async function writeResourceSummary(projectId: string, resourceId: string, summary: ResourceSummary): Promise<void> {

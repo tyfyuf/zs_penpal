@@ -9,7 +9,7 @@ import type { SummarySourceInfo } from '@shared/types'
 //   这是「惰性检测 + 黄标」的信号源，非精确 diff；极小改动不打扰用户。
 // ---------------------------------------------------------------------------
 
-export const SUMMARY_SCHEMA_VERSION = 1
+export const SUMMARY_SCHEMA_VERSION = 2
 
 /** 规范化：去掉空白与各类标点/符号，仅保留 CJK 与字母数字 */
 export function normalizeForFingerprint(content: string): string {
