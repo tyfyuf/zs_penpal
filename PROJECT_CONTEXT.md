@@ -4,6 +4,7 @@
 > 产品需求：`writing-agent-prd-v1.3.md`；技术选型：`writing-agent-tech-stack-v1.0.md`；
 > 拆解指导（需求参考，非运行时）：`拆解指导文档/story-decomposition-guide.md`、`content-decomposition-guide-v1.0.md`。
 > 架构定稿：`docs/summary-distillation-refactor-plan-v2.md`（三层记忆架构，已按此实施）。
+> **当前代码基线（2026-08-21）**：当前分支为 `master`，HEAD 为 `193f6a8`（`feat: add verified hierarchical resource distillation`）。这是用户指定的干净回退点；后续关于资源蒸馏 Job/Worker 后台化、分步 core/detail 调度、minimal 防截断回退等实验提交均已回退，不属于当前代码。新会话应以实际代码和本节状态为准，不要假设这些后续能力仍存在。
 
 ---
 
@@ -179,7 +180,7 @@ export type ResourceSummary = SummarySourceInfo & SummaryAnalysisMeta & { update
 // 大摘要（rollup）：每 10 个写作文档聚合（阈值 50，设置页管理）
 export interface DocRollup { id; projectId; docIds; rangeLabel; overview; stateChanges[]; causality[]; schemaVersion; sourceFingerprints: Record<string,string>; updatedAt }
 
-// 向量索引（本地特征哈希嵌入，原文分块）
+// 向量索引（本地 BGE 神经嵌入优先，特征哈希回退，原文分块）
 export interface VectorIndex { schemaVersion; embedModel; chunks: VectorChunk[]; updatedAt }
 
 // “本次记忆”透明卡（streamDone.memory）
@@ -224,7 +225,7 @@ export interface ChatMeta {
 - [x] 重新生成（范围/摘要变化联动提示，不重复调用，上一版对照，告知 LLM 新增上下文）
 - [x] **三层记忆架构（docs/summary-distillation-refactor-plan-v2.md 定稿）**：
   - [x] P0 Summary metadata: SummarySourceInfo source fingerprints + freshness levels; DocSummary no longer embeds full snapshots (legacy formats are treated as absent); resource summaries use lazy stale detection + a stale indicator.
-  - [x] P3 Generation protocol: enum/length/negative constraints + schema v2 token-aware chunking, knowledge verification, hierarchical merge, and incomplete retry; document/resource paths support unchanged-chunk reuse.
+  - [x] P3 Generation protocol: enum/length/negative constraints + schema v2 token-aware chunking, knowledge verification, hierarchical merge, incomplete checkpoint and retry; document/resource paths support unchanged-chunk reuse. Resource distillation remains a synchronous main-process IPC operation in this baseline.
   - [x] P1′ 注入：**内容相关度采样**（实体重叠+新鲜度，每类型默认最相关 10 条，替代“全部注入”）；默认激活集（`summary:defaultActive`）；注入面板**搜索框**（`summary:search` 手动激活）；首条消息冻结 = (默认采样 ∪ pending) − disabled
   - [x] P2′ 大摘要 rollup：写作文档 >50 时每 10 篇聚合成整体摘要（状态变化/因果/伏笔账本），设置页按项目管理（预览/单条重生成/无移除），三级新鲜度
   - [x] P2′ 聊天小摘要增量：尾部窗口 20 条逐条 + 历史区间压缩（触发：消息数 >40 或对话 token 估算 >60% 预算），每 10 条一个压缩区间，增量维护
@@ -237,14 +238,14 @@ export interface ChatMeta {
   - [x] 附件去重：写作文档“附加到对话”（读当前内容）+ 与全文注入去重（`ChatAttachment.docId` / `StreamRequest.docIds`，“关联文档全文已打开，无需上传”提示）
 - [x] 文档摘要 = 故事拆解（预算 60% 一次调用，超限拒绝提示；黄点生成中→绿点；失败写日志）
 - [x] 对话摘要（关闭窗口后台生成，逐条+区间、变化检测、手动重新生成）
-- [x] 资源蒸馏（启发式预筛+模型判定+置信度 0.8 兜底+不确定确认+force；取消蒸馏即移除；源指纹失效检测）
+- [x] 资源蒸馏（启发式预筛+模型判定+置信度 0.8 兜底+不确定确认+force；`story/setting/other`；token-aware 分块、知识抽取/原文验证、分层合并、源指纹与未完成状态）——当前仍在主进程同步执行
 - [x] 注入配置（设置页按对话类型勾选）+ 每对话开关面板（冻结/锁定/pending 机制）
 - [x] Token 用量（按月/按小时/lifetime，总消耗+摘要标题两条折线；标题生成计入 summary 来源）
 - [x] Git 版本管理（每项目一仓库、自动提交、版本历史、回滚、身份自动补齐、手动提交按钮）
 - [x] 导出（单文档 md/txt；项目 Zip 选项）
 - [x] 工作目录迁移（物理复制含 .git、校验、原子生效、EPERM 重试、成功同步界面）
 - [x] 异常退出恢复（恢复标记+启动提示）
-- [x] 错误日志基础设施（userData/logs，按天、保留 7 天，主进程/IPC/渲染层覆盖；自动文档摘要会落日志，手动文档/资源蒸馏/聊天摘要尚未完整接入）
+- [x] 错误与审计日志基础设施（userData/logs，按天、保留 7 天；通用错误、结构化摘要尝试、向量事件和工具协议元数据分开记录；不记录 API Key、原文、查询词或向量）
 - [x] 设置（API 配置+联通测试+模型列表获取下拉/手动兜底、语言 zh/en、自动保存、摘要、大摘要、归档回收站、版本、用量）
 - [x] i18n（界面文案 zh/en 完整双语；语言切换联动 LLM 输出语言与摘要语言）
 - [x] 提示词风格：理性务实（结论先行、少客套）
@@ -254,28 +255,35 @@ export interface ChatMeta {
 
 ## 6. 待办事项与已知问题
 
-### 6.1 本地嵌入模型（已接线，待真实语料验收）
+### 6.1 本地嵌入模型（已接线；增量索引已实现，待真实语料验收）
 
 2026-08-17 已完成 Windows x64 CPU 版内置语义嵌入接线：
 
 - `neural-embed.service.ts` 在 Electron 主进程动态加载 `@huggingface/transformers`，仅允许本地模型；开发环境读取 `<repo>/models/bge-small-zh-onnx/`，安装包读取 `process.resourcesPath/models/bge-small-zh-onnx/`。
 - 模型为 `bge-small-zh-v1.5` FP32 ONNX，CLS pooling + L2 normalize，512 维；查询加官方中文检索指令，文档块不加指令；batch size 4。
 - 神经路径使用模型 tokenizer 分块：内容上限 480 token、重叠 48 token，优先句末/换行边界并保留原文子串；特征哈希路径继续使用 800 字/重叠 100 字。
-- 向量索引升级为 schema v2；记录 `embedModel`，后端/schema/维度不一致时全量重建。同一索引绝不混用 512 维神经向量与 256 维哈希向量。
+- 向量索引使用 schema v3；记录 `embedModel` 和每个文档/资源的源指纹，后端/schema/维度不一致时全量重建。同一索引绝不混用 512 维神经向量与 256 维哈希向量。
 - 模型缺失、加载失败、推理失败或输出形状异常时，废弃神经构建中间结果并从头使用 `fnv-ngram-256`；对话与记忆规划不得因此崩溃。失败后 30 秒冷却，应用退出时主动释放 pipeline。
 - `electron-vite` 已外部化 Transformers.js 与 ONNX Runtime；builder 通过 `extraResources` 分发六个模型文件，原生 `.node`/DLL 解包，裁掉非 Windows x64、DirectML 和 ORT Web WASM 等无关资产。模型权重仍不进入 Git/asar。
 - 打包前运行 `npm run verify:embedding-model`，校验必要文件、配置值及 model/tokenizer SHA-256；第三方许可说明见 `THIRD_PARTY_NOTICES.md`。
-- 本地验证通过：Node 推理、Electron 33.4.11 原生推理、裁剪后 `app.asar` + `resources` 推理、schema v1→v2 重建、并发 SingleFlight、模型缺失哈希回退、恢复模型后重建、空项目稳定索引、实际语义查询。`dist/win-unpacked` 约 427.7 MiB；正式 `npm run dist` 已成功生成 NSIS 安装器（约 135.0 MiB）。
+- 本地验证通过：Node 推理、Electron 33.4.11 原生推理、裁剪后 `app.asar` + `resources` 推理、schema v1→v3 重建、并发 SingleFlight、模型缺失哈希回退、恢复模型后重建、空项目稳定索引、实际语义查询。`dist/win-unpacked` 约 427.7 MiB；正式 `npm run dist` 已成功生成 NSIS 安装器（约 135.0 MiB）。
 
-尚未完成且不阻塞本轮接线的事项：真实用户语料召回质量验收；文档/资源修改后的索引 freshness 自动更新；完整 NSIS 安装/卸载与低配机器内存耗时验收；非 Windows x64 平台适配。详见 `docs/neural-embedding-implementation-2026-08-17.md`。
+当前向量索引能力：
 
-### 6.2 摘要/蒸馏兼容性 P0（已实施并完成当前回归）
+- 全局“生成/刷新索引”只重建新增或源指纹变化的文件，并自动移除已删除/回收站文件的向量；后端切换或 schema/维度不兼容时才全量重建。
+- 文档/资源保存、删除、恢复和编码修复路径会排队异步的单源同步/移除；同一项目通过操作序列号丢弃过期操作，避免竞态覆盖。
+- 设置页展示项目内各文档/资源的 `indexed`、`stale`、`not-indexed`、`encoding-error` 状态，并为每个文件提供单独重建/生成按钮；索引审计写入 `vector-events-YYYY-MM-DD.jsonl`，不记录查询词、原文或项目标识。
 
-- 2026-08-17 已提交 `1b235ef fix: harden summary structured generation`：统一 structured-task 执行器、端点/模型能力自适应、结构化输出降级、reasoning 控制、严格校验、自适应重试和逐次日志。
-- 用户已确认摘要/蒸馏系统当前运转正常；此前“硝烟粉笔灰”稳定失败与“龙常剧情书”概率失败样本用于根因验证，失败文档目录已 gitignore，禁止入库。
-- Further improvements outside the current fix: real-corpus accuracy/performance regression for summary v2, capability coverage UI/history, and more provider endpoint regression tests.
-- 完整证据与方案：`docs/summary-distillation-failure-root-cause-and-solution-2026-08-17.md`。
+尚未完成：真实用户语料召回质量验收；完整 NSIS 安装/卸载与低配机器内存耗时验收；非 Windows x64 平台适配。详见 `docs/neural-embedding-implementation-2026-08-17.md`。
 
+### 6.2 摘要/蒸馏当前基线（`193f6a8`；问题未解决）
+
+- `1b235ef` 提供的 `structured-generation.service.ts` 仍在当前基线中：统一结构化任务执行器、端点/模型能力自适应、JSON 输出降级、DeepSeek 官方端点 reasoning 控制、严格解析校验、自适应参数重试和隐私审计日志。
+- `193f6a8` 的资源蒸馏是“丰富分层摘要”路径：token-aware 分块；每块分别执行知识抽取与类型摘要；名称、别名、事实和短证据做原文核验；完成块再递归分层合并；按源指纹复用未变化块；失败块与合并失败写入 `generation.state=incomplete`，保留可预览的已完成部分。
+- 当前资源蒸馏调用仍由 `resource:distill` IPC 直接等待 `summary.service.ts` 在 Electron 主进程执行。没有 Job 队列、Worker 隔离、分步 core/detail 调度、并发任务池或 minimal schema fallback；长文档和大 JSON 结构化输出可能使窗口长时间无响应，也可能因模型返回截断而稳定失败。
+- 最新用户回归中，重新构建并启动后测试 Qwen 与 DeepSeek，资源蒸馏仍报告稳定失败。该结果是当前已知未解决问题，不能把 2026-08-17 的“兼容层已实现”误写成“资源蒸馏已通过所有模型回归”。下一步应先读取 `<userData>/logs/summary-attempts-YYYY-MM-DD.jsonl` 和通用错误日志，再决定新的协议，不应继续要求用户重复无效的 build/start 测试。
+- 用户已明确放弃并回退后续实验方案；以下提交不属于当前基线：`75400f2`（资源蒸馏后台化）、`06bbf0f`（Worker 隔离）、`433a47b`（独立可恢复任务）、`20041ed`（摘要注入修复）、`92bcf81`（分步 fallback），以及其后的回退/重做尝试。不要在新会话中假设这些文件或能力存在。
+- 真实语料准确性、性能、截断和多 Provider 回归仍是 P0 未完成项。完整历史根因与方案记录见 `docs/summary-distillation-failure-root-cause-and-solution-2026-08-17.md`；其中后续“实施更新”不能覆盖当前回退状态。
 ### 6.3 宿主驱动原文检索（已实施，待真实端点验收）
 
 - 首次检索改为宿主自动执行，不再依赖模型输出 `vectorQuery`；关闭摘要、重新生成和无工具模型均可检索。
@@ -304,9 +312,11 @@ export interface ChatMeta {
 
 ### 6.5 已知边界 / 未修复项（出现路径）
 
-- **向量索引尚未自动刷新**：索引已记录每个文档/资源的源指纹，设置页会显示 indexed/stale/not-indexed 并可手动重建；正文修改后尚不会自动或增量刷新。
+- **向量索引异步同步的可见延迟**：保存/删除/恢复会排队单源同步或移除，设置页可显示 stale/not-indexed 并手动触发；队列失败不会阻断编辑，但需要通过索引日志或再次操作恢复。
 - **大摘要规划仍可能增加一次 LLM 调用**：仅在摘要开启、非重新生成且项目存在 rollup 时执行 provider-neutral 结构化任务；无 rollup 时零调用。
-- **中文模型 token 估算为近似**：DeepSeek/GLM/Qwen 按 ~1.1 token/字（`estimateInputTokens`），可能边界误判（可调大上下文上限）。
+- **资源蒸馏仍可能阻塞主进程**：当前 `resource:distill` 是同步 IPC；大文档的分块知识抽取、类型摘要和分层合并会长时间占用主进程。后台 Job/Worker 已明确回退，后续需重新设计而非直接恢复旧实验。
+- **摘要结构化输出仍有截断风险**：每块知识抽取与类型摘要均需要完整 JSON；不同 OpenAI-compatible 端点的真实 completion 上限和 reasoning 行为不一致，现有一次 compact 重试不能保证成功。
+- **中文模型 token 估算为近似**：DeepSeek/GLM/Qwen 按 ~1.1 token/字（`estimateInputTokens`），可能边界误判。
 - **Legacy summary formats**: three-field, single-tag, and v1 snapshot formats are discarded as invalid; v2 reads require knowledge, generation, and chunkResults. No migration or automatic rebuild is performed; users regenerate manually (file.service.ts).
 - **重新生成“上一版回答”仅在内存**：不持久化，重开窗口后对照块消失。
 - **对话摘要重新生成的 UI 刷新用 2.5s 定时器兜底**（`SummaryArea regenChat`），正常由 `summary:status` 事件驱动。
@@ -362,14 +372,13 @@ export interface ChatMeta {
 - 尾部窗口 `CHAT_TAIL_WINDOW(20)` 条逐条摘要（每次只重算尾部）；窗口之前的历史在 `CHAT_COMPACT_THRESHOLD(40)` 或 token 超预算 60% 时按 `CHAT_COMPACT_BATCH(10)` 压缩成非重叠区间（增量追加，已压缩区间复用）。
 - 注入块 `buildChatSummaryBlock` 含“历史（已压缩）+ 最近”两段。
 
-### 7.6 蒸馏判定状态机（`summary.service.ts distillResource`）
+### 7.6 蒸馏判定与分层摘要（`summary.service.ts distillResource`）
 
 `heuristicClassify`（零成本、极保守）→ 弱信号走 `classifyByLlm`（头/中/尾三段采样，`{type, confidence, reasons}`）→ 分类器只提供首次建议，用户确认后 `force` 严格遵循手动选择。`setting` 作为独立类型，对世界观、势力、术语、规则、关系、时间线和约束使用专用结构。
 
-文档/资源摘要使用 token-aware 标题/段落/句子优先分块，每块分别抽取 `SummaryKnowledgeBase` 和类型摘要，再按输入预算递归合并为文档级摘要。名称、别名、事实和短证据必须能在当前原文块核验；别名只在原文明示关系时保留。普通 LLM 上下文只注入 `confirmed` 高价值实体和事实，不注入证据、块 ID 或未验证的 overview。
+进入生成后，`splitSourceByTokenBudget` 按标题/段落/句子优先切块。对每个未复用块，当前实现按顺序执行一次 `SummaryKnowledgeBase` 抽取和一次类型摘要，再由本地规则做原文验证/净化；随后按输入预算分组，递归执行结构化合并。当前不并发、不后台隔离，也没有 minimal 档；输出被截断或任一块失败时会进入 `incomplete`。
 
-块指纹支持未变块复用；部分块或合并失败时保留已完成块和确定性合并结果，写入 `generation.state=incomplete`，摘要区只显示“资源蒸馏未完成，可重试”和文档级预览，不暴露分块细节。旧 schema 不迁移、不自动全量重建，需用户手动重新生成。
-
+名称、别名、事实和短证据必须能在当前原文块核验；别名只在原文明示关系时保留。普通 LLM 上下文只注入 `confirmed` 高价值实体和事实，不注入证据、块 ID 或未验证的 overview。块指纹支持未变块复用；checkpoint 会把已完成块和确定性预览写回摘要文件，旧 schema 不迁移、不自动全量重建，需用户手动重新生成。
 ### 7.7 一致性扫描（`summary.service.ts scanConsistency`）
 
 纯规则、零 LLM：R1 别名冲突（两角色名字互为别名或别名交集，error 红标）+ R4 摘要漂移（复用 `checkResourceSummaryStale`，advisory 黄标），摘要区“一致性提示”分组展示，只提示不自动改。
@@ -441,31 +450,34 @@ export interface ChatMeta {
 
 ---
 
-## 11. 近期提交记录（本会话）
+## 11. 当前基线与近期提交记录
+
+当前仓库状态（交接时核对）：
+
+```text
+branch: master
+HEAD: 193f6a8 feat: add verified hierarchical resource distillation
+working tree: clean（交接文档本次修改提交后应再次确认）
+```
+
+当前历史中与本次交接最相关的提交（从新到旧）：
 
 ```
+193f6a8 feat: add verified hierarchical resource distillation
+6f4a3bf fix: preserve chat state across tab switches
+8a39ac3 fix: restore chat auto scroll
+186b4bd fix: restore visible chat streaming and memory cards
+4302af8 fix: harden LLM tool-call streaming
+83059d2 fix: decode legacy text encodings before indexing
+8887558 feat: make project retrieval host-driven with tool fallback
 62ccb0c feat: expose vector index and retrieval traces
 61eebf7 feat: bundle local neural embeddings
 1b235ef fix: harden summary structured generation
-eecf1d6 保留新窗口现状报告: 摘要/蒸馏生成机制梳理
-a4423a6 重写交接文档: 三层记忆架构新变化+摘要遗留问题+模型待接线+交接要点
-9d501e3 加 bge 转 onnx 脚本
-bfc2782 修复: 长文档有界摘要防截断 + 摘要失败写日志 + 向量检索改为 LLM 记忆规划自动调用(移除按钮)
-51747be 侧边栏瘦身: 归档/回收站/项目回收站迁移到设置页
-da81358 P1 附件去重: 写作文档附加到对话 + 与全文注入去重
-9017a1b P4 一致性扫描: R1 别名冲突 + R4 摘要漂移
-c733dc3 P7+P6: C 向量门(记忆卡向量检索入口)
-a7657ca P6 本地向量检索(特征哈希嵌入原文分块)
-f5ef000 P7: B 两段式记忆菜单 + 透明“本次记忆”卡
-bf863d6 P2 聊天压缩补 60% token 预算触发
-39237ca P2 聊天小摘要增量压缩
-105ff0b P2 大摘要 rollup
-c170da5 P1 注入搜索框 + 默认激活集冻结修复
-6a4de51 P0+P3+P1核心: 源指纹/新鲜度、生成协议、相关度采样
+bfc2782 fix: long-document bounded summary / failure logging / host-driven retrieval
+9017a1b P4 consistency scan
+c733dc3 P7+P6 vector retrieval entry
 ```
 
-> 交接提醒：`research/`、`BAAI--bge-small-zh-v1.5/`、`models/`、`失败文档/`、各缓存与构建输出均已 gitignore，**不要**将其加入 Git。
+> **回退记录**：`75400f2`、`06bbf0f`、`433a47b`、`20041ed`、`92bcf81` 及其后续实验/重做提交不在当前历史中；不要从旧交接文档复制它们的文件名、IPC 或“已完成”状态。模型、缓存、失败样本和构建输出继续保持 gitignore，不要加入 Git。
 
-## 2026-08-17 implementation handoff: summary/distillation P0
-
-The provider-neutral structured generation compatibility layer is implemented and currently passes user regression. The bundled neural embedding work was subsequently authorized and implemented on 2026-08-17; see §6.1 and `docs/neural-embedding-implementation-2026-08-17.md`.
+> **交接提醒**：新会话的第一步应读取本文件、运行 `git status --short` 与 `git log --oneline -15`，确认仍在 `193f6a8` 基线；然后直接检查当前日志和代码，优先处理摘要/蒸馏未解决问题。不要先让用户重复 `npm run build` / `npm run start`，除非已有新的代码改动或日志证据表明构建产物过期。
