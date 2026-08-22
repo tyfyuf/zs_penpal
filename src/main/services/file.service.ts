@@ -87,6 +87,9 @@ function chatSummaryPath(projectId: string, chatId: string): string {
 function resourceSummaryPath(projectId: string, resourceId: string): string {
   return join(summariesDir(projectId), 'resources', `${resourceId}.json`)
 }
+function settingDistillationCheckpointPath(projectId: string, resourceId: string): string {
+  return join(summariesDir(projectId), 'resources', `${resourceId}.setting-v2-checkpoint.json`)
+}
 function rollupsPath(projectId: string): string {
   return join(summariesDir(projectId), 'rollups', `${projectId}.json`)
 }
@@ -579,6 +582,7 @@ export async function replaceResourceBytes(
   await writeFile(resourceSourcePath(projectId, resourceId), Buffer.from(data))
   await atomicWriteJson(resourceMetaPath(projectId, resourceId), next)
   await rm(resourceSummaryPath(projectId, resourceId), { force: true })
+  await rm(settingDistillationCheckpointPath(projectId, resourceId), { force: true })
   return next
 }
 
@@ -586,6 +590,7 @@ export async function deleteResource(projectId: string, resourceId: string): Pro
   await rm(resourceDir(projectId, resourceId), { recursive: true, force: true })
   // 资源删除 → 其摘要一并移除（资源摘要生命周期）
   await rm(resourceSummaryPath(projectId, resourceId), { force: true })
+  await rm(settingDistillationCheckpointPath(projectId, resourceId), { force: true })
 }
 
 /**
@@ -729,6 +734,19 @@ export async function writeResourceSummary(projectId: string, resourceId: string
 
 export async function removeResourceSummary(projectId: string, resourceId: string): Promise<void> {
   await rm(resourceSummaryPath(projectId, resourceId), { force: true })
+  await removeSettingDistillationCheckpoint(projectId, resourceId)
+}
+
+export async function readSettingDistillationCheckpoint<T>(projectId: string, resourceId: string): Promise<T | null> {
+  return readJson<T>(settingDistillationCheckpointPath(projectId, resourceId))
+}
+
+export async function writeSettingDistillationCheckpoint<T>(projectId: string, resourceId: string, checkpoint: T): Promise<void> {
+  await atomicWriteJson(settingDistillationCheckpointPath(projectId, resourceId), checkpoint)
+}
+
+export async function removeSettingDistillationCheckpoint(projectId: string, resourceId: string): Promise<void> {
+  await rm(settingDistillationCheckpointPath(projectId, resourceId), { force: true })
 }
 
 export async function readDocRollups(projectId: string): Promise<DocRollup[]> {

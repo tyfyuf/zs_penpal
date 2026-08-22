@@ -30,6 +30,7 @@ import {
   readResource,
   readResourceSummary,
   removeResourceSummary,
+  removeSettingDistillationCheckpoint,
   writeChatSummary,
   writeDocRollups,
   writeDocSummary,
@@ -47,6 +48,8 @@ import { broadcast } from '../window'
 import { analyzeTextIntegrity, assertTextIntegrity } from './text-decoding.service'
 import { confirmedKnowledge, hasExplicitAliasRelation, mergeKnowledgeBases, normalizeKnowledgeName, sourceContainsEvidence, sourceContainsName, validateKnowledge } from './summary-knowledge'
 import { generationInfo, reusableChunkResults, splitSourceByTokenBudget, type SourceChunk } from './summary-hierarchy'
+import { scheduleSummaryTask } from './summary-task-scheduler'
+import { distillSettingResourceV2 } from './setting-distillation.service'
 
 // ---------------------------------------------------------------------------
 // 摘要生成状态（供摘要区显示“生成中”黄点，生成完毕转绿并解锁）
@@ -374,13 +377,17 @@ function validSetting(parsed: unknown, compact = false): SettingSummary | null {
 }
 
 // ---------------------------------------------------------------------------
-// 全局 LLM 调用串行队列：摘要/蒸馏/分类共用并发 1，避免并发请求互相堵塞
+// Legacy summary paths stay serial. setting-v2 may run concurrently, while all
+// requests still share the scheduler's global concurrency limit.
 // ---------------------------------------------------------------------------
 
 let llmQueue: Promise<unknown> = Promise.resolve()
 
 function enqueueLlm<T>(task: () => Promise<T>): Promise<T> {
-  const run = llmQueue.then(task, task)
+  const run = llmQueue.then(
+    () => scheduleSummaryTask(task, 'normal'),
+    () => scheduleSummaryTask(task, 'normal')
+  )
   llmQueue = run.catch(() => {})
   return run
 }
@@ -1127,6 +1134,26 @@ async function distillResourceInner(
   }
 
   try {
+    if (type === 'setting') {
+      const result = await distillSettingResourceV2(projectId, resourceId, content, settings)
+      const summary: ResourceSummary = {
+        ...result.summary,
+        ...computeSourceInfo(content),
+        knowledge: result.knowledge,
+        chunkResults: result.chunkResults,
+        generation: generationInfo(result.totalChunks, result.chunkResults, []),
+        updatedAt: nowIso()
+      }
+      // setting-v2 only publishes after every required branch has succeeded.
+      await writeResourceSummary(projectId, resourceId, summary)
+      try {
+        await removeSettingDistillationCheckpoint(projectId, resourceId)
+      } catch (error) {
+        logError('summary:resource', `Setting distillation checkpoint cleanup failed resourceId=${resourceId} name=${resourceName}`, (error as Error).message)
+      }
+      return { ok: true, summary, detectedType: type }
+    }
+
     const previous = await readResourceSummary(projectId, resourceId)
     const result = await generateHierarchicalSummary(type, content, settings, previous, async (checkpoint) => {
       const partial: ResourceSummary = {

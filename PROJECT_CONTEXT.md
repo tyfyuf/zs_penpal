@@ -4,7 +4,7 @@
 > 产品需求：`writing-agent-prd-v1.3.md`；技术选型：`writing-agent-tech-stack-v1.0.md`；
 > 拆解指导（需求参考，非运行时）：`拆解指导文档/story-decomposition-guide.md`、`content-decomposition-guide-v1.0.md`。
 > 架构定稿：`docs/summary-distillation-refactor-plan-v2.md`（三层记忆架构，已按此实施）。
-> **当前代码基线（2026-08-21）**：当前分支为 `master`，HEAD 为 `193f6a8`（`feat: add verified hierarchical resource distillation`）。这是用户指定的干净回退点；后续关于资源蒸馏 Job/Worker 后台化、分步 core/detail 调度、minimal 防截断回退等实验提交均已回退，不属于当前代码。新会话应以实际代码和本节状态为准，不要假设这些后续能力仍存在。
+> **当前代码基线（2026-08-22）**：当前开发分支为 `codex/setting-distillation-v2`，父基线为 `8374d8a`（其代码基线仍是 `193f6a8` 的 verified hierarchical resource distillation）。本分支已完成仅针对 `setting` 的可恢复并发蒸馏 v2；`story/other` 仍走旧分层路径。Job/Worker 后台化、主进程隔离和可视化进度条尚未实施。
 
 ---
 
@@ -57,6 +57,7 @@
 | `<workspace>/<projectId>/summaries/docs/<docId>.json` | 文档摘要 schema v2（故事拆解 + 验证知识 + 分块结果 + 源指纹） |
 | `<workspace>/<projectId>/summaries/chats/<chatId>.json` | 对话摘要（尾部逐条 + 历史压缩区间） |
 | `<workspace>/<projectId>/summaries/resources/<resId>.json` | 资源摘要 schema v2（story/setting/other + 验证知识 + 分块结果 + 源指纹） |
+| `<workspace>/<projectId>/summaries/resources/<resId>.setting-v2-checkpoint.json` | setting-v2 临时 checkpoint（同源/同模型/同语言任务结果与失败项；成功发布后删除） |
 | `<workspace>/<projectId>/resources/<resId>/source.bin` | Original bytes of an imported external resource; `content` is normalized to UTF-8 |
 | `<workspace>/<projectId>/summaries/rollups/<projectId>.json` | 大摘要（每 10 文档聚合，设置页管理） |
 | `<workspace>/<projectId>/summaries/vector-index/<projectId>.json` | 本地向量索引（原文分块嵌入） |
@@ -82,7 +83,10 @@ D:\ds h-project\
 │  │  ├─ services/       # 业务服务层
 │  │  │  ├─ file.service.ts        # 文件仓库（含摘要/大摘要/向量索引读写与旧格式迁移）
 │  │  │  ├─ api.service.ts         # 对话组装/宿主原文检索/大摘要规划/工具循环/预算裁剪/流式
-│  │  │  ├─ summary.service.ts     # 摘要/蒸馏/分类/大摘要 rollup/一致性扫描
+│  │  │  ├─ summary.service.ts     # 摘要/蒸馏入口、分类、大摘要 rollup、一致性扫描
+│  │  │  ├─ setting-distillation.service.ts # setting-v2 三角色提取、递归拆分/归并、总览与 checkpoint 编排
+│  │  │  ├─ setting-distillation.types.ts # setting-v2 候选项、checkpoint 与结果类型
+│  │  │  ├─ summary-task-scheduler.ts # 摘要共享并发上限、优先级与 429 自适应收缩
 │  │  │  ├─ vector.service.ts      # 本地混合检索（BGE/特征哈希语义 + 轻量字面召回）
 │  │  │  ├─ neural-embed.service.ts # 本地 BGE 加载、tokenizer、批量推理与故障冷却
 │  │  │  ├─ text-decoding.service.ts # Encoding detection/decoding and corruption-integrity gate
@@ -276,14 +280,17 @@ export interface ChatMeta {
 
 尚未完成：真实用户语料召回质量验收；完整 NSIS 安装/卸载与低配机器内存耗时验收；非 Windows x64 平台适配。详见 `docs/neural-embedding-implementation-2026-08-17.md`。
 
-### 6.2 摘要/蒸馏当前基线（`193f6a8`；问题未解决）
+### 6.2 摘要/蒸馏当前基线（setting-v2 已实现；待真实端点验收）
 
-- `1b235ef` 提供的 `structured-generation.service.ts` 仍在当前基线中：统一结构化任务执行器、端点/模型能力自适应、JSON 输出降级、DeepSeek 官方端点 reasoning 控制、严格解析校验、自适应参数重试和隐私审计日志。
-- `193f6a8` 的资源蒸馏是“丰富分层摘要”路径：token-aware 分块；每块分别执行知识抽取与类型摘要；名称、别名、事实和短证据做原文核验；完成块再递归分层合并；按源指纹复用未变化块；失败块与合并失败写入 `generation.state=incomplete`，保留可预览的已完成部分。
-- 当前资源蒸馏调用仍由 `resource:distill` IPC 直接等待 `summary.service.ts` 在 Electron 主进程执行。没有 Job 队列、Worker 隔离、分步 core/detail 调度、并发任务池或 minimal schema fallback；长文档和大 JSON 结构化输出可能使窗口长时间无响应，也可能因模型返回截断而稳定失败。
-- 最新用户回归中，重新构建并启动后测试 Qwen 与 DeepSeek，资源蒸馏仍报告稳定失败。该结果是当前已知未解决问题，不能把 2026-08-17 的“兼容层已实现”误写成“资源蒸馏已通过所有模型回归”。下一步应先读取 `<userData>/logs/summary-attempts-YYYY-MM-DD.jsonl` 和通用错误日志，再决定新的协议，不应继续要求用户重复无效的 build/start 测试。
-- 用户已明确放弃并回退后续实验方案；以下提交不属于当前基线：`75400f2`（资源蒸馏后台化）、`06bbf0f`（Worker 隔离）、`433a47b`（独立可恢复任务）、`20041ed`（摘要注入修复）、`92bcf81`（分步 fallback），以及其后的回退/重做尝试。不要在新会话中假设这些文件或能力存在。
-- 真实语料准确性、性能、截断和多 Provider 回归仍是 P0 未完成项。完整历史根因与方案记录见 `docs/summary-distillation-failure-root-cause-and-solution-2026-08-17.md`；其中后续“实施更新”不能覆盖当前回退状态。
+- 本轮只改 `setting`。`story/other` 继续使用 `193f6a8` 的旧分层摘要、证据验证、块复用和递归合并路径，不得把 setting-v2 的行为外推到其他类型。
+- setting-v2 把每个全文/自然边界分块的提取拆成三个角色：①实体+关系；②术语+规则+约束；③时间线。块内三角色并发，块之间顺序推进；删除未决问题生成，最终固定 `unresolved: []`。
+- 组合角色遇到输出截断、空响应或结构校验失败时，继续拆成单语义任务；单语义任务仍失败时递归拆输入，不允许通过减少条目数或 compact 内容来换取成功。`structured-generation.service.ts` 新增 `retryPolicy: 'split-required'`，显式把截断/上下文溢出交还上层拆分；旧路径默认仍为 `compact`。
+- 最终阶段不再让一次 LLM 同时输出总览和全部条目：实体/关系、术语/规则/约束、时间线分别归并，总览单独生成；归并要求 `sourceIds` 完整覆盖输入候选并在本地校验名称。叶级归并仍无法完成时原样保留候选，不裁剪内容。
+- setting-v2 不要求证据文本，只校验实体名、术语名和关系主体/对象；写入的 knowledge 使用 `status: confirmed` 与空 `evidence`。这属于用户明确接受的 setting 专用减压边界。
+- `summary-task-scheduler.ts` 提供共享最大并发 3；setting-v2 使用 batch 优先级，429 后依次收缩到 2/1，端点稳定 60 秒且累计 6 次成功后逐级恢复。旧摘要调用仍保持自身串行顺序，但同样受共享并发上限约束。
+- 每个成功任务立即原子写入 `<resId>.setting-v2-checkpoint.json`；仅在源指纹、endpoint/model/contextLimit 指纹和语言一致时复用。重新生成只执行失败或缺失任务；替换资源、删除资源、取消蒸馏和正式发布成功会清理 checkpoint。
+- setting-v2 只有在所有必要提取、归并和总览任务成功后才覆盖正式 `<resId>.json`；失败时保留旧正式摘要。真实 2–3 万字复杂设定、Qwen/DeepSeek/其他 OpenAI-compatible 端点的准确性、耗时和失败恢复仍需用户语料验收。
+
 ### 6.3 宿主驱动原文检索（已实施，待真实端点验收）
 
 - 首次检索改为宿主自动执行，不再依赖模型输出 `vectorQuery`；关闭摘要、重新生成和无工具模型均可检索。
@@ -314,8 +321,9 @@ export interface ChatMeta {
 
 - **向量索引异步同步的可见延迟**：保存/删除/恢复会排队单源同步或移除，设置页可显示 stale/not-indexed 并手动触发；队列失败不会阻断编辑，但需要通过索引日志或再次操作恢复。
 - **大摘要规划仍可能增加一次 LLM 调用**：仅在摘要开启、非重新生成且项目存在 rollup 时执行 provider-neutral 结构化任务；无 rollup 时零调用。
-- **资源蒸馏仍可能阻塞主进程**：当前 `resource:distill` 是同步 IPC；大文档的分块知识抽取、类型摘要和分层合并会长时间占用主进程。后台 Job/Worker 已明确回退，后续需重新设计而非直接恢复旧实验。
-- **摘要结构化输出仍有截断风险**：每块知识抽取与类型摘要均需要完整 JSON；不同 OpenAI-compatible 端点的真实 completion 上限和 reasoning 行为不一致，现有一次 compact 重试不能保证成功。
+- **setting-v2 仍运行在主进程**：当前 `resource:distill` 仍是同步 IPC；虽然 LLM 任务已拆分并引入受控并发，但 Job/Worker 隔离、退出恢复和主进程防阻塞尚未实现。
+- **尚无生成可视化进度条**：当前 UI 仍只有 `markGenerating/markDone` 的生成中/完成状态；checkpoint 已具备任务级状态基础，但没有向 renderer 广播块/角色/归并阶段进度。
+- **真实端点仍可能暴露新的限制**：setting-v2 已针对截断、无效 JSON、上下文溢出、429 和失败任务复用设计恢复路径，但不同 Provider 的真实输出上限、错误文案和 reasoning 行为仍需 2–3 万字复杂设定回归验证。
 - **中文模型 token 估算为近似**：DeepSeek/GLM/Qwen 按 ~1.1 token/字（`estimateInputTokens`），可能边界误判。
 - **Legacy summary formats**: three-field, single-tag, and v1 snapshot formats are discarded as invalid; v2 reads require knowledge, generation, and chunkResults. No migration or automatic rebuild is performed; users regenerate manually (file.service.ts).
 - **重新生成“上一版回答”仅在内存**：不持久化，重开窗口后对照块消失。
@@ -376,9 +384,11 @@ export interface ChatMeta {
 
 `heuristicClassify`（零成本、极保守）→ 弱信号走 `classifyByLlm`（头/中/尾三段采样，`{type, confidence, reasons}`）→ 分类器只提供首次建议，用户确认后 `force` 严格遵循手动选择。`setting` 作为独立类型，对世界观、势力、术语、规则、关系、时间线和约束使用专用结构。
 
-进入生成后，`splitSourceByTokenBudget` 按标题/段落/句子优先切块。对每个未复用块，当前实现按顺序执行一次 `SummaryKnowledgeBase` 抽取和一次类型摘要，再由本地规则做原文验证/净化；随后按输入预算分组，递归执行结构化合并。当前不并发、不后台隔离，也没有 minimal 档；输出被截断或任一块失败时会进入 `incomplete`。
+`setting` 进入 `distillSettingResourceV2`：若全文可放入输入预算，三个角色都读取全文；否则按标题/段落/句子优先切成约 3k–10k token 自然块。每块并发执行“实体+关系”“术语+规则+约束”“时间线”，组合输出失败则拆为单语义调用，单语义仍失败再递归拆输入。所有 LLM 请求进入共享并发调度器，默认上限 3，429 自适应降并发。
 
-名称、别名、事实和短证据必须能在当前原文块核验；别名只在原文明示关系时保留。普通 LLM 上下文只注入 `confirmed` 高价值实体和事实，不注入证据、块 ID 或未验证的 overview。块指纹支持未变块复用；checkpoint 会把已完成块和确定性预览写回摘要文件，旧 schema 不迁移、不自动全量重建，需用户手动重新生成。
+提取完成后，三大语义分支分别归并；候选过多或输出失败时按预算分批并递归二分。每个归并输出通过 `sourceIds` 做全覆盖检查，实体名、术语名、关系主体/对象必须与引用候选一致。总览是独立任务；输入过长或输出失败时按层级生成局部概览再归纳。最终 `unresolved: []`，knowledge 不保存证据。
+
+setting 的任务结果写入独立 sidecar checkpoint；同源、同模型、同语言的重新生成复用成功任务，只重试失败/缺失项。仅当全部必要任务成功后写正式资源摘要，因此失败不会覆盖旧正式摘要。`story/other` 仍走旧的“知识抽取 + 类型摘要 + 证据校验 + 递归合并”路径，并可能写 `generation.state=incomplete`。
 ### 7.7 一致性扫描（`summary.service.ts scanConsistency`）
 
 纯规则、零 LLM：R1 别名冲突（两角色名字互为别名或别名交集，error 红标）+ R4 摘要漂移（复用 `checkResourceSummaryStale`，advisory 黄标），摘要区“一致性提示”分组展示，只提示不自动改。
@@ -418,7 +428,8 @@ export interface ChatMeta {
 | 债务 | 现状 | 计划 |
 | --- | --- | --- |
 | 本地嵌入真实语料验收 | BGE/回退/打包链路已接通并通过隔离烟测 | 用实际小说项目比较语义命中；据结果决定是否调分块、查询指令、阈值或模型 |
-| 摘要/蒸馏 v2 真实语料验收 | schema v2、setting、原文验证和分级摘要已实施 | 用实际故事/设定/超长资源评估准确性、耗时和 incomplete 重试；据结果调整块/输出预算 |
+| setting-v2 真实语料与多 Provider 验收 | 三角色提取、分支归并、总览拆分、checkpoint 和 429 收缩已实现 | 用 2–3 万字复杂设定验证完整性、耗时、截断恢复、名称校验及 Qwen/DeepSeek/其他端点兼容性 |
+| 蒸馏后台化与进度可视化 | setting-v2 仍由主进程同步 IPC 编排；checkpoint 已提供任务级状态 | 后续设计 Job/Worker 隔离、退出恢复、取消语义和阶段/块/角色进度事件；本轮不实现 |
 | 向量索引自动刷新 | 已有源指纹、逐文件状态和手动重建；正文修改可显示 stale | 增加保存后增量/防抖重建 |
 | 无应用图标 / 无签名 | 默认图标；`signAndEditExecutable=false` | 图标与证书就绪后补齐 |
 | 主进程错误文案中文 | 界面 i18n 完成 | 计划在语言设置完善时统一 |
@@ -442,7 +453,7 @@ export interface ChatMeta {
 3. **受限网络/沙箱环境作战手册**：npmmirror 镜像、`electron_config_cache` 重定向、`--foreground-scripts`、构建提权跑 esbuild、关闭签名绕 winCodeSign 问题；**模型权重类资产在沙箱内无法获取，需用户机器配合**。
 4. **Electron 踩坑清单**：渲染层 `window.prompt` 不支持；`simple-git customBinary` 开 `unsafe.allowUnsafeCustomBinary`；空仓库 `git log` 需捕获；`fs.rename` 覆盖目录 EPERM；dev 主进程改动必须重启；`safeStorage` 存 Key；**原生/WASM 依赖（onnxruntime）不能直接打包，需外部化或走 WASM**。
 5. **隐私打包红线**：应用代码使用 builder 白名单，生产依赖由 builder 收集；模型只通过 `extraResources` 分发。打包后核验 asar/resources 无用户数据，模型/缓存/复现文档一律 gitignore。
-6. **LLM 工程技巧**：OpenAI-compatible 不是统一能力契约；结构化任务应通过 capability profile + provider adapter 选择 JSON Schema/JSON mode/prompt-only 与 reasoning 策略。继续保留预算分档、三段采样分类、全局串行队列、中文模型 token 近似估算、决策调用与作答分离。“有界 prompt”只能作为中长文档的临时减压手段；超长文档仍需 token-aware 分级提取，截断 JSON 不应靠补括号冒充完整结果。
+6. **LLM 工程技巧**：OpenAI-compatible 不是统一能力契约；结构化任务应通过 capability profile + provider adapter 选择 JSON Schema/JSON mode/prompt-only、reasoning 与 token 参数。摘要请求现在共享最大并发 3：setting 块内角色并发，旧路径保持串行；429 后动态收缩。复杂大 JSON 应按语义角色、归并分支和总览任务拆开，截断/上下文溢出必须拆输入或拆任务，不得靠补括号、减少条目或 compact 内容冒充完整结果。
 7. **状态机落库**：UI 锁定规则（冻结/锁定/pending、只能扩大）必须持久化到 meta 并主/渲染双端共用同一判定（`summary-relevance.ts`），否则重开失效或两端不一致。
 8. **错误可观测性**：IPC/通用异常、摘要结构化生成逐次尝试、向量 load/build/search/fallback/dispose 分开落日志；审计日志禁止记录用户原文、查询和向量。
 9. **透明可信**：LLM 读取记忆的行为（注入/大摘要/向量命中/自述缺口）以“本次记忆”卡全量展示，作者对“AI 记错来源”零容忍，透明是信任根基。
@@ -455,14 +466,17 @@ export interface ChatMeta {
 当前仓库状态（交接时核对）：
 
 ```text
-branch: master
-HEAD: 193f6a8 feat: add verified hierarchical resource distillation
-working tree: clean（交接文档本次修改提交后应再次确认）
+branch: codex/setting-distillation-v2
+implementation: feat: add resilient setting distillation pipeline
+parent baseline: 8374d8a docs: update project handoff for 193f6a8 baseline
+working tree: 本实现提交后应为 clean
 ```
 
-当前历史中与本次交接最相关的提交（从新到旧）：
+当前历史中与本次交接最相关的提交（从新到旧；setting-v2 的准确提交哈希以实际 `git log` 为准）：
 
 ```
+feat: add resilient setting distillation pipeline
+8374d8a docs: update project handoff for 193f6a8 baseline
 193f6a8 feat: add verified hierarchical resource distillation
 6f4a3bf fix: preserve chat state across tab switches
 8a39ac3 fix: restore chat auto scroll
@@ -473,11 +487,8 @@ working tree: clean（交接文档本次修改提交后应再次确认）
 62ccb0c feat: expose vector index and retrieval traces
 61eebf7 feat: bundle local neural embeddings
 1b235ef fix: harden summary structured generation
-bfc2782 fix: long-document bounded summary / failure logging / host-driven retrieval
-9017a1b P4 consistency scan
-c733dc3 P7+P6 vector retrieval entry
 ```
 
-> **回退记录**：`75400f2`、`06bbf0f`、`433a47b`、`20041ed`、`92bcf81` 及其后续实验/重做提交不在当前历史中；不要从旧交接文档复制它们的文件名、IPC 或“已完成”状态。模型、缓存、失败样本和构建输出继续保持 gitignore，不要加入 Git。
+> **范围记录**：本轮只实现 setting-v2 的语义拆分、并发、递归恢复和 sidecar checkpoint；没有恢复旧实验中的 Job/Worker 文件、后台 IPC 或进度 UI，也没有修改 `story/other` 的生成协议。模型、缓存、失败样本和构建输出继续保持 gitignore，不要加入 Git。
 
-> **交接提醒**：新会话的第一步应读取本文件、运行 `git status --short` 与 `git log --oneline -15`，确认仍在 `193f6a8` 基线；然后直接检查当前日志和代码，优先处理摘要/蒸馏未解决问题。不要先让用户重复 `npm run build` / `npm run start`，除非已有新的代码改动或日志证据表明构建产物过期。
+> **交接提醒**：新会话第一步读取本文件，并运行 `git status --short` 与 `git log --oneline -15`。若要继续本轮工作，优先用真实 2–3 万字复杂设定验证输出完整性、失败块复用和多 Provider 行为；后台化/进度条是后续独立阶段，不要与本轮 setting 协议一起重做。
