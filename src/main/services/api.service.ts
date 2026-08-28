@@ -228,6 +228,29 @@ interface StreamRoundState {
   publishedReasoningLength: number
 }
 
+/**
+ * Several OpenAI-compatible thinking providers (notably DeepSeek) require the
+ * model's reasoning_content to be replayed whenever a streamed assistant turn
+ * is followed by another request. The OpenAI SDK does not model this vendor
+ * extension, so keep it at the compatibility boundary instead of leaking it
+ * into the persisted ChatMessage shape.
+ */
+type ThinkingCompatibleAssistantMessage = ChatCompletionMessageParam & {
+  reasoning_content?: string
+}
+
+function appendAssistantTurnForReplay(
+  conversation: ChatCompletionMessageParam[],
+  state: StreamRoundState
+): void {
+  if (!state.content && !state.reasoning) return
+  conversation.push({
+    role: 'assistant',
+    content: state.content || null,
+    ...(state.reasoning ? { reasoning_content: state.reasoning } : {})
+  } as ThinkingCompatibleAssistantMessage)
+}
+
 const PROJECT_SEARCH_TOOL = {
   type: 'function',
   function: {
@@ -567,8 +590,9 @@ async function streamAnswerWithTools(options: {
       conversation.push({
         role: 'assistant',
         content: null,
+        ...(state.reasoning ? { reasoning_content: state.reasoning } : {}),
         tool_calls: [assistantToolCall]
-      } as ChatCompletionMessageParam)
+      } as ThinkingCompatibleAssistantMessage)
 
       const args = toolCallArguments(validCall)
       const resultContent = args
@@ -601,6 +625,7 @@ async function streamAnswerWithTools(options: {
       toolProtocolLog(outcome, roundStartedAt, state, nativeCalls.length)
       if (repairAttempts < MAX_TOOL_REPAIR_ATTEMPTS && useTools) {
         repairAttempts++
+        appendAssistantTurnForReplay(conversation, state)
         conversation.push(buildToolRepairInstruction(settings.language))
         logToolProtocolEvent({ outcome: 'repair', durationMs: protocolDuration(roundStartedAt) })
         continue
@@ -608,6 +633,7 @@ async function streamAnswerWithTools(options: {
       if (!noToolFallbackUsed) {
         toolsDisabledForRequest = true
         noToolFallbackUsed = true
+        appendAssistantTurnForReplay(conversation, state)
         conversation.push(buildNoToolFallbackInstruction(settings.language))
         logToolProtocolEvent({ outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
         continue
@@ -620,6 +646,7 @@ async function streamAnswerWithTools(options: {
       if (!noToolFallbackUsed) {
         toolsDisabledForRequest = true
         noToolFallbackUsed = true
+        appendAssistantTurnForReplay(conversation, state)
         conversation.push(buildNoToolFallbackInstruction(settings.language))
         logToolProtocolEvent({ outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
         continue
@@ -683,6 +710,11 @@ function tok(content: unknown, model: string): number {
   return estimateTokens(typeof content === 'string' ? content : '', model)
 }
 
+function messageTokens(message: ChatCompletionMessageParam, model: string): number {
+  const reasoningContent = (message as { reasoning_content?: unknown }).reasoning_content
+  return tok(message.content, model) + tok(reasoningContent, model)
+}
+
 function truncateToTokens(text: string, maxTokens: number, model: string): string {
   if (tok(text, model) <= maxTokens) return text
   const chars = [...text]
@@ -731,7 +763,7 @@ function applyBudget(
 ): ChatCompletionMessageParam[] {
   const inputBudget = Math.max(1000, Math.floor(contextLimit * 0.8))
   const totalOf = (arr: ChatCompletionMessageParam[]): number =>
-    arr.reduce((s, m) => s + tok(m.content, model), 0)
+    arr.reduce((s, m) => s + messageTokens(m, model), 0)
 
   let h = [...historyMsgs]
   let a = [...auxMsgs]
@@ -1022,7 +1054,11 @@ async function buildMessages(
   // 历史
   const historyMsgs: ChatCompletionMessageParam[] = history
     .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+    .map((m) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+      ...(m.role === 'assistant' && m.reasoning ? { reasoning_content: m.reasoning } : {})
+    } as ThinkingCompatibleAssistantMessage))
 
   const tailMsgs: ChatCompletionMessageParam[] = appendUser
     ? [{ role: 'user', content: req.userText }]
