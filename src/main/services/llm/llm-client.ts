@@ -4,6 +4,13 @@ import type { ChatCompletion, ChatCompletionChunk } from 'openai/resources/chat/
 import type { Stream } from 'openai/streaming'
 import type { ApiSettings } from '../api-settings'
 import type { StructuredResponse, StructuredResponseUsage } from './llm.types'
+import {
+  chatReasoningFields,
+  isReasoningControl,
+  responsesReasoningFields,
+  STRUCTURED_REASONING_CONTROL_FIELD,
+  type StructuredReasoningControl
+} from './reasoning'
 
 export interface ChatCompletionRequestOptions {
   signal?: AbortSignal
@@ -101,11 +108,25 @@ function responseTextFormat(responseFormat: unknown): unknown {
   return { type: 'text' }
 }
 
+function structuredReasoningControl(body: Record<string, unknown>): StructuredReasoningControl {
+  const value = body[STRUCTURED_REASONING_CONTROL_FIELD]
+  return isReasoningControl(value) ? value : 'provider_default_only'
+}
+
+function chatRequestFromBody(body: Record<string, unknown>): Record<string, unknown> {
+  const request = { ...body }
+  delete request[STRUCTURED_REASONING_CONTROL_FIELD]
+  const control = structuredReasoningControl(body)
+  Object.assign(request, chatReasoningFields(control))
+  return request
+}
+
 function responseRequestFromChatBody(body: Record<string, unknown>): Record<string, unknown> {
   const request: Record<string, unknown> = {
     model: body.model,
     input: responseInputFromMessages(body.messages),
-    stream: false
+    stream: false,
+    ...responsesReasoningFields(structuredReasoningControl(body))
   }
   const outputTokens = body.max_completion_tokens ?? body.max_tokens
   if (typeof outputTokens === 'number') request.max_output_tokens = outputTokens
@@ -150,7 +171,7 @@ class ChatCompletionsAdapter implements LlmAdapter {
   }
 
   async createChatCompletion(body: Record<string, unknown>): Promise<ChatCompletion> {
-    return await this.client.chat.completions.create(body as never) as ChatCompletion
+    return await this.client.chat.completions.create(chatRequestFromBody(body) as never) as ChatCompletion
   }
 
   async createChatCompletionStream(

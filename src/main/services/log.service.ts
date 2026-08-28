@@ -39,6 +39,8 @@ export function logError(source: string, message: string, stack?: string): void 
 /** 结构化生成审计：不写 API Key、用户原文或模型返回全文，只保留可排障的尝试元数据。 */
 export function logStructuredGenerationAttempt(event: {
   task: string
+  protocol?: 'chat_completions' | 'responses'
+  reasoningControl?: string
   endpointKey: string
   attempt: number
   mode: string

@@ -1,6 +1,13 @@
 import type { LlmAdapter } from './llm/llm-client'
 import { createLlmAdapter } from './llm/llm-client'
 import type { StructuredResponse } from './llm/llm.types'
+import {
+  inferStructuredReasoningControl,
+  isReasoningControl,
+  reasoningControlLabel,
+  STRUCTURED_REASONING_CONTROL_FIELD,
+  type StructuredReasoningControl
+} from './llm/reasoning'
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
 import type { ApiSettings } from './api-settings'
 import { recordUsage } from './usage.service'
@@ -13,7 +20,7 @@ import { noteSummaryRateLimit, noteSummaryRequestSuccess } from './summary-task-
 
 export type StructuredOutputMode = 'json_schema' | 'json_object' | 'prompt_only'
 export type StructuredRetryPolicy = 'compact' | 'split-required'
-type ReasoningControl = 'deepseek_thinking' | 'provider_default_only'
+type ReasoningControl = StructuredReasoningControl
 type OutputTokenParam = 'max_tokens' | 'max_completion_tokens'
 
 interface ModelCapabilityProfile {
@@ -24,7 +31,7 @@ interface ModelCapabilityProfile {
   outputTokenParam: OutputTokenParam
   temperature: 'supported' | 'unsupported'
   updatedAt: string
-  profileVersion: 2
+  profileVersion: 3
 }
 
 interface CapabilityStore {
@@ -78,6 +85,27 @@ async function loadCapabilityStore(): Promise<CapabilityStore> {
 
 let capabilityWriteQueue: Promise<void> = Promise.resolve()
 
+function normalizeProfile(
+  cached: ModelCapabilityProfile | undefined,
+  fallback: ModelCapabilityProfile
+): ModelCapabilityProfile {
+  if (!cached) return fallback
+
+  // Capability files predate the provider-neutral reasoning control. Preserve
+  // their learned JSON/token/temperature capabilities, but refresh the
+  // reasoning dialect from the current endpoint/model inference once.
+  const reasoningControl = cached.profileVersion === 3 && isReasoningControl(cached.reasoningControl)
+    ? cached.reasoningControl
+    : fallback.reasoningControl
+  return {
+    ...fallback,
+    ...cached,
+    key: fallback.key,
+    reasoningControl,
+    profileVersion: 3
+  }
+}
+
 async function updateProfile(
   fallback: ModelCapabilityProfile,
   mutate: (current: ModelCapabilityProfile) => ModelCapabilityProfile
@@ -85,8 +113,8 @@ async function updateProfile(
   let saved = fallback
   const next = capabilityWriteQueue.then(async () => {
     const store = await loadCapabilityStore()
-    saved = mutate(store.profiles[fallback.key] ?? fallback)
-    store.profiles[saved.key] = saved
+    saved = mutate(normalizeProfile(store.profiles[fallback.key], fallback))
+    store.profiles[saved.key] = { ...saved, profileVersion: 3 }
     await atomicWriteJson(capabilityPath(), store)
   })
   capabilityWriteQueue = next.catch(() => {})
@@ -96,16 +124,17 @@ async function updateProfile(
 
 function defaultProfile(settings: ApiSettings): ModelCapabilityProfile {
   const deepseek = isOfficialDeepSeekEndpoint(settings.baseURL)
+  const reasoningControl = inferStructuredReasoningControl(settings)
   return {
     key: profileKey(settings),
-    source: deepseek ? 'preset' : 'runtime-fallback',
+    source: deepseek || reasoningControl !== 'provider_default_only' ? 'preset' : 'runtime-fallback',
     // json_object is widely implemented by OpenAI-compatible endpoints. A 400 automatically falls back.
     structuredOutput: 'json_object',
-    reasoningControl: deepseek ? 'deepseek_thinking' : 'provider_default_only',
+    reasoningControl,
     outputTokenParam: 'max_tokens',
     temperature: 'supported',
     updatedAt: new Date().toISOString(),
-    profileVersion: 2
+    profileVersion: 3
   }
 }
 
@@ -190,8 +219,9 @@ function buildRequest(
       json_schema: { name: 'structured_output', strict: true, schema: jsonSchema }
     }
   }
-  // Only the verified official endpoint receives a provider-private field.
-  if (profile.reasoningControl === 'deepseek_thinking') request.thinking = { type: 'disabled' }
+  // The adapter translates this semantic control into the provider/protocol
+  // specific wire field. It is intentionally private and never sent verbatim.
+  request[STRUCTURED_REASONING_CONTROL_FIELD] = profile.reasoningControl
   return request
 }
 
@@ -234,6 +264,7 @@ async function runAttempt<T>(
     logStructuredGenerationAttempt({
       task: options.task,
       protocol: options.settings.apiProtocol,
+      reasoningControl: reasoningControlLabel(profile.reasoningControl),
       endpointKey: endpointFingerprint(profile.key),
       attempt,
       mode,
@@ -248,6 +279,7 @@ async function runAttempt<T>(
     logStructuredGenerationAttempt({
       task: options.task,
       protocol: options.settings.apiProtocol,
+      reasoningControl: reasoningControlLabel(profile.reasoningControl),
       endpointKey: endpointFingerprint(profile.key),
       attempt,
       mode,
@@ -264,8 +296,8 @@ function downgradedProfile(profile: ModelCapabilityProfile, error: unknown): Mod
   const text = errorText(error).toLowerCase()
   const common = { source: 'runtime-fallback' as const, updatedAt: new Date().toISOString() }
   if (/(thinking|reasoning)/.test(text)) {
-    return profile.reasoningControl === 'deepseek_thinking'
-      ? { ...profile, ...common, reasoningControl: 'provider_default_only' }
+    return profile.reasoningControl !== 'provider_default_only'
+      ? { ...profile, ...common, reasoningControl: 'provider_default_only', profileVersion: 3 }
       : profile
   }
   if (/(response_format|json_schema|json object)/.test(text)) {
@@ -299,7 +331,8 @@ function downgradedProfile(profile: ModelCapabilityProfile, error: unknown): Mod
 export async function executeStructuredTask<T>(options: StructuredTaskOptions<T>): Promise<T> {
   if (!options.settings.apiKey) throw new StructuredGenerationError('未配置 API Key', 'request')
   const store = await loadCapabilityStore()
-  let profile = store.profiles[profileKey(options.settings)] ?? defaultProfile(options.settings)
+  const fallbackProfile = defaultProfile(options.settings)
+  let profile = normalizeProfile(store.profiles[fallbackProfile.key], fallbackProfile)
   const client = makeClient(options.settings)
   const primaryMode = profile.structuredOutput === 'json_schema' && !options.jsonSchema ? 'json_object' : profile.structuredOutput
   const retryPolicy = options.retryPolicy ?? 'compact'
