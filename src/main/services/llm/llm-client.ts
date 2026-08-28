@@ -175,11 +175,20 @@ function responseToolChoiceFromChatChoice(choice: unknown): unknown {
 }
 
 function responseRequestFromChatBody(body: Record<string, unknown>, stream = false): Record<string, unknown> {
+  // Responses does not emit a visible reasoning summary unless it is
+  // explicitly requested. Ordinary chat requests must keep the provider's
+  // default reasoning effort, so request only the summary here. Structured
+  // generation carries the private control field and must retain its existing
+  // provider-specific reasoning policy instead.
+  const isStructuredRequest = Object.prototype.hasOwnProperty.call(body, STRUCTURED_REASONING_CONTROL_FIELD)
+  const reasoning = isStructuredRequest
+    ? responsesReasoningFields(structuredReasoningControl(body))
+    : { reasoning: { summary: 'auto' } }
   const request: Record<string, unknown> = {
     model: body.model,
     input: responseInputFromMessages(body.messages),
     stream,
-    ...responsesReasoningFields(structuredReasoningControl(body))
+    ...reasoning
   }
   const outputTokens = body.max_completion_tokens ?? body.max_tokens
   if (typeof outputTokens === 'number') request.max_output_tokens = outputTokens
@@ -262,6 +271,33 @@ function responseStreamToChatStream(
     const id = `resp_stream_${Date.now()}`
     const created = Math.floor(Date.now() / 1000)
     const callIdsByItemId = new Map<string, string>()
+    // Some gateways emit only the final `.done` reasoning event, while the
+    // native Responses stream emits deltas followed by that same full text.
+    // Remember which reasoning parts already produced deltas so a fallback
+    // `.done` event cannot duplicate the visible summary.
+    const reasoningPartsWithDelta = new Set<string>()
+
+    const reasoningPartKey = (event: Record<string, unknown>): string => {
+      const itemId = typeof event.item_id === 'string' ? event.item_id : ''
+      const outputIndex = typeof event.output_index === 'number' ? event.output_index : 0
+      const partIndex = typeof event.summary_index === 'number'
+        ? event.summary_index
+        : typeof event.content_index === 'number' ? event.content_index : 0
+      return `${itemId}:${outputIndex}:${partIndex}`
+    }
+
+    const reasoningText = (event: Record<string, unknown>): string | undefined => {
+      if (typeof event.delta === 'string') return event.delta
+      if (typeof event.text === 'string') return event.text
+      if (event.part && typeof event.part === 'object' && typeof (event.part as Record<string, unknown>).text === 'string') {
+        return (event.part as Record<string, unknown>).text as string
+      }
+      if (event.delta && typeof event.delta === 'object' && typeof (event.delta as Record<string, unknown>).text === 'string') {
+        return (event.delta as Record<string, unknown>).text as string
+      }
+      return undefined
+    }
+
     for await (const rawEvent of source) {
       const event = rawEvent as unknown as Record<string, unknown>
       const type = typeof event.type === 'string' ? event.type : ''
@@ -274,8 +310,17 @@ function responseStreamToChatStream(
 
       if (type === 'response.output_text.delta' && typeof event.delta === 'string') {
         delta.content = event.delta
-      } else if ((type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning.delta') && typeof event.delta === 'string') {
-        delta.reasoning_content = event.delta
+      } else if (type.includes('reasoning') && type.endsWith('.delta')) {
+        const text = reasoningText(event)
+        if (text) {
+          reasoningPartsWithDelta.add(reasoningPartKey(event))
+          delta.reasoning_content = text
+        }
+      } else if (type.includes('reasoning') && type.endsWith('.done')) {
+        const text = reasoningText(event)
+        if (text && !reasoningPartsWithDelta.has(reasoningPartKey(event))) {
+          delta.reasoning_content = text
+        }
       } else if (type === 'response.output_item.added' && event.item && typeof event.item === 'object') {
         const item = event.item as Record<string, unknown>
         if (item.type === 'function_call') {
