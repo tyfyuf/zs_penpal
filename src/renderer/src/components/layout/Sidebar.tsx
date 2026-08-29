@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Archive,
   ChevronDown,
@@ -49,12 +49,51 @@ function readSidebarExpanded(): Record<string, boolean> {
 export default function Sidebar(): JSX.Element {
   const t = useT()
   const workspace = useAppStore((s) => s.workspace)
+  const tabs = useAppStore((s) => s.tabs)
+  const activeTabId = useAppStore((s) => s.activeTabId)
   const refresh = useAppStore((s) => s.refreshWorkspace)
   const openDoc = useAppStore((s) => s.openDoc)
   const openChat = useAppStore((s) => s.openChat)
   const openSettings = useAppStore((s) => s.openSettings)
   const openResource = useAppStore((s) => s.openResource)
   const [expanded, setExpanded] = useState<Record<string, boolean>>(readSidebarExpanded)
+  const [autoExpanded, setAutoExpanded] = useState<Record<string, boolean>>({})
+  const activeTab = tabs.find((tab) => tab.id === activeTabId)
+  const activeDocId = activeTab?.kind === 'doc' ? activeTab.refId ?? null : null
+  const activeChatId = activeTab?.kind === 'chat' ? activeTab.refId ?? null : null
+  const activeDoc = activeDocId
+    ? workspace.projects.flatMap((project) => project.docs).find((doc) => doc.id === activeDocId)
+    : undefined
+  const activeChat = activeChatId
+    ? workspace.projects.flatMap((project) => project.chats).find((chat) => chat.id === activeChatId)
+    : undefined
+  const activeProjectId = activeTab?.projectId ?? activeDoc?.projectId ?? activeChat?.projectId
+  const autoExpandedKeys = useMemo(() => {
+    const keys = new Set<string>()
+    if (!activeTab || !activeProjectId) return keys
+
+    const projectKey = `p:${activeProjectId}`
+    keys.add(projectKey)
+
+    if (activeTab.kind === 'doc' && activeDocId) {
+      keys.add(`${projectKey}:docs`)
+    } else if (activeTab.kind === 'chat') {
+      if (activeChat?.docId) {
+        keys.add(`${projectKey}:docs`)
+        keys.add(`${projectKey}:doc:${activeChat.docId}`)
+      } else {
+        keys.add(`${projectKey}:chats`)
+      }
+    }
+
+    return keys
+  }, [activeTab, activeDocId, activeProjectId, activeChat?.docId])
+
+  useEffect(() => {
+    const next = Object.fromEntries([...autoExpandedKeys].map((key) => [key, true]))
+    setAutoExpanded(next)
+  }, [autoExpandedKeys])
+
   useEffect(() => {
     try {
       localStorage.setItem(SIDEBAR_EXPANDED_STORAGE_KEY, JSON.stringify(expanded))
@@ -65,8 +104,16 @@ export default function Sidebar(): JSX.Element {
   const fileInput = useRef<HTMLInputElement>(null)
   const [uploadProject, setUploadProject] = useState<string | null>(null)
   const [previewRes, setPreviewRes] = useState<{ name: string; content: string } | null>(null)
-  const toggle = (key: string): void => setExpanded((e) => ({ ...e, [key]: !e[key] }))
-  const isOpen = (key: string): boolean => !!expanded[key]
+  const isOpen = (key: string, defaultOpen = false): boolean => autoExpanded[key] ?? expanded[key] ?? defaultOpen
+  const toggle = (key: string, defaultOpen = false): void => {
+    setExpanded((e) => ({ ...e, [key]: !isOpen(key, defaultOpen) }))
+    setAutoExpanded((e) => {
+      if (!(key in e)) return e
+      const next = { ...e }
+      delete next[key]
+      return next
+    })
+  }
 
   async function promptName(label: string, def = ''): Promise<string | null> {
     return promptText(label, def)
@@ -192,19 +239,30 @@ export default function Sidebar(): JSX.Element {
 
   function renderDocChats(project: ProjectTree, doc: DocMeta): JSX.Element[] {
     const chats = project.chats.filter((c) => c.docId === doc.id)
-    return chats.map((c) => (
-      <div key={c.id} className="group flex items-center gap-1 py-0.5 pl-9 pr-1 text-[13px] hover:bg-[var(--panel3)]">
-        <MessageSquare size={13} style={{ color: 'var(--muted)' }} />
-        <span className="min-w-0 flex-1 cursor-pointer truncate" onClick={() => openChat(c)} title={c.title}>
-          {c.title}
-        </span>
-        <ActionBadge chat={c} />
-        <div className="hidden gap-0.5 group-hover:flex">
-          <TitleButton chatId={c.id} />
-          <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteChat(c)} />
+    return chats.map((c) => {
+      const isActive = activeChatId === c.id
+      return (
+        <div
+          key={c.id}
+          className="group flex items-center gap-1 border-l-2 py-0.5 pl-9 pr-1 text-[13px] hover:bg-[var(--panel3)]"
+          style={{
+            background: isActive ? 'var(--accent-soft)' : undefined,
+            borderLeftColor: isActive ? 'var(--accent)' : 'transparent'
+          }}
+          aria-current={isActive ? 'page' : undefined}
+        >
+          <MessageSquare size={13} style={{ color: isActive ? 'var(--accent)' : 'var(--muted)' }} />
+          <span className="min-w-0 flex-1 cursor-pointer truncate" onClick={() => openChat(c)} title={c.title}>
+            {c.title}
+          </span>
+          <ActionBadge chat={c} />
+          <div className="hidden gap-0.5 group-hover:flex">
+            <TitleButton chatId={c.id} />
+            <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteChat(c)} />
+          </div>
         </div>
-      </div>
-    ))
+      )
+    })
   }
 
   return (
@@ -275,11 +333,20 @@ export default function Sidebar(): JSX.Element {
                       p.docs.map((doc) => {
                         const docChats = p.chats.filter((chat) => chat.docId === doc.id)
                         const docChatsKey = `${projectKey}:doc:${doc.id}`
-                        const docChatsOpen = expanded[docChatsKey] ?? true
+                        const docChatsOpen = isOpen(docChatsKey, true)
+                        const isActive = activeDocId === doc.id
+                        const isActiveParent = !isActive && activeChatId !== null && activeChat?.docId === doc.id
                         return (
                           <div key={doc.id}>
-                            <div className="group flex items-center gap-1 py-0.5 pl-6 pr-1 text-[13px] hover:bg-[var(--panel3)]">
-                              <FileText size={13} style={{ color: 'var(--muted)' }} />
+                            <div
+                              className="group flex items-center gap-1 border-l-2 py-0.5 pl-6 pr-1 text-[13px] hover:bg-[var(--panel3)]"
+                              style={{
+                                background: isActive ? 'var(--accent-soft)' : undefined,
+                                borderLeftColor: isActive || isActiveParent ? 'var(--accent)' : 'transparent'
+                              }}
+                              aria-current={isActive ? 'page' : undefined}
+                            >
+                              <FileText size={13} style={{ color: isActive ? 'var(--accent)' : 'var(--muted)' }} />
                               {docChats.length > 0 && (
                                 <button
                                   type="button"
@@ -290,7 +357,7 @@ export default function Sidebar(): JSX.Element {
                                   aria-expanded={docChatsOpen}
                                   onClick={(event) => {
                                     event.stopPropagation()
-                                    toggle(docChatsKey)
+                                    toggle(docChatsKey, true)
                                   }}
                                 >
                                   {docChatsOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
@@ -322,18 +389,29 @@ export default function Sidebar(): JSX.Element {
                     onAdd={() => void createChat(p.project.id)}
                   >
                     {isOpen(`${projectKey}:chats`) &&
-                      projectChats.map((c) => (
-                        <div key={c.id} className="group flex items-center gap-1 py-0.5 pl-6 pr-1 text-[13px] hover:bg-[var(--panel3)]">
-                          <MessageSquare size={13} style={{ color: 'var(--muted)' }} />
-                          <span className="min-w-0 flex-1 cursor-pointer truncate" onClick={() => openChat(c)} title={c.title}>
-                            {c.title}
-                          </span>
-                          <div className="hidden gap-0.5 group-hover:flex">
-                            <TitleButton chatId={c.id} />
-                            <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteChat(c)} />
+                      projectChats.map((c) => {
+                        const isActive = activeChatId === c.id
+                        return (
+                          <div
+                            key={c.id}
+                            className="group flex items-center gap-1 border-l-2 py-0.5 pl-6 pr-1 text-[13px] hover:bg-[var(--panel3)]"
+                            style={{
+                              background: isActive ? 'var(--accent-soft)' : undefined,
+                              borderLeftColor: isActive ? 'var(--accent)' : 'transparent'
+                            }}
+                            aria-current={isActive ? 'page' : undefined}
+                          >
+                            <MessageSquare size={13} style={{ color: isActive ? 'var(--accent)' : 'var(--muted)' }} />
+                            <span className="min-w-0 flex-1 cursor-pointer truncate" onClick={() => openChat(c)} title={c.title}>
+                              {c.title}
+                            </span>
+                            <div className="hidden gap-0.5 group-hover:flex">
+                              <TitleButton chatId={c.id} />
+                              <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteChat(c)} />
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        )
+                      })}
                   </Section>
 
                   <Section label={t('sidebar.secResources')} open={isOpen(`${projectKey}:res`)} onToggle={() => toggle(`${projectKey}:res`)} onAdd={() => void uploadResource(p.project.id)}>
