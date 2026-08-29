@@ -6,6 +6,7 @@ import type {
   ChatMessage,
   ChatMeta,
   ChatSummary,
+  DocEditorFormat,
   DocMeta,
   DocRollup,
   DocSummary,
@@ -237,11 +238,16 @@ export async function findDocMeta(docId: string): Promise<DocMeta> {
   throw new Error('doc not found')
 }
 
-export async function saveDoc(docId: string, content: string): Promise<void> {
+export async function saveDoc(docId: string, content: string, editorFormat?: DocEditorFormat): Promise<void> {
   const doc = await findDocMeta(docId)
   await atomicWrite(docContentPath(doc.projectId, docId), content)
   const meta = await getDocMeta(doc.projectId, docId)
-  await atomicWriteJson(docMetaPath(doc.projectId, docId), { ...meta, updatedAt: nowIso() })
+  const next: DocMeta = {
+    ...meta,
+    ...(editorFormat === undefined ? {} : { editorFormat }),
+    updatedAt: nowIso()
+  }
+  await atomicWriteJson(docMetaPath(doc.projectId, docId), next)
 }
 
 export async function renameDoc(docId: string, title: string): Promise<DocMeta> {

@@ -721,3 +721,9 @@ export function useT(): (key: string, vars?: Record<string, string | number>) =>
 export function tGlobal(key: string, vars?: Record<string, string | number>): string {
   return translate(useI18nStore.getState().locale, key, vars)
 }
+  'editor.center': '????',
+  'editor.firstLineIndent': '??????',
+  'editor.characters': '???{total}??????{nonWhitespace}?',
+  'editor.center': 'Center align',
+  'editor.firstLineIndent': 'First-line indent',
+  'editor.characters': 'Characters: {total} (excluding whitespace: {nonWhitespace})',

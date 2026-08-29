@@ -25,6 +25,21 @@ export interface ProjectMeta {
   status: ProjectStatus
 }
 
+export interface DocCenteredParagraph {
+  /** Logical document offsets after CodeMirror normalizes line endings. */
+  from: number
+  to: number
+  /** Paragraph text used to safely restore formatting after an external edit. */
+  text: string
+}
+
+/** Editor-only formatting stored in the document metadata sidecar, never in Markdown content. */
+export interface DocEditorFormat {
+  version: 1
+  firstLineIndent: boolean
+  centeredParagraphs: DocCenteredParagraph[]
+}
+
 export interface DocMeta {
   id: string
   projectId: string
@@ -32,6 +47,8 @@ export interface DocMeta {
   createdAt: string
   updatedAt: string
   status: DocStatus
+  /** Optional editor presentation metadata retained outside the Markdown body. */
+  editorFormat?: DocEditorFormat
 }
 
 /** 上下文范围（文档级上下文对话使用，PRD 6.4） */

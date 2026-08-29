@@ -99,6 +99,35 @@ html.light .cm-editor .cm-content ::selection {
 }
 
 /* 上下文高亮装饰 */
+
+.cm-editor .cm-line.cm-paragraph-centered {
+  text-align: center;
+}
+.cm-editor .cm-line.cm-paragraph-first-indent {
+  text-indent: 2em;
+}
+
+.editor-statusbar {
+  flex: 0 0 auto;
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 4px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.btn[aria-pressed='true'] {
+  color: var(--text);
+  background: var(--panel3);
+  border-color: var(--accent);
+}
+
 .cm-context-before {
   background: rgba(68, 147, 248, 0.10);
 }

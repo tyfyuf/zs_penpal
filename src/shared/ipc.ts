@@ -13,6 +13,7 @@ import type {
   ConsistencyIssue,
   ContextRange,
   DistillResult,
+  DocEditorFormat,
   DocMeta,
   DocRollup,
   DocRollupOverview,
@@ -182,7 +183,7 @@ export interface IpcApi {
   [IPC.projectPurge]: { req: string; res: void }
   [IPC.docCreate]: { req: DocCreateInput; res: DocMeta }
   [IPC.docRead]: { req: string; res: { doc: DocMeta; content: string } }
-  [IPC.docSave]: { req: { docId: string; content: string }; res: void }
+  [IPC.docSave]: { req: { docId: string; content: string; editorFormat?: DocEditorFormat }; res: void }
   [IPC.docRename]: { req: { docId: string; title: string }; res: DocMeta }
   [IPC.docDelete]: { req: string; res: void }
   [IPC.docRestore]: { req: string; res: DocMeta }

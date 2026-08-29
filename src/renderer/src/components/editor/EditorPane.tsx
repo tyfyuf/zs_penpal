@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Compartment, EditorState, type Extension } from '@codemirror/state'
 import { Decoration, EditorView } from '@codemirror/view'
-import { ClipboardPaste, Copy, Download, Minus, Plus, Save, Scissors } from 'lucide-react'
-import type { ChatAction, ContextRange, DocMeta } from '@shared/types'
+import { AlignCenter, ClipboardPaste, Copy, Download, IndentIncrease, Minus, Plus, Save, Scissors } from 'lucide-react'
+import type { ChatAction, ContextRange, DocEditorFormat, DocMeta } from '@shared/types'
 import type { Tab } from '../../store/app.store'
 import { useAppStore } from '../../store/app.store'
 import { useContextStore, type ContextHighlight } from '../../store/context.store'
@@ -10,7 +10,15 @@ import { api } from '../../lib/api'
 import { registerSaveHandler } from '../../lib/editorRegistry'
 import { toast } from '../../store/toast.store'
 import { useT } from '../../i18n'
-import { buildExtensions } from './editor-setup'
+import {
+  buildExtensions,
+  centeredParagraphsExtension,
+  firstLineIndentExtension,
+  getCenteredParagraphs,
+  isSelectedParagraphsCentered,
+  setCenteredParagraphs,
+  toggleSelectedParagraphsCentered
+} from './editor-setup'
 
 const ACTIONS: { value: ChatAction; labelKey: string }[] = [
   { value: 'diagnose', labelKey: 'sidebar.actionDiagnose' },
@@ -39,6 +47,60 @@ function buildHighlightDecos(h: ContextHighlight, docLen: number): Extension {
   return EditorView.decorations.of(Decoration.set(ranges, true))
 }
 
+
+interface CharacterStats {
+  total: number
+  nonWhitespace: number
+}
+
+function countCharacters(text: string): CharacterStats {
+  let total = 0
+  let nonWhitespace = 0
+  for (const character of text) {
+    total += 1
+    if (!/\s/u.test(character)) nonWhitespace += 1
+  }
+  return { total, nonWhitespace }
+}
+
+function resolveCenteredParagraphs(content: string, format?: DocEditorFormat): { from: number; to: number }[] {
+  if (!format || format.version !== 1) return []
+  const ranges: { from: number; to: number }[] = []
+  for (const paragraph of format.centeredParagraphs) {
+    if (!paragraph.text) continue
+    let from = paragraph.from
+    if (content.slice(from, from + paragraph.text.length) !== paragraph.text) {
+      let nearest = -1
+      let nearestDistance = Number.POSITIVE_INFINITY
+      let candidate = content.indexOf(paragraph.text)
+      while (candidate !== -1) {
+        const distance = Math.abs(candidate - paragraph.from)
+        if (distance < nearestDistance) {
+          nearest = candidate
+          nearestDistance = distance
+        }
+        candidate = content.indexOf(paragraph.text, candidate + Math.max(1, paragraph.text.length))
+      }
+      if (nearest === -1) continue
+      from = nearest
+    }
+    ranges.push({ from, to: from + paragraph.text.length })
+  }
+  return ranges
+}
+
+function buildEditorFormat(view: EditorView, firstLineIndent: boolean): DocEditorFormat {
+  return {
+    version: 1,
+    firstLineIndent,
+    centeredParagraphs: getCenteredParagraphs(view.state).map((paragraph) => ({
+      from: paragraph.from,
+      to: paragraph.to,
+      text: view.state.doc.sliceString(paragraph.from, paragraph.to)
+    }))
+  }
+}
+
 export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   const t = useT()
   const docId = tab.refId!
@@ -47,10 +109,17 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   const lineEndingRef = useRef<'LF' | 'CRLF'>('LF')
   const loadedRef = useRef(false)
   const highlightCompartment = useRef(new Compartment())
+  const indentCompartment = useRef(new Compartment())
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const statsTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const firstLineIndentRef = useRef(false)
+  const centeredButtonRef = useRef(false)
 
   const [docMeta, setDocMeta] = useState<DocMeta | null>(null)
   const [fontSize, setFontSize] = useState(15)
+  const [firstLineIndent, setFirstLineIndent] = useState(false)
+  const [centeredSelection, setCenteredSelection] = useState(false)
+  const [characterStats, setCharacterStats] = useState<CharacterStats>({ total: 0, nonWhitespace: 0 })
   const [menu, setMenu] = useState<MenuState | null>(null)
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -62,13 +131,32 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   const openChat = useAppStore((s) => s.openChat)
   const highlight = useContextStore((s) => s.highlight)
 
+  const syncCenteredButton = useCallback((view: EditorView | null): void => {
+    if (!view) return
+    const next = isSelectedParagraphsCentered(view.state)
+    if (centeredButtonRef.current === next) return
+    centeredButtonRef.current = next
+    setCenteredSelection(next)
+  }, [])
+
+  const scheduleCharacterStats = useCallback((view: EditorView): void => {
+    if (statsTimer.current) clearTimeout(statsTimer.current)
+    statsTimer.current = setTimeout(() => {
+      setCharacterStats(countCharacters(view.state.doc.toString()))
+    }, 120)
+  }, [])
+
   const doSave = useCallback(async (): Promise<void> => {
     const view = viewRef.current
     if (!view || !loadedRef.current) return
     let text = view.state.doc.toString()
     if (lineEndingRef.current === 'CRLF') text = text.replace(/\n/g, '\r\n')
     try {
-      await api.invoke('doc:save', { docId, content: text })
+      await api.invoke('doc:save', {
+        docId,
+        content: text,
+        editorFormat: buildEditorFormat(view, firstLineIndentRef.current)
+      })
       setDirty(docId, false)
     } catch (err) {
       toast.error((err as Error).message)
@@ -85,6 +173,11 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
 
   useEffect(() => {
     let cancelled = false
+    firstLineIndentRef.current = false
+    centeredButtonRef.current = false
+    setFirstLineIndent(false)
+    setCenteredSelection(false)
+    setCharacterStats({ total: 0, nonWhitespace: 0 })
     void (async () => {
       const { doc, content } = await api.invoke('doc:read', docId)
       if (cancelled) return
@@ -100,10 +193,14 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
             return true
           }),
           highlightCompartment.current.of([]),
+          indentCompartment.current.of(doc.editorFormat?.firstLineIndent ? firstLineIndentExtension : []),
+          centeredParagraphsExtension,
           EditorView.updateListener.of((u) => {
+            if (u.selectionSet) syncCenteredButton(u.view)
             if (u.docChanged && loadedRef.current) {
               setDirty(docId, true)
               scheduleSave()
+              scheduleCharacterStats(u.view)
             }
           }),
           EditorView.theme({
@@ -116,8 +213,14 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
         state,
         parent: containerRef.current!
       })
+      const restoredCenteredParagraphs = resolveCenteredParagraphs(view.state.doc.toString(), doc.editorFormat)
+      if (restoredCenteredParagraphs.length) view.dispatch({ effects: setCenteredParagraphs.of(restoredCenteredParagraphs) })
+      firstLineIndentRef.current = Boolean(doc.editorFormat?.firstLineIndent)
+      setFirstLineIndent(firstLineIndentRef.current)
+      setCharacterStats(countCharacters(view.state.doc.toString()))
       viewRef.current = view
       loadedRef.current = true
+      syncCenteredButton(view)
     })()
 
     const unregister = registerSaveHandler(docId, doSave)
@@ -126,6 +229,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
       cancelled = true
       unregister()
       if (saveTimer.current) clearTimeout(saveTimer.current)
+      if (statsTimer.current) clearTimeout(statsTimer.current)
       viewRef.current?.destroy()
       viewRef.current = null
       loadedRef.current = false
@@ -134,6 +238,28 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   }, [docId])
 
   // 上下文高亮（PRD 6.4）
+
+  function markEditorFormatDirty(): void {
+    setDirty(docId, true)
+    scheduleSave()
+  }
+
+  function toggleCenteredParagraphs(): void {
+    const view = viewRef.current
+    if (!view || !toggleSelectedParagraphsCentered(view)) return
+    syncCenteredButton(view)
+    markEditorFormatDirty()
+  }
+
+  function toggleFirstLineIndent(): void {
+    const view = viewRef.current
+    const next = !firstLineIndentRef.current
+    firstLineIndentRef.current = next
+    setFirstLineIndent(next)
+    view?.dispatch({ effects: indentCompartment.current.reconfigure(next ? firstLineIndentExtension : []) })
+    markEditorFormatDirty()
+  }
+
   useEffect(() => {
     const view = viewRef.current
     if (!view) return
@@ -280,6 +406,24 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
         <button className="btn !px-2 !py-1" onClick={() => setFontSize((f) => Math.min(28, f + 1))} title={t('editor.fontUp')}>
           <Plus size={14} />
         </button>
+        <button
+          className="btn !px-2 !py-1"
+          onClick={toggleCenteredParagraphs}
+          title={t('editor.center')}
+          aria-label={t('editor.center')}
+          aria-pressed={centeredSelection}
+        >
+          <AlignCenter size={14} />
+        </button>
+        <button
+          className="btn !px-2 !py-1"
+          onClick={toggleFirstLineIndent}
+          title={t('editor.firstLineIndent')}
+          aria-label={t('editor.firstLineIndent')}
+          aria-pressed={firstLineIndent}
+        >
+          <IndentIncrease size={14} />
+        </button>
         <button className="btn !px-2 !py-1" onClick={() => void doSave()} title={t('editor.save')}>
           <Save size={14} />
         </button>
@@ -295,6 +439,13 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
         onClick={() => menu && setMenu(null)}
       >
         <div ref={containerRef} className="h-full" />
+      </div>
+
+      <div className="editor-statusbar" aria-live="polite">
+        {t('editor.characters', {
+          total: characterStats.total.toLocaleString(),
+          nonWhitespace: characterStats.nonWhitespace.toLocaleString()
+        })}
       </div>
 
       {menu && (

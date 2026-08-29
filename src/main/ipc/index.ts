@@ -131,7 +131,7 @@ export function registerIpcHandlers(): void {
   handle(IPC.docRead, (id) => readDoc(id))
   handle(IPC.docSave, async (req) => {
     const doc = await findDocMeta(req.docId)
-    const result = await saveDoc(req.docId, req.content)
+    const result = await saveDoc(req.docId, req.content, req.editorFormat)
     if (doc) queueVectorSourceSync(doc.projectId, doc.id, 'doc')
     return result
   })
