@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import type {
   ChatAttachment,
+  DocMeta,
   ChatInjectionOverrides,
   ChatMessage,
   ChatMeta,
@@ -29,9 +30,11 @@ import { useAppStore } from '../../store/app.store'
 import { useContextStore } from '../../store/context.store'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
+import { confirmDialog } from '../../store/dialog.store'
 import { useT } from '../../i18n'
 import ContextPanel from './ContextPanel'
 import UploadPicker from './UploadPicker'
+import DocumentPicker from './DocumentPicker'
 
 function toStreamRange(range: ContextRange, docId: string, projectId: string): StreamContextRange {
   return {
@@ -99,6 +102,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   const [streaming, setStreaming] = useState<{ requestId: string; acc: string; reasoning: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showUpload, setShowUpload] = useState(false)
+  const [showDocumentPicker, setShowDocumentPicker] = useState(false)
   const [regeneratePrompt, setRegeneratePrompt] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [prevAnswer, setPrevAnswer] = useState<{ content: string; reasoning?: string } | null>(null)
@@ -599,17 +603,75 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
     }, 300)
   }
 
-  /** 附加关联文档（写作文档）到当前对话；与全文注入去重 */
-  function attachLinkedDoc(): void {
-    if (!chat?.docId) return
-    if (attachments.some((a) => a.docId === chat.docId)) return
-    const hasFullText = !!config?.summaryEnabled && !!config?.summaryInjection?.doc?.fullText && chat.kind === 'doc'
-    if (hasFullText) {
-      toast.info(t('chat.docFullTextOn'))
+  function attachDocument(doc: DocMeta): void {
+    if (attachments.some((attachment) => attachment.docId === doc.id)) {
+      toast.info(t('chat.docAlreadyAttached'))
       return
     }
-    const title = docTitle ?? chat.docId
-    setAttachments((a) => [...a, { docId: chat.docId, name: title }])
+    setAttachments((current) => [...current, { docId: doc.id, kind: 'project_document', name: doc.title }])
+  }
+
+  function isLinkedFullTextEnabled(): boolean {
+    if (!config?.summaryEnabled || !config.summaryInjection.doc.fullText) return false
+    if (started) return activeInjections?.includes('fulltext') === true || pendingEnabled.includes('fulltext')
+    return !disabledInjections.includes('fulltext') && ((defaultActive?.includes('fulltext') ?? false) || pendingEnabled.includes('fulltext'))
+  }
+
+  async function expandContextToFullDocument(): Promise<void> {
+    if (!chat?.docId || chat.kind !== 'context') return
+    if (!(await confirmDialog(t('chat.contextFullTextConfirm')))) return
+    try {
+      const { content } = await api.invoke('doc:read', chat.docId)
+      const current = range ?? { before: 0, after: 0, anchor: 0, hasSelection: false }
+      const hasSelection = current.selectionFrom !== undefined && current.selectionTo !== undefined && current.selectionTo > current.selectionFrom
+      const anchor = Math.min(content.length, Math.max(0, current.anchor))
+      const selectionFrom = hasSelection ? Math.min(content.length, Math.max(0, current.selectionFrom!)) : undefined
+      const selectionTo = hasSelection ? Math.min(content.length, Math.max(selectionFrom!, current.selectionTo!)) : undefined
+      const coreStart = selectionFrom !== undefined ? selectionFrom : anchor
+      const coreEnd = selectionTo !== undefined ? selectionTo : anchor
+      const fullRange: ContextRange = {
+        before: coreStart,
+        after: Math.max(0, content.length - coreEnd),
+        anchor,
+        hasSelection: selectionFrom !== undefined && selectionTo !== undefined && selectionTo > selectionFrom,
+        ...(selectionFrom !== undefined ? { selectionFrom } : {}),
+        ...(selectionTo !== undefined ? { selectionTo } : {})
+      }
+      const fullLock = { before: fullRange.before, after: fullRange.after }
+      setRange(fullRange)
+      setTabContextRange(tab.id, fullRange)
+      setLockedRange(fullLock)
+      useContextStore.getState().setHighlight({ docId: chat.docId, ...fullRange })
+      if (rangeSaveTimer.current) clearTimeout(rangeSaveTimer.current)
+      await api.invoke('chat:patch', { chatId, patch: { contextRange: fullRange, lockedRange: fullLock } })
+      if (started && hasOutput && (current.before !== fullRange.before || current.after !== fullRange.after)) {
+        pendingReasonRef.current = pendingReasonRef.current === 'summary' ? 'both' : 'context'
+        setRegeneratePrompt(true)
+      }
+      toast.info(t('chat.contextFullTextEnabled'))
+    } catch (err) {
+      toast.error((err as Error).message)
+    }
+  }
+
+  async function handleSelectedDocument(doc: DocMeta): Promise<void> {
+    setShowDocumentPicker(false)
+    if (!chat) return
+    if (chat.kind === 'doc' && chat.docId === doc.id) {
+      if (isLinkedFullTextEnabled()) {
+        toast.info(t('chat.docFullTextOn'))
+      } else if (injectionItems.some((item) => item.key === 'fulltext')) {
+        toggleInjection('fulltext')
+      } else {
+        attachDocument(doc)
+      }
+      return
+    }
+    if (chat.kind === 'context' && chat.docId === doc.id) {
+      await expandContextToFullDocument()
+      return
+    }
+    attachDocument(doc)
   }
 
   async function persistInjectionOverrides(overrides: ChatInjectionOverrides): Promise<boolean> {
@@ -954,11 +1016,9 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
           <button className="btn !px-2 !py-2" title={t('chat.upload')} onClick={() => setShowUpload(true)}>
             <Paperclip size={16} />
           </button>
-          {chat?.docId && (
-            <button className="btn !px-2 !py-2" title={t('chat.attachDoc')} onClick={attachLinkedDoc}>
-              <FileText size={16} />
-            </button>
-          )}
+          <button className="btn !px-2 !py-2" title={t('chat.attachDoc')} onClick={() => setShowDocumentPicker(true)}>
+            <FileText size={16} />
+          </button>
           <textarea
             className="input min-h-[40px] flex-1 resize-none"
             rows={1}
@@ -998,8 +1058,15 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
         <UploadPicker
           chatId={chatId}
           projectId={chat.projectId}
-          onAttached={(r) => setAttachments((a) => [...a, { snapshotId: r.snapshotId, name: r.resource.name }])}
+          onAttached={(r) => setAttachments((a) => a.some((x) => x.snapshotId === r.snapshotId) ? a : [...a, { snapshotId: r.snapshotId, kind: 'resource', name: r.resource.name }])}
           onClose={() => setShowUpload(false)}
+        />
+      )}
+      {showDocumentPicker && chat && (
+        <DocumentPicker
+          projectId={chat.projectId}
+          onSelect={(doc) => void handleSelectedDocument(doc)}
+          onClose={() => setShowDocumentPicker(false)}
         />
       )}
     </div>

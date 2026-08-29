@@ -4,7 +4,7 @@
 > 产品需求：`writing-agent-prd-v1.3.md`；技术选型：`writing-agent-tech-stack-v1.0.md`；
 > 拆解指导（需求参考，非运行时）：`拆解指导文档/story-decomposition-guide.md`、`content-decomposition-guide-v1.0.md`。
 > 架构定稿：`docs/summary-distillation-refactor-plan-v2.md`（三层记忆架构，已按此实施）。
-> **当前代码基线（2026-08-22）**：当前开发分支为 `codex/setting-distillation-v2`，父基线为 `8374d8a`（其代码基线仍是 `193f6a8` 的 verified hierarchical resource distillation）。本分支已完成仅针对 `setting` 的可恢复并发蒸馏 v2；`story/other` 仍走旧分层路径。Job/Worker 后台化、主进程隔离和可视化进度条尚未实施。
+> **Current baseline (2026-08-22)**: branch `codex/setting-distillation-v2` keeps Setting-v2 active. Story and Other use the legacy hierarchical path; Story omits the `foreshadowing` field and uses name-only knowledge validation. Job/Worker isolation and visual progress are not implemented.
 
 ---
 
@@ -85,6 +85,7 @@ D:\ds h-project\
 │  │  │  ├─ api.service.ts         # 对话组装/宿主原文检索/大摘要规划/工具循环/预算裁剪/流式
 │  │  │  ├─ summary.service.ts     # 摘要/蒸馏入口、分类、大摘要 rollup、一致性扫描
 │  │  │  ├─ setting-distillation.service.ts # setting-v2 三角色提取、递归拆分/归并、总览与 checkpoint 编排
+│  │  │  ├─ setting-distillation.protocol.ts # setting 专用提取/归并/总览蒸馏协议与字段边界
 │  │  │  ├─ setting-distillation.types.ts # setting-v2 候选项、checkpoint 与结果类型
 │  │  │  ├─ summary-task-scheduler.ts # 摘要共享并发上限、优先级与 429 自适应收缩
 │  │  │  ├─ vector.service.ts      # 本地混合检索（BGE/特征哈希语义 + 轻量字面召回）
@@ -282,8 +283,10 @@ export interface ChatMeta {
 
 ### 6.2 摘要/蒸馏当前基线（setting-v2 已实现；待真实端点验收）
 
-- 本轮只改 `setting`。`story/other` 继续使用 `193f6a8` 的旧分层摘要、证据验证、块复用和递归合并路径，不得把 setting-v2 的行为外推到其他类型。
-- setting-v2 把每个全文/自然边界分块的提取拆成三个角色：①实体+关系；②术语+规则+约束；③时间线。块内三角色并发，块之间顺序推进；删除未决问题生成，最终固定 `unresolved: []`。
+- This round keeps `setting` on Setting-v2. `story` and `other` use the legacy hierarchical summary, chunk reuse, and recursive merge path. Story does not emit `foreshadowing`; its knowledge projection contains only source-name-validated character entities with empty evidence and no facts.
+- setting-v2 把每个全文/自然边界分块的提取拆成三个角色：①实体+关系；②术语+规则+约束；③时间线。块内三角色并发，块之间顺序推进；删除未决问题生成，最终固定 no unresolved field is emitted。
+- 2026-08-22 已实施内容精简第一阶段：`setting-distillation.protocol.ts` 把 setting 提取、归并、总览提示词统一改为“语义压缩而非穷举整理”，定义实体/术语/规则/关系/时间线/约束的互斥边界、原子事实、禁止长段照抄和字段级长度预算；中英文协议同步。
+- 新协议仍要求保留所有独立事实，但明确修辞、同义复述、重复说明和无新增信息的例子不属于独立事实；`sourceIds` 只表示语义吸收，不要求保留候选原句。checkpoint `pipelineVersion` 已升为 2，旧协议缓存不会被复用。
 - 组合角色遇到输出截断、空响应或结构校验失败时，继续拆成单语义任务；单语义任务仍失败时递归拆输入，不允许通过减少条目数或 compact 内容来换取成功。`structured-generation.service.ts` 新增 `retryPolicy: 'split-required'`，显式把截断/上下文溢出交还上层拆分；旧路径默认仍为 `compact`。
 - 最终阶段不再让一次 LLM 同时输出总览和全部条目：实体/关系、术语/规则/约束、时间线分别归并，总览单独生成；归并要求 `sourceIds` 完整覆盖输入候选并在本地校验名称。叶级归并仍无法完成时原样保留候选，不裁剪内容。
 - setting-v2 不要求证据文本，只校验实体名、术语名和关系主体/对象；写入的 knowledge 使用 `status: confirmed` 与空 `evidence`。这属于用户明确接受的 setting 专用减压边界。
@@ -293,7 +296,7 @@ export interface ChatMeta {
 
 ### 6.3 宿主驱动原文检索（已实施，待真实端点验收）
 
-- 首次检索改为宿主自动执行，不再依赖模型输出 `vectorQuery`；关闭摘要、重新生成和无工具模型均可检索。
+> **Scope**: keep Setting-v2 unchanged, restore Story to the legacy hierarchical path, and retain only the confirmed Story boundaries: no `foreshadowing` field and name-only validation. Job/Worker, background IPC, progress UI, and Other are out of scope.
 - 检索升级为字面专名/原文措辞 + 神经/哈希语义的混合排序。
 - 支持 Function Calling 的端点获得 `search_project_source`，单次回答最多 2 次工具检索；明确的工具参数兼容错误会自动重试不带 tools。
 - “本次记忆”逐次展示自动检索/工具检索的查询、结果和命中片段。
@@ -386,9 +389,9 @@ export interface ChatMeta {
 
 `setting` 进入 `distillSettingResourceV2`：若全文可放入输入预算，三个角色都读取全文；否则按标题/段落/句子优先切成约 3k–10k token 自然块。每块并发执行“实体+关系”“术语+规则+约束”“时间线”，组合输出失败则拆为单语义调用，单语义仍失败再递归拆输入。所有 LLM 请求进入共享并发调度器，默认上限 3，429 自适应降并发。
 
-提取完成后，三大语义分支分别归并；候选过多或输出失败时按预算分批并递归二分。每个归并输出通过 `sourceIds` 做全覆盖检查，实体名、术语名、关系主体/对象必须与引用候选一致。总览是独立任务；输入过长或输出失败时按层级生成局部概览再归纳。最终 `unresolved: []`，knowledge 不保存证据。
+提取完成后，三大语义分支分别归并；候选过多或输出失败时按预算分批并递归二分。每个归并输出通过 `sourceIds` 做全覆盖检查，实体名、术语名、关系主体/对象必须与引用候选一致。总览是独立任务；输入过长或输出失败时按层级生成局部概览再归纳。最终 no unresolved field is emitted，knowledge 不保存证据。
 
-setting 的任务结果写入独立 sidecar checkpoint；同源、同模型、同语言的重新生成复用成功任务，只重试失败/缺失项。仅当全部必要任务成功后写正式资源摘要，因此失败不会覆盖旧正式摘要。`story/other` 仍走旧的“知识抽取 + 类型摘要 + 证据校验 + 递归合并”路径，并可能写 `generation.state=incomplete`。
+Setting-v2 writes an independent sidecar checkpoint and publishes only after required tasks succeed. `story` and `other` retain the legacy knowledge-extraction + type-summary + recursive-merge path; Story now skips evidence extraction and projects name-only character knowledge.
 ### 7.7 一致性扫描（`summary.service.ts scanConsistency`）
 
 纯规则、零 LLM：R1 别名冲突（两角色名字互为别名或别名交集，error 红标）+ R4 摘要漂移（复用 `checkResourceSummaryStale`，advisory 黄标），摘要区“一致性提示”分组展示，只提示不自动改。
@@ -428,7 +431,7 @@ setting 的任务结果写入独立 sidecar checkpoint；同源、同模型、�
 | 债务 | 现状 | 计划 |
 | --- | --- | --- |
 | 本地嵌入真实语料验收 | BGE/回退/打包链路已接通并通过隔离烟测 | 用实际小说项目比较语义命中；据结果决定是否调分块、查询指令、阈值或模型 |
-| setting-v2 真实语料与多 Provider 验收 | 三角色提取、分支归并、总览拆分、checkpoint 和 429 收缩已实现 | 用 2–3 万字复杂设定验证完整性、耗时、截断恢复、名称校验及 Qwen/DeepSeek/其他端点兼容性 |
+| setting-v2 真实语料与多 Provider 验收 | 三角色提取、分支归并、总览拆分、checkpoint 和 429 收缩已实现；精简协议第一阶段已接入 | 先用现有 5000 字/2 万字样本验证摘要体积、字段归属和原文复用率，再决定是否实施跨字段质量门及 timeout 拆分 |
 | 蒸馏后台化与进度可视化 | setting-v2 仍由主进程同步 IPC 编排；checkpoint 已提供任务级状态 | 后续设计 Job/Worker 隔离、退出恢复、取消语义和阶段/块/角色进度事件；本轮不实现 |
 | 向量索引自动刷新 | 已有源指纹、逐文件状态和手动重建；正文修改可显示 stale | 增加保存后增量/防抖重建 |
 | 无应用图标 / 无签名 | 默认图标；`signAndEditExecutable=false` | 图标与证书就绪后补齐 |
@@ -489,6 +492,6 @@ feat: add resilient setting distillation pipeline
 1b235ef fix: harden summary structured generation
 ```
 
-> **范围记录**：本轮只实现 setting-v2 的语义拆分、并发、递归恢复和 sidecar checkpoint；没有恢复旧实验中的 Job/Worker 文件、后台 IPC 或进度 UI，也没有修改 `story/other` 的生成协议。模型、缓存、失败样本和构建输出继续保持 gitignore，不要加入 Git。
+> **Scope record**: this round keeps Setting-v2 semantic splitting, concurrency, recursive recovery, and sidecar checkpoint; Story is restored to the legacy hierarchical path with no `foreshadowing` field and name-only knowledge validation. Job/Worker, background IPC, and progress UI remain out of scope.
 
 > **交接提醒**：新会话第一步读取本文件，并运行 `git status --short` 与 `git log --oneline -15`。若要继续本轮工作，优先用真实 2–3 万字复杂设定验证输出完整性、失败块复用和多 Provider 行为；后台化/进度条是后续独立阶段，不要与本轮 setting 协议一起重做。

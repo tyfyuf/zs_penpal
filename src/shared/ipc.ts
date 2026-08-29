@@ -1,5 +1,7 @@
-// IPC 契约：channel 名称与 request/response 类型。
-// main 进程通过 ipcMain.handle 注册，renderer 通过 preload 暴露的类型化 API 调用。
+﻿// IPC 濂戠害锛歝hannel 鍚嶇О涓?request/response 绫诲瀷銆?
+// main 杩涚▼閫氳繃 ipcMain.handle 娉ㄥ唽锛宺enderer 閫氳繃 preload 鏆撮湶鐨勭被鍨嬪寲 API 璋冪敤銆?
+
+import type { SummaryProgress } from './summary-job-protocol'
 
 import type {
   AppConfig,
@@ -50,7 +52,7 @@ export interface ChatCreateInput {
   title: string
   docId?: string
   contextRange?: ContextRange
-  /** 右键创建上下文对话的动作（诊断/走向/优化） */
+  /** 鍙抽敭鍒涘缓涓婁笅鏂囧璇濈殑鍔ㄤ綔锛堣瘖鏂?璧板悜/浼樺寲锛?*/
   action?: ChatAction
 }
 
@@ -75,7 +77,7 @@ export interface UsageResult {
   snapshot: UsageSnapshot
 }
 
-/** 主进程 → 渲染进程的事件通道 */
+/** 涓昏繘绋?鈫?娓叉煋杩涚▼鐨勪簨浠堕€氶亾 */
 export const EVENTS = {
   openExternalFile: 'open-external-file',
   streamChunk: 'stream:chunk',
@@ -84,10 +86,11 @@ export const EVENTS = {
   gitInstallProgress: 'git:install-progress',
   configChanged: 'config:changed',
   appFlush: 'app:flush',
-  summaryStatus: 'summary:status'
+  summaryStatus: 'summary:status',
+  summaryProgress: 'summary:progress'
 } as const
 
-/** 渲染进程 → 主进程的 invoke 通道 */
+/** 娓叉煋杩涚▼ 鈫?涓昏繘绋嬬殑 invoke 閫氶亾 */
 export const IPC = {
   configGet: 'config:get',
   configSet: 'config:set',
@@ -165,7 +168,7 @@ export const IPC = {
   recoveryUpdate: 'recovery:update'
 } as const
 
-/** 所有 invoke 通道对应的请求/响应类型映射 */
+/** 鎵€鏈?invoke 閫氶亾瀵瑰簲鐨勮姹?鍝嶅簲绫诲瀷鏄犲皠 */
 export interface IpcApi {
   [IPC.configGet]: { req: void; res: AppConfig }
   [IPC.configSet]: { req: Partial<AppConfig>; res: AppConfig }
@@ -273,7 +276,7 @@ export interface IpcApi {
 
 export type IpcChannel = keyof IpcApi
 
-/** 事件载荷类型 */
+/** 浜嬩欢杞借嵎绫诲瀷 */
 export interface EventPayloads {
   [EVENTS.openExternalFile]: string
   [EVENTS.streamChunk]: { chatId: string; requestId: string; delta: string; reasoningDelta?: string }
@@ -283,11 +286,12 @@ export interface EventPayloads {
   [EVENTS.configChanged]: AppConfig
   [EVENTS.appFlush]: void
   [EVENTS.summaryStatus]: { key: string; generating: boolean }
+  [EVENTS.summaryProgress]: SummaryProgress
 }
 
 export type EventChannel = keyof EventPayloads
 
-/** preload 暴露给 renderer 的类型化 API */
+/** preload 鏆撮湶缁?renderer 鐨勭被鍨嬪寲 API */
 export interface RendererApi {
   invoke<K extends IpcChannel>(channel: K, req: IpcApi[K]['req']): Promise<IpcApi[K]['res']>
   on<E extends EventChannel>(channel: E, listener: (payload: EventPayloads[E]) => void): () => void

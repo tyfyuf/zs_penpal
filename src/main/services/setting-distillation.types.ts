@@ -42,7 +42,7 @@ export interface SettingTimelineExtraction {
 }
 
 export interface SettingDistillationCheckpoint {
-  pipelineVersion: 1
+  pipelineVersion: 2
   sourceFingerprint: string
   modelFingerprint: string
   language: 'zh' | 'en'

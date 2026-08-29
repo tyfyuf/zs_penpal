@@ -18,6 +18,7 @@ export default function SettingsPane(): JSX.Element {
   const setLocale = useI18nStore((s) => s.setLocale)
 
   const [apiBaseUrl, setApiBaseUrl] = useState(config?.apiBaseUrl ?? '')
+  const [apiProtocol, setApiProtocol] = useState<'chat_completions' | 'responses'>(config?.apiProtocol ?? 'chat_completions')
   const [model, setModel] = useState(config?.model ?? '')
   const [contextLimit, setContextLimit] = useState(config?.contextLimit ?? 256000)
   const [autosave, setAutosave] = useState(Math.round((config?.autosaveIntervalMs ?? 5000) / 1000))
@@ -141,7 +142,7 @@ export default function SettingsPane(): JSX.Element {
   }, [])
 
   async function saveApi(): Promise<void> {
-    await updateConfig({ apiBaseUrl, model, contextLimit })
+    await updateConfig({ apiBaseUrl, apiProtocol, model, contextLimit })
     if (apiKeyInput.trim()) {
       await api.invoke('crypto:setApiKey', apiKeyInput.trim())
       setApiKeyInput('')
@@ -310,6 +311,12 @@ export default function SettingsPane(): JSX.Element {
           <div className="space-y-3">
             <Field label={t('settings.apiBase')}>
               <input className="input" value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" />
+            </Field>
+            <Field label={t('settings.apiProtocol')}>
+              <select className="input" value={apiProtocol} onChange={(e) => setApiProtocol(e.target.value as 'chat_completions' | 'responses')}>
+                <option value="chat_completions">Chat Completions</option>
+                <option value="responses">OpenAI Responses API</option>
+              </select>
             </Field>
             <Field label={t('settings.apiKey')}>
               <div className="flex items-center gap-2">

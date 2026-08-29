@@ -96,6 +96,7 @@ export function logVectorEvent(event: {
  * 工具协议审计：只记录协议状态，不记录查询词、工具参数、项目标识或任何原文。
  */
 export function logToolProtocolEvent(event: {
+  protocol?: 'chat_completions' | 'responses'
   outcome:
     | 'native'
     | 'text-recovered'

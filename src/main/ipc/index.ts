@@ -45,21 +45,23 @@ import {
 import { hasApiKey, setApiKey } from '../services/crypto.service'
 import { cancelStream, generateChatTitle, listModels, streamChat, testConnection } from '../services/api.service'
 import {
-  distillResource,
-  generateDocRollups,
   getDefaultActiveKeys,
   getDocRollup,
   listDocRollups,
   listProjectSummaries,
-  queueChatSummary,
-  regenerateChatSummary,
-  regenerateDocRollup,
-  regenerateDocSummary,
-  retryPendingSummaries,
   scanConsistency,
   searchProjectSummaries,
   undistillResource
 } from '../services/summary.service'
+import {
+  distillResourceInWorker,
+  generateDocRollupsInWorker,
+  queueChatSummaryInWorker,
+  regenerateChatSummaryInWorker,
+  regenerateDocRollupInWorker,
+  regenerateDocSummaryInWorker,
+  retryPendingSummariesInWorker
+} from '../services/summary-job-manager'
 import { getSnapshot } from '../services/usage.service'
 import { buildVectorIndex, getVectorIndexStatus, rebuildVectorSource, searchVectorIndex, queueVectorSourceRemoval, queueVectorSourceSync } from '../services/vector.service'
 import { commitAllProjects, commitProject, gitLog, rollback } from '../services/git.service'
@@ -195,7 +197,7 @@ export function registerIpcHandlers(): void {
     queueVectorSourceRemoval(req.projectId, req.resourceId, 'res')
     return result
   })
-  handle(IPC.resourceDistill, (req) => distillResource(req.projectId, req.resourceId, req.type, req.force))
+  handle(IPC.resourceDistill, (req) => distillResourceInWorker(req.projectId, req.resourceId, req.type, req.force))
   handle(IPC.resourceUndistill, (req) => undistillResource(req.projectId, req.resourceId))
   handle(IPC.fileOpenExternal, async (path) => {
     const result = await importExternalFile(path)
@@ -239,16 +241,16 @@ export function registerIpcHandlers(): void {
   })
   handle(IPC.summaryGetResource, (req) => readResourceSummary(req.projectId, req.resourceId))
   handle(IPC.summaryListProject, (projectId) => listProjectSummaries(projectId))
-  handle(IPC.summaryRegenerateDoc, (docId) => regenerateDocSummary(docId))
-  handle(IPC.summaryRegenerateChat, (chatId) => regenerateChatSummary(chatId))
+  handle(IPC.summaryRegenerateDoc, (docId) => regenerateDocSummaryInWorker(docId))
+  handle(IPC.summaryRegenerateChat, (chatId) => regenerateChatSummaryInWorker(chatId))
   handle(IPC.summaryQueueChat, (chatId) => {
-    void queueChatSummary(chatId)
+    void queueChatSummaryInWorker(chatId)
   })
   handle(IPC.summaryDefaultActive, (chatId) => getDefaultActiveKeys(chatId))
   handle(IPC.summarySearch, (req) => searchProjectSummaries(req.projectId, req.query))
   handle(IPC.summaryListRollups, (projectId) => listDocRollups(projectId))
-  handle(IPC.summaryGenerateRollups, (projectId) => generateDocRollups(projectId))
-  handle(IPC.summaryRegenerateRollup, (req) => regenerateDocRollup(req.projectId, req.rollupId))
+  handle(IPC.summaryGenerateRollups, (projectId) => generateDocRollupsInWorker(projectId))
+  handle(IPC.summaryRegenerateRollup, (req) => regenerateDocRollupInWorker(req.projectId, req.rollupId))
   handle(IPC.summaryGetRollup, (req) => getDocRollup(req.projectId, req.rollupId))
   handle(IPC.summaryScanConsistency, (projectId) => scanConsistency(projectId))
   handle(IPC.vectorBuild, (projectId) => buildVectorIndex(projectId))
@@ -278,5 +280,5 @@ export function registerIpcHandlers(): void {
 
 /** 供主进程退出前调用：重试遗留摘要任务 */
 export async function onBeforeQuitTasks(): Promise<void> {
-  await retryPendingSummaries()
+  await retryPendingSummariesInWorker()
 }

@@ -1,4 +1,5 @@
-import OpenAI from 'openai'
+import type { LlmAdapter } from './llm/llm-client'
+import { createLlmAdapter, createOpenAIClient } from './llm/llm-client'
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
 import type {
   AppConfig,
@@ -28,8 +29,8 @@ import {
   buildResourceSummaryBlock,
   buildRollupBlock,
   buildRollupCatalogBlock,
-  ensureDocSummary
 } from './summary.service'
+import { ensureDocSummaryInWorker } from './summary-job-manager'
 import { logToolProtocolEvent } from './log.service'
 import { recordUsage } from './usage.service'
 import { executeStructuredTask } from './structured-generation.service'
@@ -462,9 +463,11 @@ function toolProtocolLog(
   outcome: Parameters<typeof logToolProtocolEvent>[0]['outcome'],
   startedAt: number,
   state: StreamRoundState,
-  toolCalls?: number
+  toolCalls?: number,
+  protocol: ApiSettings['apiProtocol'] = 'chat_completions'
 ): void {
   logToolProtocolEvent({
+    protocol,
     outcome,
     finishReason: state.finishReason,
     toolCalls,
@@ -473,7 +476,7 @@ function toolProtocolLog(
 }
 
 async function streamAnswerWithTools(options: {
-  client: OpenAI
+  client: LlmAdapter
   settings: ApiSettings
   messages: ChatCompletionMessageParam[]
   projectId: string
@@ -504,7 +507,7 @@ async function streamAnswerWithTools(options: {
     const state = newStreamRound()
 
     try {
-      const stream = await client.chat.completions.create(
+      const stream = await client.createChatCompletionStream(
         {
           model: settings.model,
           messages: conversation,
@@ -552,11 +555,11 @@ async function streamAnswerWithTools(options: {
       if (useTools && isToolCompatibilityError(error)) {
         reasoning += state.reasoning
         toolsDisabledForRequest = true
-        toolProtocolLog('compatibility-retry', roundStartedAt, state)
+        toolProtocolLog('compatibility-retry', roundStartedAt, state, undefined, settings.apiProtocol)
         if (!noToolFallbackUsed) {
           conversation.push(buildNoToolFallbackInstruction(settings.language))
           noToolFallbackUsed = true
-          logToolProtocolEvent({ outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
+          logToolProtocolEvent({ protocol: settings.apiProtocol, outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
           continue
         }
       }
@@ -578,9 +581,9 @@ async function streamAnswerWithTools(options: {
     if (validCall && useTools) {
       reasoning += state.reasoning
       if (explicitCall && !validNativeCall) {
-        toolProtocolLog('text-recovered', roundStartedAt, state, 1)
+        toolProtocolLog('text-recovered', roundStartedAt, state, 1, settings.apiProtocol)
       } else {
-        toolProtocolLog('native', roundStartedAt, state, nativeCalls.length || 1)
+        toolProtocolLog('native', roundStartedAt, state, nativeCalls.length || 1, settings.apiProtocol)
       }
       const assistantToolCall = {
         id: validCall.id || `search_project_source_${executedToolCalls}`,
@@ -622,12 +625,12 @@ async function streamAnswerWithTools(options: {
     if (hasToolSignal && (!validCall || !useTools)) {
       reasoning += state.reasoning
       const outcome = isTruncatedFinishReason(state.finishReason) ? 'truncated' : 'malformed'
-      toolProtocolLog(outcome, roundStartedAt, state, nativeCalls.length)
+      toolProtocolLog(outcome, roundStartedAt, state, nativeCalls.length, settings.apiProtocol)
       if (repairAttempts < MAX_TOOL_REPAIR_ATTEMPTS && useTools) {
         repairAttempts++
         appendAssistantTurnForReplay(conversation, state)
         conversation.push(buildToolRepairInstruction(settings.language))
-        logToolProtocolEvent({ outcome: 'repair', durationMs: protocolDuration(roundStartedAt) })
+        logToolProtocolEvent({ protocol: settings.apiProtocol, outcome: 'repair', durationMs: protocolDuration(roundStartedAt) })
         continue
       }
       if (!noToolFallbackUsed) {
@@ -635,7 +638,7 @@ async function streamAnswerWithTools(options: {
         noToolFallbackUsed = true
         appendAssistantTurnForReplay(conversation, state)
         conversation.push(buildNoToolFallbackInstruction(settings.language))
-        logToolProtocolEvent({ outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
+        logToolProtocolEvent({ protocol: settings.apiProtocol, outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
         continue
       }
       throw new Error('\u6a21\u578b\u8fd4\u56de\u4e86\u65e0\u6cd5\u89e3\u6790\u7684\u5de5\u5177\u8c03\u7528\uff0c\u4e14\u4e00\u6b21\u683c\u5f0f\u4fee\u590d\u672a\u6210\u529f')
@@ -648,7 +651,7 @@ async function streamAnswerWithTools(options: {
         noToolFallbackUsed = true
         appendAssistantTurnForReplay(conversation, state)
         conversation.push(buildNoToolFallbackInstruction(settings.language))
-        logToolProtocolEvent({ outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
+        logToolProtocolEvent({ protocol: settings.apiProtocol, outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
         continue
       }
       throw new Error('\u6a21\u578b\u8fd4\u56de\u4e3a\u7a7a')
@@ -661,8 +664,8 @@ async function streamAnswerWithTools(options: {
   }
 }
 
-function makeClient(baseURL: string, apiKey: string): OpenAI {
-  return new OpenAI({ baseURL, apiKey, timeout: 180000, maxRetries: 0 })
+function makeClient(settings: ApiSettings): LlmAdapter {
+  return createLlmAdapter(settings)
 }
 
 // ---------------------------------------------------------------------------
@@ -692,14 +695,18 @@ export function sliceContext(content: string, range: StreamContextRange): Contex
   }
 }
 
-function buildContextBlock(slice: ContextSlice, lang: 'zh' | 'en'): string {
+function buildContextBlock(slice: ContextSlice, source: { id: string; title: string }, lang: 'zh' | 'en'): string {
   const en = lang === 'en'
+  const title = source.title.replace(/[\r\n]+/g, ' ').trim() || source.id
   const parts: string[] = []
-  if (slice.beforeText) parts.push(`${en ? '[Before]' : '[前文]'}\n${slice.beforeText}`)
-  if (slice.coreText) parts.push(`${en ? '[Core/Selection]' : '[核心内容/选区]'}\n${slice.coreText}`)
-  else parts.push(en ? '[Cursor position]' : '[光标位置]')
-  if (slice.afterText) parts.push(`${en ? '[After]' : '[后文]'}\n${slice.afterText}`)
-  return `${en ? '【Document context】' : '【文档上下文】'}\n${parts.join('\n\n')}`
+  if (slice.beforeText) parts.push(`${en ? '[Before]' : '[\u524d\u6587]'}\n${slice.beforeText}`)
+  if (slice.coreText) parts.push(`${en ? '[Core/Selection]' : '[\u6838\u5fc3\u5185\u5bb9/\u9009\u533a]'}\n${slice.coreText}`)
+  else parts.push(en ? '[Cursor position]' : '[\u5149\u6807\u4f4d\u7f6e]')
+  if (slice.afterText) parts.push(`${en ? '[After]' : '[\u540e\u6587]'}\n${slice.afterText}`)
+  const sourceLine = en
+    ? `Source document: ${title} (ID: ${source.id})`
+    : `\u6765\u6e90\u6587\u6863\uff1a${title}\uff08ID\uff1a${source.id}\uff09`
+  return `${en ? '\u3010Document context\u3011' : '\u3010\u6587\u6863\u4e0a\u4e0b\u6587\u3011'}\n${sourceLine}\n${en ? 'The following is an excerpt from this document.' : '\u4ee5\u4e0b\u662f\u8be5\u6587\u6863\u7684\u539f\u6587\u5207\u7247\u3002'}\n${parts.join('\n\n')}`
 }
 
 // ---------------------------------------------------------------------------
@@ -748,11 +755,69 @@ function lastUserDocAttachments(history: ChatMessage[]): string[] {
   return []
 }
 
+type PromptAttachmentSource = 'current_user_message_attachment' | 'message_attachment'
+
+function attachmentKind(attachment: ChatAttachment): 'project_document' | 'resource' {
+  if (attachment.kind) return attachment.kind
+  return attachment.docId ? 'project_document' : 'resource'
+}
+
+function cleanAttachmentName(name: string | undefined, fallback: string): string {
+  const cleaned = (name ?? '').replace(/[\r\n]+/g, ' ').trim()
+  return cleaned || fallback
+}
+
 /**
- * 预算裁剪优先级（从高到低保留）：
- * 系统提示 → 关联文档全文/切片 → 文档摘要 → 资源快照 → 对话摘要 → 资源摘要 → 对话历史
- * auxMsgs 按优先级从高到低排列，超预算时从尾部（资源摘要）开始丢弃。
+ * Gives the model a stable message-level attachment identity without changing
+ * the user-visible message stored in the chat history.
  */
+function formatAttachmentIdentity(
+  attachments: ChatAttachment[] | undefined,
+  lang: 'zh' | 'en',
+  source: PromptAttachmentSource,
+  messageId: string
+): string {
+  if (!attachments?.length) return ''
+  const en = lang === 'en'
+  const sourceLabel = source === 'current_user_message_attachment'
+    ? (en ? 'current_user_message_attachment' : '当前用户消息附件')
+    : (en ? 'message_attachment' : '历史消息附件')
+  const rows = attachments.map((attachment) => {
+    const kind = attachmentKind(attachment)
+    const id = attachment.docId ?? attachment.snapshotId ?? 'unknown'
+    const fallback = kind === 'project_document' ? 'untitled document' : 'unnamed resource'
+    const name = cleanAttachmentName(attachment.name, fallback)
+    const typeLabel = kind === 'project_document'
+      ? (en ? 'project writing document' : '项目写作文档')
+      : (en ? 'uploaded resource file' : '用户上传资源文件')
+    return en
+      ? `- name: ${name} | type: ${typeLabel} | identity ID: ${id} | source: ${sourceLabel}`
+      : `- 《${name}》｜类型：${typeLabel}｜身份 ID：${id}｜来源：${sourceLabel}`
+  })
+  const instruction = source === 'current_user_message_attachment'
+    ? (en
+      ? 'If the user says "this file", "this document", "this story", or similar, first resolve the reference to the attachment(s) on this user message. If multiple attachments make the reference ambiguous, ask the user to clarify instead of guessing.'
+      : '如果用户说“这份文件”、“这个文档”、“这个故事”、“这个设定”或类似指代，优先将其理解为本条用户消息附带的附件；如果本条有多个附件而无法唯一判断，不要猜测，应请用户澄清。')
+    : (en
+      ? 'These files belonged to this historical user message. Keep their identity tied to that message; do not treat them as attachments of the current user message.'
+      : '这些文件属于这条历史用户消息，仅与该条消息绑定；不要将它们误认为当前用户消息的附件。')
+  return en
+    ? `<message_attachments message_id="${messageId}" source="${sourceLabel}">\n${rows.join('\n')}\n${instruction}\n</message_attachments>`
+    : `【消息附件身份：${sourceLabel}】\n消息 ID：${messageId}\n${rows.join('\n')}\n${instruction}\n【消息附件身份结束】`
+
+}
+
+function formatUserPromptContent(
+  content: string,
+  attachments: ChatAttachment[] | undefined,
+  lang: 'zh' | 'en',
+  source: PromptAttachmentSource,
+  messageId: string
+): string {
+  const identity = formatAttachmentIdentity(attachments, lang, source, messageId)
+  return identity ? `${content}\n\n${identity}` : content
+}
+
 function applyBudget(
   systemMsgs: ChatCompletionMessageParam[],
   auxMsgs: ChatCompletionMessageParam[],
@@ -833,13 +898,13 @@ async function injectSummaries(
     if (!activeKeys.has(`doc:${docId}`)) continue
     let summary: DocSummary | null = null
     if (kind === 'context' && docId === chat.docId && docContent !== null) {
-      summary = await ensureDocSummary(projectId, docId, docContent)
+      summary = await ensureDocSummaryInWorker(projectId, docId, docContent)
     } else {
       summary = await readDocSummary(projectId, docId)
     }
     if (summary) {
       const title = tree.docs.find((d) => d.id === docId)?.title ?? docId
-      docMsgs.push({ role: 'system', content: buildDocSummaryBlock(summary, lang) })
+      docMsgs.push({ role: 'system', content: buildDocSummaryBlock(summary, { id: docId, title }, lang) })
       items.push({ kind: 'doc', key: `doc:${docId}`, title })
     }
   }
@@ -858,7 +923,7 @@ async function injectSummaries(
     const s = await readChatSummary(projectId, chatId)
     if (s && (s.items.length > 0 || (s.compacted?.length ?? 0) > 0)) {
       const title = tree.chats.find((c) => c.id === chatId)?.title ?? chatId
-      chatMsgs.push({ role: 'system', content: buildChatSummaryBlock(s, lang) })
+      chatMsgs.push({ role: 'system', content: buildChatSummaryBlock(s, { id: chatId, title }, lang) })
       items.push({ kind: 'chat', key: `chat:${chatId}`, title })
     }
   }
@@ -901,6 +966,7 @@ async function buildRegenerateGuidance(
   if (!reason) return null
   const en = lang === 'en'
   const blocks: string[] = []
+  const tree = (await buildSnapshot()).projects.find((project) => project.project.id === chat.projectId)
 
   // 新增上下文片段（与锁定的旧范围对比）
   if (
@@ -920,12 +986,24 @@ async function buildRegenerateGuidance(
     if (range.before > old.before) {
       const from = Math.max(0, coreStart - range.before)
       const to = Math.max(0, Math.min(coreStart - old.before, n))
-      if (to > from) blocks.push(`${en ? '【New context · before】' : '【新增上下文·前文】'}\n${docContent.slice(from, to).slice(0, 4000)}`)
+      if (to > from) {
+        const title = tree?.docs.find((doc) => doc.id === chat.docId)?.title ?? chat.docId
+        const label = en
+          ? `\u3010New context \u00b7 before\u3011\nSource document: ${title} (ID: ${chat.docId})`
+          : `\u3010\u65b0\u589e\u4e0a\u4e0b\u6587\u00b7\u524d\u6587\u3011\n\u6765\u6e90\u6587\u6863\uff1a${title}\uff08ID\uff1a${chat.docId}\uff09`
+        blocks.push(`${label}\n${docContent.slice(from, to).slice(0, 4000)}`)
+      }
     }
     if (range.after > old.after) {
       const from = Math.min(coreEnd + old.after, n)
       const to = Math.min(coreEnd + range.after, n)
-      if (to > from) blocks.push(`${en ? '【New context · after】' : '【新增上下文·后文】'}\n${docContent.slice(from, to).slice(0, 4000)}`)
+      if (to > from) {
+        const title = tree?.docs.find((doc) => doc.id === chat.docId)?.title ?? chat.docId
+        const label = en
+          ? `\u3010New context \u00b7 after\u3011\nSource document: ${title} (ID: ${chat.docId})`
+          : `\u3010\u65b0\u589e\u4e0a\u4e0b\u6587\u00b7\u540e\u6587\u3011\n\u6765\u6e90\u6587\u6863\uff1a${title}\uff08ID\uff1a${chat.docId}\uff09`
+        blocks.push(`${label}\n${docContent.slice(from, to).slice(0, 4000)}`)
+      }
     }
   }
 
@@ -933,11 +1011,19 @@ async function buildRegenerateGuidance(
   if ((reason === 'summary' || reason === 'both') && req.newlyEnabledSummaries?.length) {
     for (const key of req.newlyEnabledSummaries) {
       if (key.startsWith('doc:')) {
-        const s = await readDocSummary(chat.projectId, key.slice(4))
-        if (s) blocks.push(buildDocSummaryBlock(s, lang))
+        const docId = key.slice(4)
+        const s = await readDocSummary(chat.projectId, docId)
+        if (s) {
+          const title = tree?.docs.find((doc) => doc.id === docId)?.title ?? docId
+          blocks.push(buildDocSummaryBlock(s, { id: docId, title }, lang))
+        }
       } else if (key.startsWith('chat:')) {
-        const s = await readChatSummary(chat.projectId, key.slice(5))
-        if (s && (s.items.length > 0 || (s.compacted?.length ?? 0) > 0)) blocks.push(buildChatSummaryBlock(s, lang))
+        const chatId = key.slice(5)
+        const s = await readChatSummary(chat.projectId, chatId)
+        if (s && (s.items.length > 0 || (s.compacted?.length ?? 0) > 0)) {
+          const title = tree?.chats.find((candidate) => candidate.id === chatId)?.title ?? chatId
+          blocks.push(buildChatSummaryBlock(s, { id: chatId, title }, lang))
+        }
       } else if (key.startsWith('res:')) {
         const resId = key.slice(4)
         try {
@@ -989,26 +1075,42 @@ async function buildMessages(
   const en = lang === 'en'
 
   const systemMsgs: ChatCompletionMessageParam[] = [{ role: 'system', content: buildSystemPrompt(lang) }]
+  const projectDocs = new Map(
+    (tree?.docs ?? [])
+      .filter((doc) => doc.projectId === chat.projectId)
+      .map((doc) => [doc.id, doc] as const)
+  )
+  const attachmentSource: PromptAttachmentSource = appendUser
+    ? 'current_user_message_attachment'
+    : 'message_attachment'
+  const attachmentMessageId = appendUser
+    ? req.userMessageId
+    : [...history].reverse().find((message) => message.role === 'user' && message.attachments?.length)?.id ?? req.userMessageId
 
   // 关联文档上下文（切片 或 全文）
   let docContent: string | null = null
-  if (chat.kind === 'context' && chat.docId && req.contextRange) {
-    const content = (await readDoc(req.contextRange.docId)).content
+  if (chat.kind === 'context' && chat.docId && req.contextRange && projectDocs.has(chat.docId)) {
+    const contextDocId = chat.docId
+    const content = (await readDoc(contextDocId)).content
     if (!analyzeTextIntegrity(content).suspicious) {
       docContent = content
       const slice = sliceContext(docContent, req.contextRange)
-      systemMsgs.push({ role: 'system', content: buildContextBlock(slice, lang) })
+      const title = projectDocs.get(contextDocId)?.title ?? contextDocId
+      systemMsgs.push({ role: 'system', content: buildContextBlock(slice, { id: contextDocId, title }, lang) })
     }
-  } else if (chat.kind === 'doc' && chat.docId) {
+  } else if (chat.kind === 'doc' && chat.docId && projectDocs.has(chat.docId)) {
     // 文档级对话：读取全文用于触发摘要检测（PRD 7.2），并按配置注入全文
     const content = (await readDoc(chat.docId)).content
     if (!analyzeTextIntegrity(content).suspicious) {
       docContent = content
       if (cfg.summaryEnabled) {
-        await ensureDocSummary(chat.projectId, chat.docId, docContent)
+        await ensureDocSummaryInWorker(chat.projectId, chat.docId, docContent)
       }
       if (cfg.summaryInjection.doc.fullText && activeKeys.has('fulltext')) {
-        const label = en ? '\u3010Full text of linked document\u3011' : '\u3010\u5173\u8054\u6587\u6863\u5168\u6587\u3011'
+        const title = projectDocs.get(chat.docId)?.title ?? chat.docId
+        const label = en
+          ? `\u3010Full text of linked document\u3011\nSource document: ${title} (ID: ${chat.docId})`
+          : `\u3010\u5173\u8054\u6587\u6863\u5168\u6587\u3011\n\u6765\u6e90\u6587\u6863\uff1a${title}\uff08ID\uff1a${chat.docId}\uff09`
         systemMsgs.push({ role: 'system', content: `${label}\n${docContent}` })
       }
     }
@@ -1028,7 +1130,11 @@ async function buildMessages(
   for (const sid of snapshotIds) {
     const snap = await readSnapshot(chat.projectId, chat.id, sid)
     if (snap && !analyzeTextIntegrity(snap.content).suspicious) {
-      snapshotMsgs.push({ role: 'system', content: `${en ? '【Uploaded file: ' : '【用户上传文件：'}${snap.name}】\n${snap.content}` })
+      const heading = en
+        ? `【Message attachment: uploaded resource】\nFile name: ${snap.name}\nFile identity ID: ${sid}\nAttachment message ID: ${attachmentMessageId}\nAttachment source: ${attachmentSource}\nThe following is the content of this resource file:`
+        : `【消息附件：用户上传资源文件】\n文件名称：《${snap.name}》\n文件身份 ID：${sid}\n附件来源：${attachmentSource === 'current_user_message_attachment' ? '当前用户消息附件' : '历史消息附件'}\n以下为该资源文件内容：`
+      const ending = en ? '\n[End of attached resource file]' : '\n【资源文件结束】'
+      snapshotMsgs.push({ role: 'system', content: `${heading}\n${snap.content}${ending}` })
     }
   }
 
@@ -1040,10 +1146,16 @@ async function buildMessages(
   const docIds = req.docIds ?? lastUserDocAttachments(history)
   for (const docId of docIds) {
     if (fullTextDocIds.has(docId)) continue
+    const projectDoc = projectDocs.get(docId)
+    if (!projectDoc) continue
     try {
-      const { doc, content } = await readDoc(docId)
+      const { content } = await readDoc(docId)
       if (analyzeTextIntegrity(content).suspicious) continue
-      snapshotMsgs.push({ role: 'system', content: `${en ? '【Attached document: ' : '【附加文档：'}${doc.title}】\n${content}` })
+      const heading = en
+        ? `【Message attachment: project writing document】\nDocument name: ${projectDoc.title}\nDocument identity ID: ${docId}\nAttachment message ID: ${attachmentMessageId}\nAttachment source: ${attachmentSource}\nThe following is the full text of this document:`
+        : `【消息附件：项目写作文档】\n文档名称：《${projectDoc.title}》\n文档身份 ID：${docId}\n附件来源：${attachmentSource === 'current_user_message_attachment' ? '当前用户消息附件' : '历史消息附件'}\n以下为该文档全文：`
+      const ending = en ? '\n[End of attached project document]' : '\n【项目写作文档结束】'
+      snapshotMsgs.push({ role: 'system', content: `${heading}\n${content}${ending}` })
     } catch {
       /* 文档已删除等，跳过 */
     }
@@ -1056,12 +1168,21 @@ async function buildMessages(
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .map((m) => ({
       role: m.role as 'user' | 'assistant',
-      content: m.content,
+      content: m.role === 'user'
+        ? formatUserPromptContent(m.content, m.attachments, lang, m.id === req.userMessageId && appendUser
+          ? 'current_user_message_attachment'
+          : 'message_attachment',
+          m.id)
+        : m.content,
       ...(m.role === 'assistant' && m.reasoning ? { reasoning_content: m.reasoning } : {})
     } as ThinkingCompatibleAssistantMessage))
 
+  const currentUserMessage = history.find((m) => m.role === 'user' && m.id === req.userMessageId)
   const tailMsgs: ChatCompletionMessageParam[] = appendUser
-    ? [{ role: 'user', content: req.userText }]
+    ? [{
+        role: 'user',
+        content: formatUserPromptContent(req.userText, currentUserMessage?.attachments, lang, 'current_user_message_attachment', req.userMessageId)
+      }]
     : []
 
   const messages = applyBudget(systemMsgs, auxMsgs, historyMsgs, tailMsgs, settings.model, settings.contextLimit)
@@ -1111,14 +1232,20 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
     const attachments: ChatAttachment[] = []
     for (const sid of req.snapshotIds ?? []) {
       const snap = await readSnapshot(chat.projectId, chat.id, sid)
-      if (snap) attachments.push({ snapshotId: sid, name: snap.name })
+      if (snap) attachments.push({ snapshotId: sid, kind: 'resource', name: snap.name })
     }
+    const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
+    const projectDocIds = new Set(
+      (tree?.docs ?? []).filter((doc) => doc.projectId === chat.projectId).map((doc) => doc.id)
+    )
     for (const docId of req.docIds ?? []) {
+      if (!projectDocIds.has(docId)) continue
       try {
         const { doc } = await readDoc(docId)
-        attachments.push({ docId, name: doc.title })
+        if (doc.projectId !== chat.projectId) continue
+        attachments.push({ docId, kind: 'project_document', name: doc.title })
       } catch {
-        /* 文档已删除等，跳过 */
+        /* Ignore an attachment that can no longer be read. */
       }
     }
     await appendMessage(req.chatId, {
@@ -1139,7 +1266,7 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
     return
   }
 
-  const client = makeClient(settings.baseURL, settings.apiKey)
+  const client = makeClient(settings)
   const controller = new AbortController()
   controllers.set(req.requestId, controller)
 
@@ -1360,13 +1487,13 @@ export async function generateChatTitle(chatId: string): Promise<{ ok: boolean; 
     const turns = messages.filter((m) => m.role === 'user' || m.role === 'assistant')
     if (turns.length === 0) return { ok: false, error: '对话为空，无法生成标题' }
 
-    const client = makeClient(settings.baseURL, settings.apiKey)
+    const client = makeClient(settings)
     const en = settings.language === 'en'
     const dialogue = turns
       .map((m) => `${m.role === 'user' ? (en ? 'User' : '用户') : 'AI'}：${m.content}`)
       .join('\n')
       .slice(0, 8000)
-    const res = await client.chat.completions.create({
+    const res = await client.createChatCompletion({
       model: settings.model,
       messages: [
         {
@@ -1394,7 +1521,7 @@ export async function testConnection(): Promise<ConnectionTestResult> {
   const settings = await loadApiSettings()
   if (!settings.apiKey) return { ok: false, message: '未配置 API Key' }
   try {
-    const client = makeClient(settings.baseURL, settings.apiKey)
+    const client = createOpenAIClient(settings.baseURL, settings.apiKey)
     await client.models.list()
     return { ok: true, message: `连接成功（模型：${settings.model}）` }
   } catch (err) {
@@ -1409,7 +1536,7 @@ export async function listModels(req: { baseURL?: string; apiKey?: string }): Pr
     const baseURL = req.baseURL?.trim() || settings.baseURL
     const apiKey = req.apiKey?.trim() || settings.apiKey
     if (!apiKey) return { ok: false, error: '未配置 API Key' }
-    const client = makeClient(baseURL, apiKey)
+    const client = createOpenAIClient(baseURL, apiKey)
     const res = await client.models.list()
     const models = (res.data ?? []).map((m) => String(m.id ?? m ?? '')).filter((s) => s.length > 0)
     return { ok: true, models }

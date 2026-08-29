@@ -17,6 +17,8 @@ import { splitSourceByTokenBudget, type SourceChunk } from './summary-hierarchy'
 import { readSettingDistillationCheckpoint, writeSettingDistillationCheckpoint } from './file.service'
 import { executeStructuredTask, StructuredGenerationError } from './structured-generation.service'
 import { scheduleSummaryTask } from './summary-task-scheduler'
+import { reportSummaryProgress } from './summary-state.service'
+import { settingExtractionPrompt, settingMergePrompt, settingOverviewPrompt } from './setting-distillation.protocol'
 import type {
   SettingDistillationCheckpoint,
   SettingDistillationResult,
@@ -29,8 +31,8 @@ import type {
   SettingTimelineExtraction
 } from './setting-distillation.types'
 
-const PIPELINE_VERSION = 1 as const
-const PROMPT_RESERVE_TOKENS = 1400
+const PIPELINE_VERSION = 2 as const
+const PROMPT_RESERVE_TOKENS = 2600
 
 interface MergedEntry extends SettingEntry {
   sourceIds: string[]
@@ -110,7 +112,7 @@ function sourceHas(normalized: string, value: string): boolean {
 }
 
 function isSplitWorthy(error: unknown): boolean {
-  return error instanceof StructuredGenerationError && ['truncated', 'invalid', 'empty'].includes(error.code)
+  return error instanceof StructuredGenerationError && ['truncated', 'invalid', 'empty', 'timeout'].includes(error.code)
 }
 
 function errorMessage(error: unknown): string {
@@ -194,34 +196,6 @@ class CheckpointStore {
   }
 }
 
-function rolePrompt(role: 'entity-relationship' | 'entities' | 'relationships' | 'mechanisms' | 'terms' | 'rules' | 'constraints' | 'timeline', language: 'zh' | 'en'): string {
-  const common = language === 'en'
-    ? 'Extract exhaustively from the supplied setting text. Preserve exact source names. Do not invent, infer missing facts, or omit unique information. Output exactly one valid JSON object and nothing else.'
-    : '请从给定设定文本中尽可能完整地提取信息。保留原文中的准确名称；禁止编造、补全缺失事实或省略独有信息。只输出一个合法 JSON 对象，不要输出其他内容。'
-  const schemas = {
-    'entity-relationship': language === 'en'
-      ? '{"entries":[{"name":"exact name","category":"character/faction/place/item/species/occupation/ability/system/event/other","description":"complete description"}],"relationships":[{"subject":"exact source name","predicate":"explicit relation","object":"exact source name or value","description":"details and conditions"}]}'
-      : '{"entries":[{"name":"原文准确名称","category":"人物/势力/地点/物品/物种/职业/能力/体系/事件/其他","description":"完整描述"}],"relationships":[{"subject":"原文主体名称","predicate":"明确关系","object":"原文对象名称或值","description":"关系细节与条件"}]}',
-    entities: language === 'en'
-      ? '{"entries":[{"name":"exact name","category":"character/faction/place/item/species/occupation/ability/system/event/other","description":"complete description"}]}'
-      : '{"entries":[{"name":"原文准确名称","category":"人物/势力/地点/物品/物种/职业/能力/体系/事件/其他","description":"完整描述"}]}',
-    relationships: language === 'en'
-      ? '{"relationships":[{"subject":"exact source name","predicate":"explicit relation","object":"exact source name or value","description":"details and conditions"}]}'
-      : '{"relationships":[{"subject":"原文主体名称","predicate":"明确关系","object":"原文对象名称或值","description":"关系细节与条件"}]}',
-    mechanisms: language === 'en'
-      ? '{"terms":[{"term":"exact source term","definition":"complete definition"}],"rules":["explicit rule or mechanism"],"constraints":["limitation, cost, condition, prerequisite, boundary, or exception"]}'
-      : '{"terms":[{"term":"原文准确术语","definition":"完整释义"}],"rules":["明确规则或机制"],"constraints":["限制、代价、条件、前提、边界或例外"]}',
-    terms: language === 'en' ? '{"terms":[{"term":"exact source term","definition":"complete definition"}]}' : '{"terms":[{"term":"原文准确术语","definition":"完整释义"}]}',
-    rules: language === 'en' ? '{"rules":["explicit rule or mechanism"]}' : '{"rules":["明确规则或机制"]}',
-    constraints: language === 'en' ? '{"constraints":["limitation, cost, condition, prerequisite, boundary, or exception"]}' : '{"constraints":["限制、代价、条件、前提、边界或例外"]}',
-    timeline: language === 'en' ? '{"timeline":["explicit date, chronology, era, causal historical milestone, or ordered event"]}' : '{"timeline":["明确日期、先后顺序、时代、具有因果关系的历史节点或有序事件"]}'
-  } as const
-  const note = role === 'timeline'
-    ? (language === 'en' ? 'An empty timeline array is valid when the text contains no explicit chronology.' : '如果原文没有明确时间信息，timeline 为空数组也是合法结果。')
-    : (language === 'en' ? 'Keep every independently meaningful item; do not impose an item-count limit.' : '保留每一条具有独立意义的信息，不要设置条目数量上限。')
-  return `${common}\nRequired shape: ${schemas[role]}\n${note}`
-}
-
 async function callStructured<T>(task: string, settings: ApiSettings, system: string, user: string, parseAndValidate: (raw: string) => T | null): Promise<T> {
   const tokens = outputBudget(settings)
   return scheduleSummaryTask(() => executeStructuredTask({
@@ -283,7 +257,7 @@ function parseTexts(value: unknown, origin: string, prefix: string): SettingText
 }
 
 async function callEntityRelationship(text: string, origin: string, settings: ApiSettings): Promise<SettingEntityRelationshipExtraction> {
-  return callStructured(`setting_extract_entity_relationship:${origin}`, settings, rolePrompt('entity-relationship', settings.language), text, (raw) => {
+  return callStructured(`setting_extract_entity_relationship:${origin}`, settings, settingExtractionPrompt('entity-relationship', settings.language), text, (raw) => {
     const parsed = parseJson(raw)
     if (!parsed || !Array.isArray(parsed.entries) || !Array.isArray(parsed.relationships)) return null
     return { entries: parseEntries(parsed.entries, text, origin), relationships: parseRelationships(parsed.relationships, text, origin) }
@@ -291,21 +265,21 @@ async function callEntityRelationship(text: string, origin: string, settings: Ap
 }
 
 async function callEntities(text: string, origin: string, settings: ApiSettings): Promise<SettingEntryCandidate[]> {
-  return callStructured(`setting_extract_entities:${origin}`, settings, rolePrompt('entities', settings.language), text, (raw) => {
+  return callStructured(`setting_extract_entities:${origin}`, settings, settingExtractionPrompt('entities', settings.language), text, (raw) => {
     const parsed = parseJson(raw)
     return parsed && Array.isArray(parsed.entries) ? parseEntries(parsed.entries, text, origin) : null
   })
 }
 
 async function callRelationships(text: string, origin: string, settings: ApiSettings): Promise<SettingRelationshipCandidate[]> {
-  return callStructured(`setting_extract_relationships:${origin}`, settings, rolePrompt('relationships', settings.language), text, (raw) => {
+  return callStructured(`setting_extract_relationships:${origin}`, settings, settingExtractionPrompt('relationships', settings.language), text, (raw) => {
     const parsed = parseJson(raw)
     return parsed && Array.isArray(parsed.relationships) ? parseRelationships(parsed.relationships, text, origin) : null
   })
 }
 
 async function callMechanisms(text: string, origin: string, settings: ApiSettings): Promise<SettingMechanismExtraction> {
-  return callStructured(`setting_extract_mechanisms:${origin}`, settings, rolePrompt('mechanisms', settings.language), text, (raw) => {
+  return callStructured(`setting_extract_mechanisms:${origin}`, settings, settingExtractionPrompt('mechanisms', settings.language), text, (raw) => {
     const parsed = parseJson(raw)
     if (!parsed || !Array.isArray(parsed.terms) || !Array.isArray(parsed.rules) || !Array.isArray(parsed.constraints)) return null
     return {
@@ -317,28 +291,28 @@ async function callMechanisms(text: string, origin: string, settings: ApiSetting
 }
 
 async function callTerms(text: string, origin: string, settings: ApiSettings): Promise<SettingTermCandidate[]> {
-  return callStructured(`setting_extract_terms:${origin}`, settings, rolePrompt('terms', settings.language), text, (raw) => {
+  return callStructured(`setting_extract_terms:${origin}`, settings, settingExtractionPrompt('terms', settings.language), text, (raw) => {
     const parsed = parseJson(raw)
     return parsed && Array.isArray(parsed.terms) ? parseTerms(parsed.terms, text, origin) : null
   })
 }
 
 async function callRules(text: string, origin: string, settings: ApiSettings): Promise<SettingTextCandidate[]> {
-  return callStructured(`setting_extract_rules:${origin}`, settings, rolePrompt('rules', settings.language), text, (raw) => {
+  return callStructured(`setting_extract_rules:${origin}`, settings, settingExtractionPrompt('rules', settings.language), text, (raw) => {
     const parsed = parseJson(raw)
     return parsed && Array.isArray(parsed.rules) ? parseTexts(parsed.rules, origin, 'rule') : null
   })
 }
 
 async function callConstraints(text: string, origin: string, settings: ApiSettings): Promise<SettingTextCandidate[]> {
-  return callStructured(`setting_extract_constraints:${origin}`, settings, rolePrompt('constraints', settings.language), text, (raw) => {
+  return callStructured(`setting_extract_constraints:${origin}`, settings, settingExtractionPrompt('constraints', settings.language), text, (raw) => {
     const parsed = parseJson(raw)
     return parsed && Array.isArray(parsed.constraints) ? parseTexts(parsed.constraints, origin, 'constraint') : null
   })
 }
 
 async function callTimeline(text: string, origin: string, settings: ApiSettings): Promise<SettingTextCandidate[]> {
-  return callStructured(`setting_extract_timeline:${origin}`, settings, rolePrompt('timeline', settings.language), text, (raw) => {
+  return callStructured(`setting_extract_timeline:${origin}`, settings, settingExtractionPrompt('timeline', settings.language), text, (raw) => {
     const parsed = parseJson(raw)
     return parsed && Array.isArray(parsed.timeline) ? parseTexts(parsed.timeline, origin, 'timeline') : null
   })
@@ -445,8 +419,12 @@ function buildUnits(source: string, settings: ApiSettings): SourceChunk[] {
   return splitSourceByTokenBudget(source, settings.model, target)
 }
 
-async function extractUnits(source: string, settings: ApiSettings, store: CheckpointStore): Promise<UnitExtraction[]> {
+async function extractUnits(source: string, settings: ApiSettings, store: CheckpointStore, progressKey?: string): Promise<UnitExtraction[]> {
   const chunks = buildUnits(source, settings)
+  if (progressKey) {
+    reportSummaryProgress(progressKey, 'chunking', 1, 1, `${chunks.length} chunks prepared`)
+    reportSummaryProgress(progressKey, 'extracting', 0, chunks.length)
+  }
   const output: UnitExtraction[] = []
   const failures: string[] = []
   for (const chunk of chunks) {
@@ -457,6 +435,7 @@ async function extractUnits(source: string, settings: ApiSettings, store: Checkp
         timeline: extractTimelineBranch(chunk, settings, store)
       })
       output.push({ chunk, ...branches.entityRelationship, ...branches.mechanisms, ...branches.timeline })
+      if (progressKey) reportSummaryProgress(progressKey, 'extracting', output.length, chunks.length, `Chunk ${output.length}/${chunks.length}`)
     } catch (error) {
       failures.push(errorMessage(error))
     }
@@ -504,23 +483,6 @@ function validSourceIds(value: unknown, allowed: Set<string>): string[] {
 function hasCoverage(items: Array<{ sourceIds: string[] }>, required: string[]): boolean {
   const covered = new Set(items.flatMap((item) => item.sourceIds))
   return required.every((id) => covered.has(id))
-}
-
-function mergePrompt(kind: 'entries' | 'relationships' | 'terms' | 'rules' | 'constraints' | 'timeline' | 'entity-relationship' | 'mechanisms', language: 'zh' | 'en'): string {
-  const common = language === 'en'
-    ? 'Merge duplicate or overlapping setting candidates without losing unique information. Preserve entry names, term names, and relationship subjects/objects exactly as written in the referenced candidates; only descriptions, definitions, predicates, and explanatory text may be rewritten for clarity. Do not delete unique facts, introduce absent facts, or resolve conflicts on your own. Every output item must include sourceIds covering the candidate ids it uses. Every input id must appear in at least one output sourceIds array. Output valid JSON only.'
-    : '请归并重复或重叠的设定候选项，不得丢失独有信息。条目名称、术语名称以及关系的主体/对象必须保持所引用候选中的原文写法；只有描述、释义、谓词和解释性文本可以为清晰度改写。不得删除独有事实、引入候选中不存在的事实，也不得擅自解决冲突。每个输出项都必须包含 sourceIds，列出它覆盖的候选 id；每个输入 id 至少要在一个输出项的 sourceIds 中出现。只输出合法 JSON。'
-  const shapes = {
-    entries: '{"entries":[{"name":"...","category":"...","description":"...","sourceIds":["entry_id"]}]}',
-    relationships: '{"relationships":[{"subject":"...","predicate":"...","object":"...","description":"...","sourceIds":["relationship_id"]}]}',
-    terms: '{"terms":[{"term":"...","definition":"...","sourceIds":["term_id"]}]}',
-    rules: '{"rules":[{"text":"...","sourceIds":["rule_id"]}]}',
-    constraints: '{"constraints":[{"text":"...","sourceIds":["constraint_id"]}]}',
-    timeline: '{"timeline":[{"text":"...","sourceIds":["timeline_id"]}]}',
-    'entity-relationship': '{"entries":[{"name":"...","category":"...","description":"...","sourceIds":["entry_id"]}],"relationships":[{"subject":"...","predicate":"...","object":"...","description":"...","sourceIds":["relationship_id"]}]}',
-    mechanisms: '{"terms":[{"term":"...","definition":"...","sourceIds":["term_id"]}],"rules":[{"text":"...","sourceIds":["rule_id"]}],"constraints":[{"text":"...","sourceIds":["constraint_id"]}]}'
-  } as const
-  return `${common}\nRequired shape: ${shapes[kind]}`
 }
 
 function referencedCandidates<T extends { id: string }>(sourceIds: string[], requiredById: Map<string, T>): T[] {
@@ -742,7 +704,7 @@ async function mergeEntries(items: SettingEntryCandidate[], settings: ApiSetting
   return runAllBatches(store, 'merge:entries', groups, settings, (batch, taskKey) => callStructured(
     `setting_${taskKey}`,
     settings,
-    mergePrompt('entries', settings.language),
+    settingMergePrompt('entries', settings.language),
     JSON.stringify({ entries: batch }),
     (raw) => {
       const parsed = parseJson(raw)
@@ -756,7 +718,7 @@ async function mergeRelationships(items: SettingRelationshipCandidate[], setting
   return runAllBatches(store, 'merge:relationships', groups, settings, (batch, taskKey) => callStructured(
     `setting_${taskKey}`,
     settings,
-    mergePrompt('relationships', settings.language),
+    settingMergePrompt('relationships', settings.language),
     JSON.stringify({ relationships: batch }),
     (raw) => {
       const parsed = parseJson(raw)
@@ -770,7 +732,7 @@ async function mergeTerms(items: SettingTermCandidate[], settings: ApiSettings, 
   return runAllBatches(store, 'merge:terms', groups, settings, (batch, taskKey) => callStructured(
     `setting_${taskKey}`,
     settings,
-    mergePrompt('terms', settings.language),
+    settingMergePrompt('terms', settings.language),
     JSON.stringify({ terms: batch }),
     (raw) => {
       const parsed = parseJson(raw)
@@ -789,7 +751,7 @@ async function mergeTexts(
   return runAllBatches(store, `merge:${kind}`, groups, settings, (batch, taskKey) => callStructured(
     `setting_${taskKey}`,
     settings,
-    mergePrompt(kind, settings.language),
+    settingMergePrompt(kind, settings.language),
     JSON.stringify({ [kind]: batch }),
     (raw) => {
       const parsed = parseJson(raw)
@@ -814,7 +776,7 @@ async function mergeEntityBranch(
   const payload = { entries, relationships }
   if (combinedMergeFits(payload, entries.length + relationships.length, settings)) {
     try {
-      return await store.run(key, () => callStructured(`setting_${key}`, settings, mergePrompt('entity-relationship', settings.language), JSON.stringify(payload), (raw) => {
+      return await store.run(key, () => callStructured(`setting_${key}`, settings, settingMergePrompt('entity-relationship', settings.language), JSON.stringify(payload), (raw) => {
         const parsed = parseJson(raw)
         if (!parsed) return null
         const mergedEntries = parseMergedEntries(parsed.entries, entries)
@@ -846,7 +808,7 @@ async function mergeMechanismBranch(
   const payload = { terms, rules, constraints }
   if (combinedMergeFits(payload, terms.length + rules.length + constraints.length, settings)) {
     try {
-      return await store.run(key, () => callStructured(`setting_${key}`, settings, mergePrompt('mechanisms', settings.language), JSON.stringify(payload), (raw) => {
+      return await store.run(key, () => callStructured(`setting_${key}`, settings, settingMergePrompt('mechanisms', settings.language), JSON.stringify(payload), (raw) => {
         const parsed = parseJson(raw)
         if (!parsed) return null
         const mergedTerms = parseMergedTerms(parsed.terms, terms)
@@ -865,17 +827,6 @@ async function mergeMechanismBranch(
   })
   await store.succeed(key, split)
   return split
-}
-
-function overviewPrompt(language: 'zh' | 'en', synthesis = false): string {
-  if (language === 'en') {
-    return synthesis
-      ? 'Synthesize the supplied partial setting overviews into one JSON object: {"overview":"concise but complete setting overview","scope":"what world, system, period, region, or topic is covered"}. Preserve all major domains and do not add facts. Output JSON only.'
-      : 'Read the supplied setting source or distilled setting data and output one JSON object: {"overview":"concise but complete setting overview","scope":"what world, system, period, region, or topic is covered"}. Do not enumerate every item, but cover all major domains. Do not invent. Output JSON only.'
-  }
-  return synthesis
-    ? '请把给定的多个设定概览归纳为一个 JSON 对象：{"overview":"简洁但完整的设定总览","scope":"覆盖的世界、体系、时代、地域或主题范围"}。必须保留所有主要领域，不得增加事实。只输出 JSON。'
-    : '请阅读给定的设定原文或已蒸馏设定数据，输出一个 JSON 对象：{"overview":"简洁但完整的设定总览","scope":"覆盖的世界、体系、时代、地域或主题范围"}。无需逐条枚举，但要覆盖所有主要领域；禁止编造。只输出 JSON。'
 }
 
 function parseOverview(raw: string): OverviewResult | null {
@@ -939,7 +890,7 @@ async function overviewFromInput(
     return await store.run(key, () => callStructured(
       `setting_${key}`,
       settings,
-      overviewPrompt(settings.language, synthesis),
+      settingOverviewPrompt(settings.language, synthesis),
       input,
       parseOverview
     ))
@@ -1063,7 +1014,6 @@ function chunkResult(unit: UnitExtraction): SummaryChunkResult {
     relationships: unit.relationships.map(relationshipText),
     timeline: unit.timeline.map((item) => item.text),
     constraints: unit.constraints.map((item) => item.text),
-    unresolved: []
   }
   return {
     id: unit.chunk.id,
@@ -1078,11 +1028,12 @@ export async function distillSettingResourceV2(
   projectId: string,
   resourceId: string,
   source: string,
-  settings: ApiSettings
+  settings: ApiSettings,
+  progressKey?: string
 ): Promise<SettingDistillationResult> {
   const sourceInfo = computeSourceInfo(source)
   const store = await CheckpointStore.load(projectId, resourceId, sourceInfo.sourceFingerprint, settings)
-  const units = await extractUnits(source, settings, store)
+  const units = await extractUnits(source, settings, store, progressKey)
   const entryCandidates = units.flatMap((unit) => unit.entries)
   const relationshipCandidates = units.flatMap((unit) => unit.relationships)
   const termCandidates = units.flatMap((unit) => unit.terms)
@@ -1090,11 +1041,19 @@ export async function distillSettingResourceV2(
   const constraintCandidates = units.flatMap((unit) => unit.constraints)
   const timelineCandidates = units.flatMap((unit) => unit.timeline)
 
-  const merged = await settleRequired('设定归并', {
-    entityRelationship: mergeEntityBranch(entryCandidates, relationshipCandidates, settings, store),
-    mechanisms: mergeMechanismBranch(termCandidates, ruleCandidates, constraintCandidates, settings, store),
-    timeline: mergeTexts('timeline', timelineCandidates, settings, store)
+  let completedBranches = 0
+  if (progressKey) reportSummaryProgress(progressKey, 'merging', 0, 3)
+  const trackBranch = <T>(name: string, task: Promise<T>): Promise<T> => task.then((result) => {
+    completedBranches += 1
+    if (progressKey) reportSummaryProgress(progressKey, 'merging', completedBranches, 3, `${name} merged`)
+    return result
   })
+  const merged = await settleRequired('setting_distillation_merge', {
+    entityRelationship: trackBranch('Entities and relationships', mergeEntityBranch(entryCandidates, relationshipCandidates, settings, store)),
+    mechanisms: trackBranch('Terms, rules and constraints', mergeMechanismBranch(termCandidates, ruleCandidates, constraintCandidates, settings, store)),
+    timeline: trackBranch('Timeline', mergeTexts('timeline', timelineCandidates, settings, store))
+  })
+  if (progressKey) reportSummaryProgress(progressKey, 'overview', 0, 0)
   const distilledForOverview = {
     entries: merged.entityRelationship.entries.map(({ sourceIds: _sourceIds, ...item }) => item),
     relationships: merged.entityRelationship.relationships.map(({ sourceIds: _sourceIds, ...item }) => item),
@@ -1104,6 +1063,7 @@ export async function distillSettingResourceV2(
     timeline: merged.timeline.map((item) => item.text)
   }
   const overview = await generateOverview(source, distilledForOverview, settings, store)
+  if (progressKey) reportSummaryProgress(progressKey, 'overview', 1, 1)
   const summary: SettingSummary = {
     type: 'setting',
     overview: overview.overview,
@@ -1114,7 +1074,6 @@ export async function distillSettingResourceV2(
     relationships: distilledForOverview.relationships.map(relationshipText),
     timeline: distilledForOverview.timeline,
     constraints: distilledForOverview.constraints,
-    unresolved: []
   }
   return {
     summary,

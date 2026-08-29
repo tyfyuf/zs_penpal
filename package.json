@@ -14,7 +14,8 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "dist": "npm run verify:embedding-model && electron-vite build && electron-builder --win",
     "dist:dir": "npm run verify:embedding-model && electron-vite build && electron-builder --win --dir",
-    "verify:embedding-model": "node scripts/verify-embedding-model.mjs"
+    "verify:embedding-model": "node scripts/verify-embedding-model.mjs",
+    "verify:setting-protocol": "node scripts/verify-setting-distillation-protocol.mjs"
   },
   "devDependencies": {
     "@codemirror/commands": "^6.6.0",

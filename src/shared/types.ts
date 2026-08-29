@@ -92,11 +92,15 @@ export interface TextEncodingInfo {
   mojibakeCount: number
 }
 
+export type ChatAttachmentKind = 'project_document' | 'resource'
+
 export interface ChatAttachment {
-  /** 资源快照附件 */
+  /** Summary generation task status. */
   snapshotId?: string
-  /** 附加文档（读当前内容） */
+  /** Summary generation task phase. */
   docId?: string
+  /** Summary generation task identifier. */
+  kind?: ChatAttachmentKind
   name: string
 }
 
@@ -132,11 +136,6 @@ export interface StoryPlotPoint {
   summary: string
 }
 
-export interface StoryForeshadow {
-  planted: string
-  status: 'resolved' | 'unresolved'
-}
-
 /** 故事拆解摘要（面向故事创作者，简化的结构化故事摘要） */
 export interface StorySummary {
   type: 'story'
@@ -145,7 +144,6 @@ export interface StorySummary {
   characters: StoryCharacter[]
   /** 场景/情节链 */
   plot: StoryPlotPoint[]
-  foreshadowing: StoryForeshadow[]
   keySettings: string[]
   keyQuotes: string[]
 }
@@ -224,7 +222,6 @@ export interface SettingSummary {
   relationships: string[]
   timeline: string[]
   constraints: string[]
-  unresolved: string[]
 }
 
 export interface SummaryChunkResult {
@@ -534,6 +531,8 @@ export interface UsageSnapshot {
   uncounted: number
 }
 
+export type ApiProtocol = 'chat_completions' | 'responses'
+
 export interface AppConfig {
   workspaceDir: string
   autosaveIntervalMs: number
@@ -541,6 +540,8 @@ export interface AppConfig {
   gitEnabled: boolean
   model: string
   apiBaseUrl: string
+  /** Wire protocol used for model generation requests. */
+  apiProtocol: ApiProtocol
   contextLimit: number
   gitBinaryPath?: string
   /** 摘要注入配置（按对话类型勾选） */

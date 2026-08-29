@@ -14,6 +14,7 @@ const DEFAULT_CONFIG: Omit<AppConfig, 'workspaceDir'> = {
   gitEnabled: false,
   model: 'gpt-4o',
   apiBaseUrl: 'https://api.openai.com/v1',
+  apiProtocol: 'chat_completions',
   contextLimit: 256000,
   summaryInjection: DEFAULT_INJECTION,
   language: 'zh'
@@ -36,9 +37,14 @@ export async function loadConfig(): Promise<AppConfig> {
     ...DEFAULT_CONFIG,
     workspaceDir: '',
     ...(stored ?? {}),
+    apiProtocol: stored?.apiProtocol === 'responses' ? 'responses' : 'chat_completions',
     summaryInjection: mergeInjection(stored?.summaryInjection)
   }
   return cache
+}
+
+export function setConfigCache(config: AppConfig): void {
+  cache = { ...config, summaryInjection: mergeInjection(config.summaryInjection) }
 }
 
 export function getConfigCached(): AppConfig {
@@ -62,7 +68,7 @@ async function persist(): Promise<void> {
   await atomicWriteJson(configPath(), cache)
 }
 
-/** 判断工作目录是否已初始化（PRD 2.1 首次启动必须指定） */
+/** 鍒ゆ柇宸ヤ綔鐩綍鏄惁宸插垵濮嬪寲锛圥RD 2.1 棣栨鍚姩蹇呴』鎸囧畾锛?*/
 export async function hasWorkspace(): Promise<boolean> {
   const cfg = await loadConfig()
   return cfg.workspaceDir.trim().length > 0

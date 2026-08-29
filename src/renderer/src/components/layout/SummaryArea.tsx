@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Eye, FlaskConical, RefreshCw, Trash2 } from 'lucide-react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { ChevronDown, ChevronRight, Eye, FlaskConical, RefreshCw, Trash2 } from 'lucide-react'
 import type { ChatSummary, ConsistencyIssue, DocSummary, ProjectSummariesOverview, ResourceDistillType, ResourceSummary } from '@shared/types'
+import type { SummaryProgress } from '@shared/summary-job-protocol'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
 import { useAppStore } from '../../store/app.store'
@@ -8,22 +9,44 @@ import { useT } from '../../i18n'
 import { runDistill, runUndistill } from '../../lib/summaryActions'
 import Modal from '../common/Modal'
 
+type SummarySectionKey = 'docs' | 'chats' | 'resources'
+type SummarySectionState = Record<SummarySectionKey, boolean>
+
+const SUMMARY_SECTION_STORAGE_PREFIX = 'vibewrite.summary.sections:'
+
+function readSummarySectionState(projectId: string): SummarySectionState {
+  const defaults: SummarySectionState = { docs: true, chats: true, resources: true }
+  try {
+    const raw = localStorage.getItem(`${SUMMARY_SECTION_STORAGE_PREFIX}${projectId}`)
+    if (!raw) return defaults
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return defaults
+    const values = parsed as Record<string, unknown>
+    return {
+      docs: typeof values.docs === 'boolean' ? values.docs : defaults.docs,
+      chats: typeof values.chats === 'boolean' ? values.chats : defaults.chats,
+      resources: typeof values.resources === 'boolean' ? values.resources : defaults.resources
+    }
+  } catch {
+    return defaults
+  }
+}
+
 function storyText(s: {
   overview: string
   characters: { name: string; aliases: string[]; role: string; goal: string }[]
   plot: { id: string; function: string; summary: string }[]
-  foreshadowing: { planted: string; status: string }[]
   keySettings: string[]
   keyQuotes: string[]
 }): string {
   const chars = (Array.isArray(s.characters) ? s.characters : [])
-    .map((c) => `- ${c.name}${c.aliases?.length ? `（${c.aliases.join('、')}）` : ''}：${c.role}${c.goal ? ` · 目标：${c.goal}` : ''}`)
+    .map((c) => `- ${c.name}${c.aliases?.length ? `\uff08${c.aliases.join('\u3001')}\uff09` : ''}\uff1a${c.role}${c.goal ? ` \u00b7 \u76ee\u6807\uff1a${c.goal}` : ''}`)
     .join('\n')
-  const plot = (Array.isArray(s.plot) ? s.plot : []).map((p) => `- ${p.id}｜${p.function}：${p.summary}`).join('\n')
-  const fs = (Array.isArray(s.foreshadowing) ? s.foreshadowing : []).map((f) => `- ${f.planted}（${f.status === 'resolved' ? '已回收' : '未回收'}）`).join('\n')
+  const plot = (Array.isArray(s.plot) ? s.plot : []).map((p) => `- ${p.id}\uff5c${p.function}\uff1a${p.summary}`).join('\n')
   const settings = Array.isArray(s.keySettings) ? s.keySettings : []
   const quotes = Array.isArray(s.keyQuotes) ? s.keyQuotes : []
-  return `总览：${s.overview || '（无）'}\n\n人物：\n${chars || '（无）'}\n\n情节链：\n${plot || '（无）'}\n\n伏笔：\n${fs || '（无）'}\n\n关键设定：${settings.join('、') || '（无）'}\n关键台词：${quotes.join(' / ') || '（无）'}`
+  const none = '\uff08\u65e0\uff09'
+  return `\u603b\u89c8\uff1a${s.overview || none}\n\n\u4eba\u7269\uff1a\n${chars || none}\n\n\u60c5\u8282\u94fe\uff1a\n${plot || none}\n\n\u5173\u952e\u8bbe\u5b9a\uff1a${settings.join('\u3001') || none}\n\u5173\u952e\u53f0\u8bcd\uff1a${quotes.join(' / ') || none}`
 }
 
 function chatText(s: ChatSummary): string {
@@ -61,10 +84,7 @@ ${list(s.relationships)}
 ${list(s.timeline)}
 
 约束：
-${list(s.constraints)}
-
-未决问题：
-${list(s.unresolved)}`
+${list(s.constraints)}`
   }
   return `类型：${s.docType || '其他'}
 
@@ -78,13 +98,75 @@ ${s.keyPoints.map((point) => `- ${point}`).join('\n') || '（无）'}
 结构：${s.structure || '（无）'}`
 }
 
+type SummaryTranslator = (key: string, vars?: Record<string, string | number>) => string
+
+function isTerminalProgress(progress: SummaryProgress | undefined): boolean {
+  return progress?.phase === 'complete' || progress?.phase === 'failed' || progress?.phase === 'cancelled'
+}
+
+function progressPercent(progress: SummaryProgress): number | null {
+  if (progress.total <= 0) return null
+  return Math.max(0, Math.min(100, Math.round((Math.min(progress.completed, progress.total) / progress.total) * 100)))
+}
+
+function ProgressBar({ progress, color = 'var(--warn)' }: { progress: SummaryProgress; color?: string }): JSX.Element {
+  const percent = progressPercent(progress)
+  return (
+    <div className="mt-1 h-1 overflow-hidden rounded" style={{ background: 'var(--border)' }}>
+      {percent === null ? (
+        <div className="h-full w-2/5 animate-pulse rounded" style={{ background: color }} />
+      ) : (
+        <div className="h-full transition-all" style={{ width: `${percent}%`, background: color }} />
+      )}
+    </div>
+  )
+}
+
+function ProgressText({ progress, t }: { progress: SummaryProgress; t: SummaryTranslator }): JSX.Element {
+  const label = t(`summary.progress.${progress.phase}`)
+  const percent = progressPercent(progress)
+  return (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate">{label}</span>
+        {percent !== null && <span className="shrink-0">{Math.min(progress.completed, progress.total)}/{progress.total}</span>}
+      </div>
+      <ProgressBar progress={progress} color={progress.phase === 'complete' ? 'var(--ok)' : progress.phase === 'failed' ? 'var(--danger)' : progress.phase === 'cancelled' ? 'var(--muted)' : 'var(--warn)'} />
+      {progress.detail && <div className="mt-1 truncate" title={progress.detail}>{progress.detail}</div>}
+    </>
+  )
+}
+
+function MiniProgress({ progress, t }: { progress?: SummaryProgress; t: SummaryTranslator }): JSX.Element | null {
+  if (!progress || progress.phase === 'complete') return null
+  return (
+    <div className="mt-0.5 max-w-full text-[10px]" style={{ color: progress.phase === 'failed' ? 'var(--danger)' : progress.phase === 'cancelled' ? 'var(--muted)' : 'var(--warn)' }}>
+      <ProgressText progress={progress} t={t} />
+    </div>
+  )
+}
+
 export default function SummaryArea({ projectId }: { projectId: string }): JSX.Element {
   const t = useT()
   const [overview, setOverview] = useState<ProjectSummariesOverview | null>(null)
   const [preview, setPreview] = useState<{ title: string; text: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [issues, setIssues] = useState<ConsistencyIssue[]>([])
+  const [progressByJobId, setProgressByJobId] = useState<Record<string, SummaryProgress>>({})
+  const [sectionOpen, setSectionOpen] = useState<SummarySectionState>(() => readSummarySectionState(projectId))
   const summaryRevision = useAppStore((s) => s.summaryRevision)
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(`${SUMMARY_SECTION_STORAGE_PREFIX}${projectId}`, JSON.stringify(sectionOpen))
+    } catch {
+      // Ignore storage failures; section toggles remain functional for this session.
+    }
+  }, [projectId, sectionOpen])
+
+  const toggleSection = (key: SummarySectionKey): void => {
+    setSectionOpen((current) => ({ ...current, [key]: !current[key] }))
+  }
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -99,10 +181,32 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
     void load()
   }, [load, summaryRevision])
 
-  // 摘要生成状态事件：开始/结束都刷新，展示黄点“生成中”→绿点解锁
+  useEffect(() => {
+    setProgressByJobId({})
+  }, [projectId])
+
+  // Summary status events refresh the list and unlock completed items.
   useEffect(() => {
     const off = api.on('summary:status', () => {
       void load()
+    })
+    return off
+  }, [load])
+
+  useEffect(() => {
+    const off = api.on('summary:progress', (next) => {
+      setProgressByJobId((current) => ({ ...current, [next.jobId]: next }))
+      if (isTerminalProgress(next)) {
+        const delay = next.phase === 'failed' ? 5000 : next.phase === 'cancelled' ? 2500 : 1500
+        window.setTimeout(() => {
+          setProgressByJobId((current) => {
+            if (current[next.jobId]?.key !== next.key) return current
+            const { [next.jobId]: _removed, ...rest } = current
+            return rest
+          })
+        }, delay)
+        void load()
+      }
     })
     return off
   }, [load])
@@ -159,7 +263,7 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
       const res = await api.invoke('summary:regenerateChat', chatId)
       if (res.ok) {
         toast.success(t('summary.chatRegenerated'))
-        // 等待后台队列完成后刷新
+        // Refresh after the background chat queue has had time to finish.
         setTimeout(() => {
           useAppStore.getState().bumpSummary()
           void load()
@@ -191,90 +295,153 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
     return <div className="px-6 py-2 text-xs" style={{ color: 'var(--muted)' }}>{t('summary.loading')}</div>
   }
 
-  const distilledResources = overview.resources.filter((r) => r.distilled || r.generating)
+  const visibleKeys = new Set<string>([
+    ...overview.docs.map((d) => `doc:${d.docId}`),
+    ...overview.chats.map((c) => `chat:${c.chatId}`),
+    ...overview.resources.map((r) => `res:${r.resourceId}`)
+  ])
+  for (const progress of Object.values(progressByJobId)) {
+    if (progress.key.startsWith(`rollup:${projectId}`)) visibleKeys.add(progress.key)
+  }
+  const visibleProgress = Object.values(progressByJobId).filter((progress) => visibleKeys.has(progress.key) && progress.key !== 'chat:retry-pending')
+  const activeProgress = visibleProgress.filter((progress) => !isTerminalProgress(progress))
+  const progressTitle = (key: string): string => {
+    const [kind, id] = key.split(':', 2)
+    if (kind === 'doc') return overview.docs.find((item) => item.docId === id)?.title ?? t('summary.docTask')
+    if (kind === 'chat') return overview.chats.find((item) => item.chatId === id)?.title ?? t('summary.chatTask')
+    if (kind === 'res') return overview.resources.find((item) => item.resourceId === id)?.name ?? t('summary.resourceTask')
+    return t('summary.rollupTask')
+  }
+  const progressByKeyObject = Object.fromEntries(visibleProgress.map((progress) => [progress.key, progress])) as Record<string, SummaryProgress>
+  const distilledResources = overview.resources.filter((resource) => {
+    const progress = progressByKeyObject[`res:${resource.resourceId}`]
+    return resource.distilled || resource.generating || progress?.phase === 'failed' || progress?.phase === 'cancelled'
+  })
 
   return (
     <div className="space-y-2 px-4 pb-2">
+      {visibleProgress.length > 0 && (
+        <div className="rounded border px-2 py-1.5 text-[11px]" style={{ borderColor: 'var(--border)', color: 'var(--muted)' }}>
+          <div className="mb-1 font-medium" style={{ color: 'var(--text)' }}>
+            {activeProgress.length > 0 ? t('summary.progress.tasksRunning', { count: activeProgress.length }) : t('summary.progress.tasksRecent')}
+          </div>
+          <div className="space-y-2">
+            {visibleProgress.map((progress) => (
+              <div key={progress.jobId}>
+                <div className="mb-0.5 truncate" title={progressTitle(progress.key)}>{progressTitle(progress.key)}</div>
+                <ProgressText progress={progress} t={t} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {issues.length > 0 && (
         <>
           <div className="text-[11px] font-medium" style={{ color: 'var(--muted)' }}>{t('summary.secConsistency')}</div>
           {issues.map((iss, idx) => (
             <div key={idx} className="flex items-start gap-1 text-[11px]" style={{ color: iss.severity === 'error' ? 'var(--danger)' : 'var(--warn)' }}>
-              <span>{iss.severity === 'error' ? '✕' : '!'}</span>
+              <span>{iss.severity === 'error' ? '?' : '!'}</span>
               <span className="min-w-0 flex-1 break-words">{iss.message}</span>
             </div>
           ))}
         </>
       )}
 
-      <div className="text-[11px] font-medium" style={{ color: 'var(--muted)' }}>{t('summary.secDocs')}</div>
-      {overview.docs.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noDocs')}</div>}
-      {overview.docs.map((d) => (
-        <div key={d.docId} className="flex items-center gap-1 text-[12px]">
-          <span
-            className="h-1.5 w-1.5 rounded-full"
-            style={{ background: d.generating ? 'var(--warn)' : d.hasSummary ? 'var(--ok)' : 'var(--border)' }}
-          />
-          <span className="min-w-0 flex-1 truncate" title={d.title}>
-            {d.title}
-            {d.generating && <span className="text-[10px]" style={{ color: 'var(--warn)' }}> · {t('summary.generating')}</span>}
-          </span>
-          {!d.generating && d.hasSummary && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewDoc(d.docId)} />}
-          {!d.generating && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.regenerate')} disabled={busy} onClick={() => void regenDoc(d.docId)} />}
-        </div>
-      ))}
+      <SummarySection
+        label={t('summary.secDocs')}
+        open={sectionOpen.docs}
+        onToggle={() => toggleSection('docs')}
+        ariaLabel={t(sectionOpen.docs ? 'summary.collapseSection' : 'summary.expandSection', { section: t('summary.secDocs') })}
+      >
+        {overview.docs.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noDocs')}</div>}
+        {overview.docs.map((d) => {
+          const progress = progressByKeyObject[`doc:${d.docId}`]
+          const failed = progress?.phase === 'failed'
+          return (
+            <div key={d.docId} className="flex items-start gap-1 text-[12px]">
+              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: d.generating ? 'var(--warn)' : failed ? 'var(--danger)' : d.hasSummary ? 'var(--ok)' : 'var(--border)' }} />
+              <span className="min-w-0 flex-1" title={d.title}>
+                <span className="block truncate">{d.title}</span>
+                {d.generating && <span className="text-[10px]" style={{ color: 'var(--warn)' }}>{t('summary.generating')}</span>}
+                {!d.generating && failed && <span className="text-[10px]" style={{ color: 'var(--danger)' }}>{t('summary.progress.failed')}</span>}
+                <MiniProgress progress={progress} t={t} />
+              </span>
+              {!d.generating && d.hasSummary && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewDoc(d.docId)} />}
+              {!d.generating && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.regenerate')} disabled={busy} onClick={() => void regenDoc(d.docId)} />}
+            </div>
+          )
+        })}
+      </SummarySection>
 
-      <div className="mt-2 text-[11px] font-medium" style={{ color: 'var(--muted)' }}>{t('summary.secChats')}</div>
-      {overview.chats.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noChats')}</div>}
-      {overview.chats.map((c) => (
-        <div key={c.chatId} className="flex items-center gap-1 text-[12px]">
-          <span
-            className="h-1.5 w-1.5 rounded-full"
-            style={{ background: c.generating ? 'var(--warn)' : c.hasSummary ? 'var(--ok)' : 'var(--border)' }}
-          />
-          <span className="min-w-0 flex-1 truncate" title={c.title}>
-            {c.title}
-            {c.generating && <span className="text-[10px]" style={{ color: 'var(--warn)' }}> · {t('summary.generating')}</span>}
-          </span>
-          {!c.generating && c.hasSummary && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewChat(c.chatId)} />}
-          {!c.generating && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.regenerate')} disabled={busy} onClick={() => void regenChat(c.chatId)} />}
-        </div>
-      ))}
+      <SummarySection
+        label={t('summary.secChats')}
+        open={sectionOpen.chats}
+        onToggle={() => toggleSection('chats')}
+        ariaLabel={t(sectionOpen.chats ? 'summary.collapseSection' : 'summary.expandSection', { section: t('summary.secChats') })}
+      >
+        {overview.chats.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noChats')}</div>}
+        {overview.chats.map((c) => {
+          const progress = progressByKeyObject[`chat:${c.chatId}`]
+          const failed = progress?.phase === 'failed'
+          return (
+            <div key={c.chatId} className="flex items-start gap-1 text-[12px]">
+              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: c.generating ? 'var(--warn)' : failed ? 'var(--danger)' : c.hasSummary ? 'var(--ok)' : 'var(--border)' }} />
+              <span className="min-w-0 flex-1" title={c.title}>
+                <span className="block truncate">{c.title}</span>
+                {c.generating && <span className="text-[10px]" style={{ color: 'var(--warn)' }}>{t('summary.generating')}</span>}
+                {!c.generating && failed && <span className="text-[10px]" style={{ color: 'var(--danger)' }}>{t('summary.progress.failed')}</span>}
+                <MiniProgress progress={progress} t={t} />
+              </span>
+              {!c.generating && c.hasSummary && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewChat(c.chatId)} />}
+              {!c.generating && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.regenerate')} disabled={busy} onClick={() => void regenChat(c.chatId)} />}
+            </div>
+          )
+        })}
+      </SummarySection>
 
-      <div className="mt-2 text-[11px] font-medium" style={{ color: 'var(--muted)' }}>{t('summary.secResources')}</div>
-      {distilledResources.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noResources')}</div>}
-      {distilledResources.map((r) => (
-        <div key={r.resourceId} className="flex items-center gap-1 text-[12px]">
-          <span
-            className="h-1.5 w-1.5 rounded-full"
-            style={{ background: r.generating || r.stale || r.incomplete ? 'var(--warn)' : 'var(--ok)' }}
-          />
-          <span className="min-w-0 flex-1 truncate" title={r.name}>
-            {r.name}
-            {r.generating ? (
-              <span className="text-[10px]" style={{ color: 'var(--warn)' }}> · {t('summary.generating')}</span>
-            ) : (
-              <>
-                <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
-                  （{r.type === 'story' ? t('summary.typeStory') : r.type === 'setting' ? t('summary.typeSetting') : t('summary.typeOther')}）
-                </span>
-                {r.stale && <span className="text-[10px]" style={{ color: 'var(--warn)' }}> · {t('summary.stale')}</span>}
-                {r.incomplete && <span className="text-[10px]" style={{ color: 'var(--warn)' }}> · {t('summary.incomplete')}</span>}
-              </>
-            )}
-          </span>
-          {!r.generating && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewResource(r.resourceId)} />}
-          {!r.generating && r.type && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.retryDistill')} disabled={busy} onClick={() => void regenResource(r.resourceId, r.type!)} />}
-          {!r.generating && (
-            <IconBtn icon={<Trash2 size={12} />} title={t('summary.undistill')} onClick={() => void runUndistill(projectId, r.resourceId).then(load)} />
-          )}
-        </div>
-      ))}
-      {overview.resources.some((r) => !r.distilled && !r.generating) && (
-        <div className="text-[10px]" style={{ color: 'var(--muted)' }}>
-          {t('summary.distillHint')}
-        </div>
-      )}
+      <SummarySection
+        label={t('summary.secResources')}
+        open={sectionOpen.resources}
+        onToggle={() => toggleSection('resources')}
+        ariaLabel={t(sectionOpen.resources ? 'summary.collapseSection' : 'summary.expandSection', { section: t('summary.secResources') })}
+      >
+        {distilledResources.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noResources')}</div>}
+        {distilledResources.map((r) => {
+          const progress = progressByKeyObject[`res:${r.resourceId}`]
+          const failed = progress?.phase === 'failed'
+          return (
+            <div key={r.resourceId} className="flex items-start gap-1 text-[12px]">
+              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: r.generating ? 'var(--warn)' : failed ? 'var(--danger)' : r.stale || r.incomplete ? 'var(--warn)' : 'var(--ok)' }} />
+              <span className="min-w-0 flex-1" title={r.name}>
+                <span className="block truncate">{r.name}</span>
+                {r.generating ? (
+                  <span className="text-[10px]" style={{ color: 'var(--warn)' }}>{t('summary.generating')}</span>
+                ) : failed ? (
+                  <span className="text-[10px]" style={{ color: 'var(--danger)' }}>{t('summary.progress.failed')}</span>
+                ) : (
+                  <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
+                    ({r.type === 'story' ? t('summary.typeStory') : r.type === 'setting' ? t('summary.typeSetting') : t('summary.typeOther')})
+                    {r.stale && ` ? ${t('summary.stale')}`}
+                    {r.incomplete && ` ? ${t('summary.incomplete')}`}
+                  </span>
+                )}
+                <MiniProgress progress={progress} t={t} />
+              </span>
+              {!r.generating && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewResource(r.resourceId)} />}
+              {!r.generating && r.type && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.retryDistill')} disabled={busy} onClick={() => void regenResource(r.resourceId, r.type!)} />}
+              {!r.generating && (
+                <IconBtn icon={<Trash2 size={12} />} title={t('summary.undistill')} onClick={() => void runUndistill(projectId, r.resourceId).then(load)} />
+              )}
+            </div>
+          )
+        })}
+        {overview.resources.some((r) => !r.distilled && !r.generating) && (
+          <div className="text-[10px]" style={{ color: 'var(--muted)' }}>
+            {t('summary.distillHint')}
+          </div>
+        )}
+      </SummarySection>
 
       {preview && (
         <Modal title={preview.title} onClose={() => setPreview(null)} footer={<button className="btn" onClick={() => setPreview(null)}>{t('dialog.cancel')}</button>}>
@@ -282,6 +449,38 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
         </Modal>
       )}
     </div>
+  )
+}
+
+function SummarySection({
+  label,
+  open,
+  onToggle,
+  ariaLabel,
+  children
+}: {
+  label: string
+  open: boolean
+  onToggle: () => void
+  ariaLabel: string
+  children: ReactNode
+}): JSX.Element {
+  return (
+    <section className="mt-2">
+      <button
+        type="button"
+        className="group flex w-full items-center gap-1 text-left text-[11px] font-medium hover:opacity-80"
+        style={{ color: 'var(--muted)' }}
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        title={ariaLabel}
+        onClick={onToggle}
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <span>{label}</span>
+      </button>
+      {open && <div className="mt-1 space-y-1">{children}</div>}
+    </section>
   )
 }
 

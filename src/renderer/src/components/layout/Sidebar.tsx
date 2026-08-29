@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   Archive,
   ChevronDown,
@@ -30,6 +30,21 @@ import SummaryArea from './SummaryArea'
 import Modal from '../common/Modal'
 
 const ALLOWED_EXT = ['.txt', '.md', '.csv']
+const SIDEBAR_EXPANDED_STORAGE_KEY = 'vibewrite.sidebar.expanded'
+
+function readSidebarExpanded(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_EXPANDED_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, value]) => typeof value === 'boolean')
+    )
+  } catch {
+    return {}
+  }
+}
 
 export default function Sidebar(): JSX.Element {
   const t = useT()
@@ -39,7 +54,14 @@ export default function Sidebar(): JSX.Element {
   const openChat = useAppStore((s) => s.openChat)
   const openSettings = useAppStore((s) => s.openSettings)
   const openResource = useAppStore((s) => s.openResource)
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(readSidebarExpanded)
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_EXPANDED_STORAGE_KEY, JSON.stringify(expanded))
+    } catch {
+      // Ignore storage failures; collapsing remains functional for this session.
+    }
+  }, [expanded])
   const fileInput = useRef<HTMLInputElement>(null)
   const [uploadProject, setUploadProject] = useState<string | null>(null)
   const [previewRes, setPreviewRes] = useState<{ name: string; content: string } | null>(null)
@@ -250,26 +272,47 @@ export default function Sidebar(): JSX.Element {
                     onAdd={() => void createDoc(p.project.id)}
                   >
                     {isOpen(`${projectKey}:docs`) &&
-                      p.docs.map((doc) => (
-                        <div key={doc.id}>
-                          <div className="group flex items-center gap-1 py-0.5 pl-6 pr-1 text-[13px] hover:bg-[var(--panel3)]">
-                            <FileText size={13} style={{ color: 'var(--muted)' }} />
-                            <span
-                              className="min-w-0 flex-1 cursor-pointer truncate"
-                              onClick={() => openDoc(doc)}
-                              title={doc.title}
-                            >
-                              {doc.title}
-                            </span>
-                            <div className="hidden gap-0.5 group-hover:flex">
-                              <IconButton icon={<MessageSquare size={12} />} title={t('sidebar.newDocChat')} onClick={() => void createChat(p.project.id, doc.id)} />
-                              <IconButton icon={<MoreHorizontal size={12} />} title={t('sidebar.rename')} onClick={() => void renameDoc(doc)} />
-                              <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteDoc(doc)} />
+                      p.docs.map((doc) => {
+                        const docChats = p.chats.filter((chat) => chat.docId === doc.id)
+                        const docChatsKey = `${projectKey}:doc:${doc.id}`
+                        const docChatsOpen = expanded[docChatsKey] ?? true
+                        return (
+                          <div key={doc.id}>
+                            <div className="group flex items-center gap-1 py-0.5 pl-6 pr-1 text-[13px] hover:bg-[var(--panel3)]">
+                              <FileText size={13} style={{ color: 'var(--muted)' }} />
+                              {docChats.length > 0 && (
+                                <button
+                                  type="button"
+                                  className="shrink-0 rounded p-0.5 hover:opacity-70"
+                                  style={{ color: 'var(--muted)' }}
+                                  title={docChatsOpen ? t('sidebar.collapseDocChats') : t('sidebar.expandDocChats')}
+                                  aria-label={docChatsOpen ? t('sidebar.collapseDocChats') : t('sidebar.expandDocChats')}
+                                  aria-expanded={docChatsOpen}
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    toggle(docChatsKey)
+                                  }}
+                                >
+                                  {docChatsOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                                </button>
+                              )}
+                              <span
+                                className="min-w-0 flex-1 cursor-pointer truncate"
+                                onClick={() => openDoc(doc)}
+                                title={doc.title}
+                              >
+                                {doc.title}
+                              </span>
+                              <div className="hidden gap-0.5 group-hover:flex">
+                                <IconButton icon={<MessageSquare size={12} />} title={t('sidebar.newDocChat')} onClick={() => void createChat(p.project.id, doc.id)} />
+                                <IconButton icon={<MoreHorizontal size={12} />} title={t('sidebar.rename')} onClick={() => void renameDoc(doc)} />
+                                <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteDoc(doc)} />
+                              </div>
                             </div>
+                            {docChatsOpen && renderDocChats(p, doc)}
                           </div>
-                          {renderDocChats(p, doc)}
-                        </div>
-                      ))}
+                        )
+                      })}
                   </Section>
 
                   <Section

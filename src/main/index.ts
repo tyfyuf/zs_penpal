@@ -5,7 +5,7 @@ import { registerIpcHandlers } from './ipc'
 import { createMainWindow, getMainWindow } from './window'
 import { EVENTS } from '@shared/ipc'
 import { commitAllProjects } from './services/git.service'
-import { waitForSummaryQueue } from './services/summary.service'
+import { initializeSummaryJobManager, shutdownSummaryJobManager } from './services/summary-job-manager'
 import { clearRecovery } from './services/recovery.service'
 import { initErrorLog, logError } from './services/log.service'
 import { disposeNeuralEmbedder } from './services/neural-embed.service'
@@ -55,6 +55,7 @@ if (!gotLock) {
     setUserDataDir(app.getPath('userData'))
     await loadConfig()
     await initErrorLog()
+    await initializeSummaryJobManager()
     registerIpcHandlers()
 
     const win = createMainWindow()
@@ -85,7 +86,7 @@ if (!gotLock) {
       try {
         await flushRenderer()
         await commitAllProjects()
-        await waitForSummaryQueue(8000)
+        await shutdownSummaryJobManager(8000)
       } catch {
         // 关闭阶段错误不阻塞退出
       } finally {

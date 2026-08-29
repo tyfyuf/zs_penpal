@@ -43,8 +43,8 @@ import { computeSourceInfo, isSourceStale, SUMMARY_SCHEMA_VERSION } from '../sum
 import { computeDefaultActive } from '../summary-relevance'
 import { logError } from './log.service'
 import { executeStructuredTask } from './structured-generation.service'
-import { EVENTS } from '@shared/ipc'
-import { broadcast } from '../window'
+import { isSummaryGenerating, reportSummaryProgress, setSummaryGeneratingState, setSummaryProgressSink } from './summary-state.service'
+export { isSummaryGenerating, setSummaryGeneratingState, setSummaryProgressSink } from './summary-state.service'
 import { analyzeTextIntegrity, assertTextIntegrity } from './text-decoding.service'
 import { confirmedKnowledge, hasExplicitAliasRelation, mergeKnowledgeBases, normalizeKnowledgeName, sourceContainsEvidence, sourceContainsName, validateKnowledge } from './summary-knowledge'
 import { generationInfo, reusableChunkResults, splitSourceByTokenBudget, type SourceChunk } from './summary-hierarchy'
@@ -55,20 +55,14 @@ import { distillSettingResourceV2 } from './setting-distillation.service'
 // 摘要生成状态（供摘要区显示“生成中”黄点，生成完毕转绿并解锁）
 // ---------------------------------------------------------------------------
 
-const generatingKeys = new Map<string, number>()
-
-export function isSummaryGenerating(key: string): boolean {
-  return generatingKeys.has(key)
-}
-
 function markGenerating(key: string): void {
-  generatingKeys.set(key, Date.now())
-  broadcast(EVENTS.summaryStatus, { key, generating: true })
+  setSummaryGeneratingState(key, true)
+  reportSummaryProgress(key, 'starting')
 }
 
-function markDone(key: string): void {
-  generatingKeys.delete(key)
-  broadcast(EVENTS.summaryStatus, { key, generating: false })
+function markDone(key: string, succeeded = true): void {
+  reportSummaryProgress(key, succeeded ? 'complete' : 'failed', succeeded ? 1 : 0, 1)
+  setSummaryGeneratingState(key, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +78,7 @@ type Lang = 'zh' | 'en'
 function storyPrompt(lang: Lang, bounded = false): string {
   const cap = bounded
     ? (lang === 'en'
-      ? `\nThis is a long text. To fit the output, LIMIT sizes strictly: at most 20 characters, at most 40 plot points, at most 30 foreshadowing items, at most 40 key settings, at most 40 key quotes. Keep only the MOST important ones; omit the rest.`
+      ? `\nThis is a long text. To fit the output, LIMIT sizes strictly: at most 20 characters, at most 40 plot points, at most 40 key settings, at most 40 key quotes. Keep only the MOST important ones; omit the rest.`
       : `\n本文较长。为控制输出，请严格限制规模：人物最多 20 个、情节点最多 40 个、伏笔最多 30 条、关键设定最多 40 条、关键台词最多 40 条。只保留最重要的，其余省略。`)
     : ''
   return lang === 'en'
@@ -92,7 +86,6 @@ function storyPrompt(lang: Lang, bounded = false): string {
 - "overview": the main plot in one paragraph, at most 200 words, as complete as possible
 - "characters": array of characters, each with "name", "aliases" (array; empty if none), "role", "goal" (empty string if none)
 - "plot": array of plot points in story order, each with "id" (e.g. "s1"), "function" (exactly one of: advance/reveal/turn/foreshadow/resolve), "summary" (what happens, at most 80 words, be specific)
-- "foreshadowing": array, each with "planted" (what was set up) and "status" (exactly "resolved" or "unresolved")
 - "keySettings": array of key settings, each at most 40 words
 - "keyQuotes": array of key quotes
 Cover the entire text and do not omit important plot points. Leave a field empty ([] or "") when the information is absent — DO NOT invent. All content in English. Output valid JSON only.${cap}`
@@ -100,7 +93,6 @@ Cover the entire text and do not omit important plot points. Leave a field empty
 - "overview"：主线剧情总览，一段话，不超过 200 字，尽量完整
 - "characters"：人物数组，每项含 "name"（名字）、"aliases"（别名数组，无则空数组）、"role"（身份）、"goal"（目标，无则空字符串）
 - "plot"：按故事顺序的情节点数组，每项含 "id"（如 s1）、"function"（只能取：推进/揭示/转折/铺垫/收束）、"summary"（这个情节点发生了什么，每点不超过 80 字，尽量具体）
-- "foreshadowing"：伏笔数组，每项含 "planted"（埋了什么）、"status"（只能取 resolved 或 unresolved）
 - "keySettings"：关键设定，字符串数组，每条不超过 40 字
 - "keyQuotes"：关键台词，字符串数组
 要求覆盖全文、不遗漏重要情节；信息不足的字段留空数组或空字符串，禁止编造。只输出合法 JSON。${cap}`
@@ -145,7 +137,6 @@ function settingPrompt(lang: Lang, bounded = false): string {
 - "relationships": explicit relationships among entities
 - "timeline": explicit chronology or historical milestones
 - "constraints": limitations, costs, conditions, exceptions
-- "unresolved": questions or contradictions not settled by the text
 Preserve names and terms exactly as written whenever possible. Do not invent. Narrative examples inside a setting document are evidence, not a reason to classify it as a story. Output valid JSON only.${cap}`
     : `你是世界观设定蒸馏助手。请从文本中提取稳定的设定知识，并且只输出一个 JSON 对象：
 - "overview"：设定概览
@@ -156,7 +147,6 @@ Preserve names and terms exactly as written whenever possible. Do not invent. Na
 - "relationships"：实体之间明确写出的关系
 - "timeline"：明确写出的时间线和历史节点
 - "constraints"：限制、代价、条件和例外
-- "unresolved"：原文尚未解决的问题或矛盾
 尽可能保持名称和术语的原文写法。禁止编造。设定文档中的叙事示例是证据，不应因此将文档归类为故事。只输出合法 JSON。${cap}`
 }
 
@@ -297,7 +287,6 @@ function normalizeStory(parsed: unknown, compact = false): StorySummary {
   const p = (parsed ?? {}) as Record<string, unknown>
   const chars = Array.isArray(p.characters) ? (p.characters as Record<string, unknown>[]) : []
   const plot = Array.isArray(p.plot) ? (p.plot as Record<string, unknown>[]) : []
-  const fs = Array.isArray(p.foreshadowing) ? (p.foreshadowing as Record<string, unknown>[]) : []
   const charLimit = compact ? 8 : 12
   const plotLimit = compact ? 16 : 24
   const otherLimit = compact ? 8 : 12
@@ -312,10 +301,6 @@ function normalizeStory(parsed: unknown, compact = false): StorySummary {
       id: cleanText(pl.id, 80) || `s${i + 1}`,
       function: cleanText(pl.function, 40), summary: cleanText(pl.summary, 480)
     })).filter((pl) => pl.summary && STORY_FUNCTIONS.has(pl.function)).slice(0, plotLimit),
-    foreshadowing: fs.map((f) => ({
-      planted: cleanText(f.planted, 360),
-      status: f.status === 'resolved' ? ('resolved' as const) : ('unresolved' as const)
-    })).filter((f) => f.planted).slice(0, otherLimit),
     keySettings: cleanStrings(p.keySettings, otherLimit, 240),
     keyQuotes: cleanStrings(p.keyQuotes, compact ? 5 : 8, 320)
   }
@@ -366,7 +351,6 @@ function normalizeSetting(parsed: unknown, compact = false): SettingSummary {
     relationships: cleanStrings(p.relationships, itemLimit, 600),
     timeline: cleanStrings(p.timeline, itemLimit, 600),
     constraints: cleanStrings(p.constraints, itemLimit, 600),
-    unresolved: cleanStrings(p.unresolved, compact ? 8 : 20, 480)
   }
 }
 
@@ -446,6 +430,20 @@ async function callTypedDecomposition(type: ResourceDistillType, content: string
   }))
 }
 
+function storyKnowledgeFromSummary(summary: StorySummary, source: string, chunkId: string): SummaryKnowledgeBase {
+  const entities = summary.characters
+    .filter((character) => sourceContainsName(source, character.name))
+    .map((character, index) => ({
+      id: `${chunkId}:character:${index + 1}`,
+      kind: 'character' as const,
+      name: character.name,
+      aliases: character.aliases.filter((alias) => hasExplicitAliasRelation(source, character.name, alias)),
+      status: 'confirmed' as const,
+      evidence: []
+    }))
+  return { entities, facts: [] }
+}
+
 async function callKnowledgeExtraction(chunk: SourceChunk, cfg: ApiSettings): Promise<SummaryKnowledgeBase> {
   return enqueueLlm(() => executeStructuredTask({
     task: 'summary_knowledge_extraction', settings: cfg,
@@ -514,7 +512,6 @@ function deterministicMerge(type: ResourceDistillType, summaries: SummaryBody[])
       overview: stories.map((item) => item.overview).filter(Boolean).join('\n').slice(0, 4000),
       characters: uniqueBy(stories.flatMap((item) => item.characters), (item) => normalizeKnowledgeName(item.name), 40),
       plot: stories.flatMap((item) => item.plot).slice(0, 100).map((item, index) => ({ ...item, id: `s${index + 1}` })),
-      foreshadowing: uniqueBy(stories.flatMap((item) => item.foreshadowing), (item) => normalizeKnowledgeName(item.planted), 60),
       keySettings: uniqueBy(stories.flatMap((item) => item.keySettings), normalizeKnowledgeName, 80),
       keyQuotes: uniqueBy(stories.flatMap((item) => item.keyQuotes), normalizeKnowledgeName, 40)
     }
@@ -530,8 +527,7 @@ function deterministicMerge(type: ResourceDistillType, summaries: SummaryBody[])
       rules: uniqueBy(settings.flatMap((item) => item.rules), normalizeKnowledgeName, 80),
       relationships: uniqueBy(settings.flatMap((item) => item.relationships), normalizeKnowledgeName, 80),
       timeline: uniqueBy(settings.flatMap((item) => item.timeline), normalizeKnowledgeName, 80),
-      constraints: uniqueBy(settings.flatMap((item) => item.constraints), normalizeKnowledgeName, 80),
-      unresolved: uniqueBy(settings.flatMap((item) => item.unresolved), normalizeKnowledgeName, 40)
+      constraints: uniqueBy(settings.flatMap((item) => item.constraints), normalizeKnowledgeName, 80)
     }
   }
   const generic = matching as GenericResourceSummary[]
@@ -620,11 +616,16 @@ async function generateHierarchicalSummary(
   content: string,
   cfg: ApiSettings,
   previous?: ResourceSummary | DocSummary | null,
-  checkpoint?: (result: HierarchicalResult) => Promise<void>
+  checkpoint?: (result: HierarchicalResult) => Promise<void>,
+  progressKey?: string
 ): Promise<HierarchicalResult> {
   const targetTokens = Math.max(1200, Math.min(24000, Math.floor(inputBudget(cfg) * 0.55)))
   const chunks = splitSourceByTokenBudget(content, cfg.model, targetTokens)
   const reusable = reusableChunkResults(chunks, previous?.type === type ? previous.chunkResults : undefined, type)
+  if (progressKey) {
+    reportSummaryProgress(progressKey, 'chunking', 1, 1, `${chunks.length} chunks prepared`)
+    reportSummaryProgress(progressKey, 'extracting', 0, chunks.length)
+  }
   const completed: SummaryChunkResult[] = []
   const failed: string[] = []
 
@@ -632,13 +633,23 @@ async function generateHierarchicalSummary(
     const cached = reusable.get(chunk.id)
     if (cached) {
       completed.push(cached)
+      if (progressKey) reportSummaryProgress(progressKey, 'extracting', completed.length, chunks.length, `Chunk ${completed.length}/${chunks.length}`)
       continue
     }
     try {
-      const knowledge = await callKnowledgeExtraction(chunk, cfg)
-      const rawSummary = await callTypedDecomposition(type, chunk.text, cfg, `summary_chunk_${type}`)
-      const summary = sanitizeSummary(rawSummary, chunk.text, knowledge)
+      let summary: SummaryBody
+      let knowledge: SummaryKnowledgeBase
+      if (type === 'story') {
+        const rawSummary = await callTypedDecomposition(type, chunk.text, cfg, `summary_chunk_${type}`)
+        summary = sanitizeSummary(rawSummary, chunk.text, { entities: [], facts: [] })
+        knowledge = storyKnowledgeFromSummary(summary as StorySummary, chunk.text, chunk.id)
+      } else {
+        knowledge = await callKnowledgeExtraction(chunk, cfg)
+        const rawSummary = await callTypedDecomposition(type, chunk.text, cfg, `summary_chunk_${type}`)
+        summary = sanitizeSummary(rawSummary, chunk.text, knowledge)
+      }
       completed.push({ id: chunk.id, index: chunk.index, sourceFingerprint: chunk.sourceFingerprint, summary, knowledge })
+      if (progressKey) reportSummaryProgress(progressKey, 'extracting', completed.length, chunks.length, `Chunk ${completed.length}/${chunks.length}`)
     } catch (error) {
       failed.push(generationFailureId(chunk.id, error))
     }
@@ -657,9 +668,11 @@ async function generateHierarchicalSummary(
 
   let nodes: MergeNode[] = completed.sort((a, b) => a.index - b.index).map((item) => ({ summary: item.summary, knowledge: item.knowledge }))
   let level = 0
+  if (progressKey && nodes.length === 1) reportSummaryProgress(progressKey, 'merging', 1, 1, 'Summary merge complete')
   while (nodes.length > 1) {
     const groups = groupMergeNodes(nodes, cfg)
     const next: MergeNode[] = []
+    if (progressKey) reportSummaryProgress(progressKey, 'merging', 0, groups.length, `Merge level ${level + 1}`)
     for (let index = 0; index < groups.length; index++) {
       const group = groups[index]
       const knowledge = mergeKnowledgeBases(group.map((item) => item.knowledge))
@@ -673,6 +686,7 @@ async function generateHierarchicalSummary(
         failed.push(generationFailureId(`merge_${level}_${index}`, error))
         next.push({ summary: deterministicMerge(type, group.map((item) => item.summary)), knowledge })
       }
+      if (progressKey) reportSummaryProgress(progressKey, 'merging', index + 1, groups.length, `Merge level ${level + 1}: ${index + 1}/${groups.length}`)
     }
     nodes = next
     level++
@@ -805,11 +819,11 @@ export function estimateChangedChars(prev: string, curr: string): number {
   return changed + Math.abs(prev.length - curr.length)
 }
 
-async function generateDocSummary(projectId: string, docId: string, content: string, cfg: ApiSettings): Promise<DocSummary> {
+async function generateDocSummary(projectId: string, docId: string, content: string, cfg: ApiSettings, progressKey?: string): Promise<DocSummary> {
   assertTextIntegrity(analyzeTextIntegrity(content), '\u6587\u6863')
   void projectId
   void docId
-  const result = await generateHierarchicalSummary('story', content, cfg)
+  const result = await generateHierarchicalSummary('story', content, cfg, undefined, undefined, progressKey)
   return {
     ...(result.summary as StorySummary),
     ...computeSourceInfo(content),
@@ -834,15 +848,20 @@ export async function ensureDocSummary(projectId: string, docId: string, current
   if (!existing) {
     const key = `doc:${docId}`
     markGenerating(key)
+    let succeeded = false
     try {
-      const summary = await generateDocSummary(projectId, docId, currentContent, settings)
+      reportSummaryProgress(key, 'reading', 1, 1)
+      const summary = await generateDocSummary(projectId, docId, currentContent, settings, key)
+      reportSummaryProgress(key, 'writing', 0, 1)
       await writeDocSummary(projectId, docId, summary)
+      reportSummaryProgress(key, 'writing', 1, 1)
+      succeeded = true
       return summary
     } catch (err) {
       logError('summary:doc', `文档摘要生成失败 docId=${docId}`, (err as Error).message)
       return null
     } finally {
-      markDone(key)
+      markDone(key, succeeded)
     }
   }
 
@@ -850,15 +869,20 @@ export async function ensureDocSummary(projectId: string, docId: string, current
 
   const key = `doc:${docId}`
   markGenerating(key)
+  let succeeded = false
   try {
-    const summary = await generateDocSummary(projectId, docId, currentContent, settings)
+    reportSummaryProgress(key, 'reading', 1, 1)
+    const summary = await generateDocSummary(projectId, docId, currentContent, settings, key)
+    reportSummaryProgress(key, 'writing', 0, 1)
     await writeDocSummary(projectId, docId, summary)
+    reportSummaryProgress(key, 'writing', 1, 1)
+    succeeded = true
     return summary
   } catch (err) {
-    logError('summary:doc', `文档摘要更新失败 docId=${docId}`, (err as Error).message)
+    logError('summary:doc', `文档摘要生成失败 docId=${docId}`, (err as Error).message)
     return existing
   } finally {
-    markDone(key)
+    markDone(key, succeeded)
   }
 }
 
@@ -866,19 +890,25 @@ export async function ensureDocSummary(projectId: string, docId: string, current
 export async function regenerateDocSummary(docId: string): Promise<{ ok: boolean; error?: string }> {
   const key = `doc:${docId}`
   markGenerating(key)
+  let succeeded = false
   try {
     const cfg = await loadConfig()
     if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未开启' }
     const settings = await loadApiSettings()
     if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }
+    reportSummaryProgress(key, 'reading', 0, 1)
     const { doc, content } = await readDoc(docId)
-    const summary = await generateDocSummary(doc.projectId, docId, content, settings)
+    reportSummaryProgress(key, 'reading', 1, 1)
+    const summary = await generateDocSummary(doc.projectId, docId, content, settings, key)
+    reportSummaryProgress(key, 'writing', 0, 1)
     await writeDocSummary(doc.projectId, docId, summary)
+    reportSummaryProgress(key, 'writing', 1, 1)
+    succeeded = true
     return { ok: true }
   } catch (err) {
     return { ok: false, error: (err as Error).message }
   } finally {
-    markDone(key)
+    markDone(key, succeeded)
   }
 }
 
@@ -924,31 +954,43 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
 
   const key = `chat:${chatId}`
   markGenerating(key)
+  let succeeded = false
   try {
-    // 尾部窗口：最近 CHAT_TAIL_WINDOW 条逐条摘要（增量：只重算尾部，不重算全量）
+    // Keep the latest CHAT_TAIL_WINDOW turns verbatim; compact older turns only when needed.
     const tailStart = Math.max(0, turns.length - CHAT_TAIL_WINDOW)
-    const items = await summarizeTurnItems(turns.slice(tailStart), cfg)
-
-    // 历史压缩区间：消息数超阈值 或 对话 token 估算超输入预算 60% 时，把尾部窗口之前的旧消息按 CHAT_COMPACT_BATCH 聚合（增量追加）
     const dialogueTokens = estimateInputTokens(
       turns.map((m) => m.content).join('\n'),
       cfg.model
     )
     const needCompact = turns.length > CHAT_COMPACT_THRESHOLD || dialogueTokens > inputBudget(cfg) * 0.6
+    const prev = force ? [] : Array.isArray(existing?.compacted) ? existing.compacted : []
+    const kept = prev.filter((iv) => iv.endIndex < tailStart)
+    const lastCovered = kept.reduce((m, iv) => Math.max(m, iv.endIndex), -1)
+    const preTailEnd = tailStart - 1
+    const compactBatchCount = needCompact && preTailEnd >= lastCovered + 1
+      ? Math.ceil((preTailEnd - lastCovered) / CHAT_COMPACT_BATCH)
+      : 0
+    const totalSteps = 1 + compactBatchCount
+    reportSummaryProgress(key, 'reading', 1, 1)
+    reportSummaryProgress(key, 'extracting', 0, totalSteps, `Recent messages: ${turns.slice(tailStart).length}`)
+    const items = await summarizeTurnItems(turns.slice(tailStart), cfg)
+    reportSummaryProgress(key, 'extracting', 1, totalSteps, 'Recent messages summarized')
+
+    // Compact when the dialogue exceeds the turn threshold or 60% of the input-token budget.
     let compacted: ChatSummaryInterval[] = []
     if (needCompact) {
-      const prev = force ? [] : Array.isArray(existing?.compacted) ? existing.compacted : []
-      const kept = prev.filter((iv) => iv.endIndex < tailStart)
       compacted = [...kept]
-      const lastCovered = kept.reduce((m, iv) => Math.max(m, iv.endIndex), -1)
-      const preTailEnd = tailStart - 1
+      let completedSteps = 1
       for (let s = lastCovered + 1; s <= preTailEnd; s += CHAT_COMPACT_BATCH) {
         const e = Math.min(s + CHAT_COMPACT_BATCH - 1, preTailEnd)
         const summary = await summarizeInterval(turns.slice(s, e + 1), cfg)
         if (summary) compacted.push({ startIndex: s, endIndex: e, summary, updatedAt: nowIso() })
+        completedSteps += 1
+        reportSummaryProgress(key, 'extracting', completedSteps, totalSteps, `History compressed: ${completedSteps - 1}/${compactBatchCount}`)
       }
     }
 
+    reportSummaryProgress(key, 'writing', 0, 1)
     await writeChatSummary(chat.projectId, chatId, {
       schemaVersion: SUMMARY_SCHEMA_VERSION,
       items,
@@ -957,8 +999,10 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
       lastMessageId,
       messageCount
     })
+    reportSummaryProgress(key, 'writing', 1, 1)
+    succeeded = true
   } finally {
-    markDone(key)
+    markDone(key, succeeded)
   }
 }
 
@@ -1084,10 +1128,13 @@ export async function distillResource(
 ): Promise<DistillResult> {
   const key = `res:${resourceId}`
   markGenerating(key)
+  let succeeded = false
   try {
-    return await distillResourceInner(projectId, resourceId, type, force)
+    const result = await distillResourceInner(projectId, resourceId, type, force, key)
+    succeeded = result.ok
+    return result
   } finally {
-    markDone(key)
+    markDone(key, succeeded)
   }
 }
 
@@ -1095,7 +1142,8 @@ async function distillResourceInner(
   projectId: string,
   resourceId: string,
   type: ResourceDistillType,
-  force: boolean
+  force: boolean,
+  progressKey?: string
 ): Promise<DistillResult> {
   const cfg = await loadConfig()
   if (!cfg.summaryEnabled) return { ok: false, error: '\u6458\u8981\u529f\u80fd\u672a\u5f00\u542f' }
@@ -1104,11 +1152,13 @@ async function distillResourceInner(
 
   let content: string
   let resourceName = resourceId
+  if (progressKey) reportSummaryProgress(progressKey, 'reading', 0, 1)
   try {
     const resource = await readResource(projectId, resourceId)
     resourceName = resource.name
     assertTextIntegrity(resource.encoding, resource.name)
     content = resource.content
+    if (progressKey) reportSummaryProgress(progressKey, 'reading', 1, 1)
   } catch (err) {
     return { ok: false, error: (err as Error).message }
   }
@@ -1132,10 +1182,11 @@ async function distillResourceInner(
       return { ok: false, mismatch: true, detectedType: decision.type, reasons: decision.reasons }
     }
   }
+  if (progressKey && !force) reportSummaryProgress(progressKey, 'classifying', 1, 1)
 
   try {
     if (type === 'setting') {
-      const result = await distillSettingResourceV2(projectId, resourceId, content, settings)
+      const result = await distillSettingResourceV2(projectId, resourceId, content, settings, progressKey)
       const summary: ResourceSummary = {
         ...result.summary,
         ...computeSourceInfo(content),
@@ -1145,7 +1196,9 @@ async function distillResourceInner(
         updatedAt: nowIso()
       }
       // setting-v2 only publishes after every required branch has succeeded.
+      if (progressKey) reportSummaryProgress(progressKey, 'writing', 0, 1)
       await writeResourceSummary(projectId, resourceId, summary)
+      if (progressKey) reportSummaryProgress(progressKey, 'writing', 1, 1)
       try {
         await removeSettingDistillationCheckpoint(projectId, resourceId)
       } catch (error) {
@@ -1165,7 +1218,7 @@ async function distillResourceInner(
         updatedAt: nowIso()
       }
       await writeResourceSummary(projectId, resourceId, partial)
-    })
+    }, progressKey)
     const summary: ResourceSummary = {
       ...(result.summary as ResourceSummary),
       ...computeSourceInfo(content),
@@ -1174,7 +1227,9 @@ async function distillResourceInner(
       generation: generationInfo(result.totalChunks, result.chunkResults, result.failedChunkIds),
       updatedAt: nowIso()
     }
+    if (progressKey) reportSummaryProgress(progressKey, 'writing', 0, 1)
     await writeResourceSummary(projectId, resourceId, summary)
+    if (progressKey) reportSummaryProgress(progressKey, 'writing', 1, 1)
     return { ok: true, summary, detectedType: type }
   } catch (err) {
     logError('summary:resource', `\u8d44\u6e90\u84b8\u998f\u5931\u8d25 resourceId=${resourceId} name=${resourceName}`, (err as Error).message)
@@ -1481,7 +1536,7 @@ async function buildRollupForChunk(
 }
 
 /** 生成/刷新项目大摘要（增量：成员未变的块复用） */
-export async function generateDocRollups(projectId: string): Promise<{ ok: boolean; error?: string }> {
+export async function generateDocRollups(projectId: string, progressKey?: string): Promise<{ ok: boolean; error?: string }> {
   const cfg = await loadConfig()
   if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未开启' }
   const settings = await loadApiSettings()
@@ -1497,6 +1552,8 @@ export async function generateDocRollups(projectId: string): Promise<{ ok: boole
 
   const existing = await readDocRollups(projectId)
   const rollups: DocRollup[] = []
+  const totalBatches = Math.ceil(docs.length / ROLLUP_BATCH)
+  if (progressKey) reportSummaryProgress(progressKey, 'merging', 0, totalBatches)
   try {
     for (let i = 0; i < docs.length; i += ROLLUP_BATCH) {
       const group = docs.slice(i, i + ROLLUP_BATCH)
@@ -1505,8 +1562,11 @@ export async function generateDocRollups(projectId: string): Promise<{ ok: boole
       const rollup = await buildRollupForChunk(projectId, group, rangeLabel, settings, existingRollup, false)
       if (!rollup) return { ok: false, error: `Rollup generation incomplete for group ${rangeLabel}` }
       rollups.push(rollup)
+      if (progressKey) reportSummaryProgress(progressKey, 'merging', rollups.length, totalBatches, `Rollup ${rollups.length}/${totalBatches}`)
     }
+    if (progressKey) reportSummaryProgress(progressKey, 'writing', 0, 1)
     await writeDocRollups(projectId, rollups)
+    if (progressKey) reportSummaryProgress(progressKey, 'writing', 1, 1)
     return { ok: true }
   } catch (err) {
     return { ok: false, error: (err as Error).message }
@@ -1514,7 +1574,7 @@ export async function generateDocRollups(projectId: string): Promise<{ ok: boole
 }
 
 /** 单条重新生成大摘要 */
-export async function regenerateDocRollup(projectId: string, rollupId: string): Promise<{ ok: boolean; error?: string }> {
+export async function regenerateDocRollup(projectId: string, rollupId: string, progressKey?: string): Promise<{ ok: boolean; error?: string }> {
   const settings = await loadApiSettings()
   if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }
   const existing = await readDocRollups(projectId)
@@ -1575,15 +1635,12 @@ function storyBlock(s: StorySummary, lang: Lang): string {
     )
     .join('\n')
   const plot = (Array.isArray(s.plot) ? s.plot : []).map((p) => `- ${p.id}｜${p.function}：${p.summary}`).join('\n')
-  const fs = (Array.isArray(s.foreshadowing) ? s.foreshadowing : [])
-    .map((f) => (en ? `- ${f.planted} (${f.status === 'resolved' ? 'resolved' : 'unresolved'})` : `- ${f.planted}（${f.status === 'resolved' ? '已回收' : '未回收'}）`))
-    .join('\n')
   const settings = Array.isArray(s.keySettings) ? s.keySettings : []
   const quotes = Array.isArray(s.keyQuotes) ? s.keyQuotes : []
   if (en) {
-    return `Overview: ${s.overview || none}\n\nCharacters:\n${chars || none}\n\nPlot:\n${plot || none}\n\nForeshadowing:\n${fs || none}\n\nKey settings: ${settings.join(', ') || none}\nKey quotes: ${quotes.join(' / ') || none}`
+    return `Overview: ${s.overview || none}\n\nCharacters:\n${chars || none}\n\nPlot:\n${plot || none}\n\nKey settings: ${settings.join(', ') || none}\nKey quotes: ${quotes.join(' / ') || none}`
   }
-  return `总览：${s.overview || none}\n\n人物：\n${chars || none}\n\n情节链：\n${plot || none}\n\n伏笔：\n${fs || none}\n\n关键设定：${settings.join('、') || none}\n关键台词：${quotes.join(' / ') || none}`
+  return `总览：${s.overview || none}\n\n人物：\n${chars || none}\n\n情节链：\n${plot || none}\n\n伏笔：\n\n\n关键设定：${settings.join('、') || none}\n关键台词：${quotes.join(' / ') || none}`
 }
 
 function knowledgeBlock(knowledge: SummaryKnowledgeBase, lang: Lang): string {
@@ -1606,29 +1663,56 @@ ${entities || none}
 ${facts || none}`
 }
 
-export function buildDocSummaryBlock(s: DocSummary, lang: Lang = 'zh'): string {
-  const head = lang === 'en' ? '【Document verified memory】' : '【文档已验证记忆】'
-  const rule = lang === 'en' ? 'Only source-verified facts are included; consult original text when details are missing.' : '以下仅包含已在原文中验证的高价值事实；缺失细节时应以原文为准。'
+type SummarySource = {
+  id: string
+  title: string
+}
+
+function displaySourceTitle(title: string, fallback: string): string {
+  const normalized = title.replace(/[\r\n]+/g, ' ').trim()
+  return normalized || fallback
+}
+
+export function buildDocSummaryBlock(s: DocSummary, source: SummarySource, lang: Lang = 'zh'): string {
+  const title = displaySourceTitle(source.title, source.id)
+  const head = lang === 'en' ? '\u3010Document verified memory\u3011' : '\u3010\u6587\u6863\u5df2\u9a8c\u8bc1\u8bb0\u5fc6\u3011'
+  const sourceLine = lang === 'en'
+    ? `Source document: ${title} (ID: ${source.id})`
+    : `\u6765\u6e90\u6587\u6863\uff1a${title}\uff08ID\uff1a${source.id}\uff09`
+  const rule = lang === 'en'
+    ? 'This is verified reference material from the named document, not conversation history. Only source-verified facts are included; consult the original text when details are missing.'
+    : '\u4ee5\u4e0b\u662f\u6307\u5b9a\u6587\u6863\u7684\u5df2\u9a8c\u8bc1\u53c2\u8003\u8d44\u6599\uff0c\u4e0d\u662f\u5f53\u524d\u5bf9\u8bdd\u5386\u53f2\u3002\u4ec5\u5305\u542b\u5df2\u5728\u539f\u6587\u4e2d\u9a8c\u8bc1\u7684\u9ad8\u4ef7\u503c\u4e8b\u5b9e\uff1b\u7f3a\u5931\u7ec6\u8282\u65f6\u5e94\u4ee5\u539f\u6587\u4e3a\u51c6\u3002'
   return `${head}
+${sourceLine}
 ${rule}
 ${knowledgeBlock(s.knowledge, lang)}`
 }
 
-export function buildChatSummaryBlock(s: ChatSummary, lang: Lang = 'zh'): string {
+export function buildChatSummaryBlock(s: ChatSummary, source: SummarySource, lang: Lang = 'zh'): string {
   const en = lang === 'en'
-  const head = en ? '【Chat summary】' : '【对话摘要】'
-  const none = en ? '(none)' : '（无）'
+  const title = displaySourceTitle(source.title, source.id)
+  const head = en ? '\u3010Other conversation summary\u3011' : '\u3010\u5176\u4ed6\u5bf9\u8bdd\u6458\u8981\u3011'
+  const sourceLine = en
+    ? `Source conversation: ${title} (ID: ${source.id})`
+    : `\u6765\u6e90\u5bf9\u8bdd\uff1a${title}\uff08ID\uff1a${source.id}\uff09`
+  const rule = en
+    ? 'This summary comes from another conversation window. It is reference material, not the current conversation history. Do not describe its topics as having been discussed in the current conversation unless the current history confirms that.'
+    : '\u6b64\u6458\u8981\u6765\u81ea\u53e6\u4e00\u4e2a\u5bf9\u8bdd\u7a97\u53e3\uff0c\u4ec5\u4f5c\u4e3a\u53c2\u8003\u8d44\u6599\uff0c\u4e0d\u662f\u5f53\u524d\u5bf9\u8bdd\u5386\u53f2\u3002\u9664\u975e\u5f53\u524d\u5bf9\u8bdd\u5386\u53f2\u660e\u786e\u5305\u542b\u76f8\u5173\u5185\u5bb9\uff0c\u5426\u5219\u4e0d\u8981\u628a\u5176\u4e2d\u7684\u8bdd\u9898\u8868\u8ff0\u4e3a\u5f53\u524d\u5bf9\u8bdd\u5df2\u7ecf\u8ba8\u8bba\u8fc7\u3002'
+  const none = en ? '(none)' : '\uff08\u65e0\uff09'
   const parts: string[] = []
   const compacted = Array.isArray(s.compacted) ? s.compacted : []
   if (compacted.length > 0) {
     const hist = compacted.map((iv) => `- ${iv.summary}`).join('\n')
-    parts.push(en ? `Earlier (compressed):\n${hist}` : `历史（已压缩）：\n${hist}`)
+    parts.push(en ? `Earlier (compressed):\n${hist}` : `\u5386\u53f2\uff08\u5df2\u538b\u7f29\uff09\uff1a\n${hist}`)
   }
   const lines = (Array.isArray(s.items) ? s.items : [])
-    .map((i) => `${i.role === 'user' ? (en ? 'User' : '用户') : 'AI'}：${i.summary}`)
+    .map((i) => `${i.role === 'user' ? (en ? 'User' : '\u7528\u6237') : 'AI'}\uff1a${i.summary}`)
     .join('\n')
-  if (lines) parts.push(en ? `Recent:\n${lines}` : `最近：\n${lines}`)
-  return `${head}\n${parts.join('\n\n') || none}`
+  if (lines) parts.push(en ? `Recent:\n${lines}` : `\u6700\u8fd1\uff1a\n${lines}`)
+  return `${head}
+${sourceLine}
+${rule}
+${parts.join('\n\n') || none}`
 }
 
 export function buildResourceSummaryBlock(s: ResourceSummary, name: string, lang: Lang = 'zh'): string {
