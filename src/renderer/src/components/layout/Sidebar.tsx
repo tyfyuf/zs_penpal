@@ -11,13 +11,15 @@ import {
   MessageSquare,
   MoreHorizontal,
   Plus,
+  Search,
   Settings,
   Sparkles,
   Stethoscope,
   Trash2,
   TrendingUp,
   Upload,
-  Wand2
+  Wand2,
+  X
 } from 'lucide-react'
 import type { ChatMeta, DocMeta, ProjectTree } from '@shared/types'
 import { useAppStore } from '../../store/app.store'
@@ -26,11 +28,33 @@ import { toast } from '../../store/toast.store'
 import { confirmDialog, promptText } from '../../store/dialog.store'
 import { useT } from '../../i18n'
 import { runDistill, runGenerateTitle } from '../../lib/summaryActions'
+import { chatText, resourceText, storyText } from '../../lib/summaryPreview'
+import type { ProjectSummariesOverview } from '@shared/types'
 import SummaryArea from './SummaryArea'
 import Modal from '../common/Modal'
 
 const ALLOWED_EXT = ['.txt', '.md', '.csv']
 const SIDEBAR_EXPANDED_STORAGE_KEY = 'vibewrite.sidebar.expanded'
+
+type SearchResultKind = 'doc' | 'chat' | 'resource' | 'summary'
+type SummaryKind = 'doc' | 'chat' | 'resource'
+type SearchResult = {
+  key: string
+  kind: SearchResultKind
+  title: string
+  projectName: string
+  projectId: string
+  parentTitle?: string
+  summaryKind?: SummaryKind
+  refId: string
+  preview?: string
+}
+
+type SummaryPreview = { title: string; text: string }
+
+function normalizeSearchText(value: string): string {
+  return value.trim().toLocaleLowerCase()
+}
 
 function readSidebarExpanded(): Record<string, boolean> {
   try {
@@ -95,6 +119,25 @@ export default function Sidebar(): JSX.Element {
   }, [autoExpandedKeys])
 
   useEffect(() => {
+    let cancelled = false
+    void Promise.all(
+      workspace.projects.map(async (project) => {
+        try {
+          return [project.project.id, await api.invoke('summary:listProject', project.project.id)] as const
+        } catch {
+          return null
+        }
+      })
+    ).then((entries) => {
+      if (cancelled) return
+      setSummaryOverviews(Object.fromEntries(entries.filter((entry): entry is readonly [string, ProjectSummariesOverview] => entry !== null)))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [workspace.projects])
+
+  useEffect(() => {
     try {
       localStorage.setItem(SIDEBAR_EXPANDED_STORAGE_KEY, JSON.stringify(expanded))
     } catch {
@@ -104,6 +147,9 @@ export default function Sidebar(): JSX.Element {
   const fileInput = useRef<HTMLInputElement>(null)
   const [uploadProject, setUploadProject] = useState<string | null>(null)
   const [previewRes, setPreviewRes] = useState<{ name: string; content: string } | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [summaryOverviews, setSummaryOverviews] = useState<Record<string, ProjectSummariesOverview>>({})
+  const [summaryPreview, setSummaryPreview] = useState<SummaryPreview | null>(null)
   const isOpen = (key: string, defaultOpen = false): boolean => autoExpanded[key] ?? expanded[key] ?? defaultOpen
   const toggle = (key: string, defaultOpen = false): void => {
     setExpanded((e) => ({ ...e, [key]: !isOpen(key, defaultOpen) }))
@@ -113,6 +159,93 @@ export default function Sidebar(): JSX.Element {
       delete next[key]
       return next
     })
+  }
+
+  const normalizedQuery = normalizeSearchText(searchQuery)
+  const searchResults = useMemo<SearchResult[]>(() => {
+    if (!normalizedQuery) return []
+    const results: SearchResult[] = []
+    const matches = (...values: (string | undefined)[]): boolean => values.some((value) => value && normalizeSearchText(value).includes(normalizedQuery))
+    for (const project of workspace.projects) {
+      const projectId = project.project.id
+      const projectName = project.project.name
+      for (const doc of project.docs) {
+        if (matches(doc.title, projectName)) results.push({ key: `doc:${doc.id}`, kind: 'doc', title: doc.title, projectName, projectId, refId: doc.id })
+      }
+      for (const chat of project.chats) {
+        const parentTitle = chat.docId ? project.docs.find((doc) => doc.id === chat.docId)?.title : undefined
+        if (matches(chat.title, parentTitle, projectName)) {
+          results.push({ key: `chat:${chat.id}`, kind: 'chat', title: chat.title, projectName, projectId, parentTitle, refId: chat.id })
+        }
+      }
+      for (const resource of project.resources) {
+        if (matches(resource.name, projectName)) results.push({ key: `resource:${resource.id}`, kind: 'resource', title: resource.name, projectName, projectId, refId: resource.id })
+      }
+      const overview = summaryOverviews[projectId]
+      if (!overview) continue
+      for (const doc of overview.docs) {
+        if (doc.hasSummary && matches(doc.title, projectName)) {
+          results.push({ key: `summary:doc:${doc.docId}`, kind: 'summary', summaryKind: 'doc', title: doc.title, projectName, projectId, refId: doc.docId, preview: t('summary.previewDocTitle') })
+        }
+      }
+      for (const chat of overview.chats) {
+        if (chat.hasSummary && matches(chat.title, projectName)) {
+          const parentTitle = chat.docId ? project.docs.find((doc) => doc.id === chat.docId)?.title : undefined
+          results.push({ key: `summary:chat:${chat.chatId}`, kind: 'summary', summaryKind: 'chat', title: chat.title, projectName, projectId, parentTitle, refId: chat.chatId, preview: t('summary.previewChatTitle') })
+        }
+      }
+      for (const resource of overview.resources) {
+        if (resource.distilled && matches(resource.name, projectName)) {
+          results.push({ key: `summary:resource:${resource.resourceId}`, kind: 'summary', summaryKind: 'resource', title: resource.name, projectName, projectId, refId: resource.resourceId, preview: t('summary.previewResTitle') })
+        }
+      }
+    }
+    return results
+  }, [normalizedQuery, summaryOverviews, t, workspace.projects])
+
+  function clearSearch(): void {
+    setSearchQuery('')
+  }
+
+  function openSearchResult(result: SearchResult): void {
+    clearSearch()
+    if (result.kind === 'doc') {
+      const doc = workspace.projects.find((project) => project.project.id === result.projectId)?.docs.find((item) => item.id === result.refId)
+      if (doc) openDoc(doc)
+      return
+    }
+    if (result.kind === 'chat') {
+      const chat = workspace.projects.find((project) => project.project.id === result.projectId)?.chats.find((item) => item.id === result.refId)
+      if (chat) openChat(chat)
+      return
+    }
+    if (result.kind === 'resource') {
+      const resource = workspace.projects.find((project) => project.project.id === result.projectId)?.resources.find((item) => item.id === result.refId)
+      if (resource) openResource(result.projectId, resource.id, resource.name)
+      return
+    }
+    void previewSearchSummary(result)
+  }
+
+  async function previewSearchSummary(result: SearchResult): Promise<void> {
+    if (!result.summaryKind) return
+    try {
+      if (result.summaryKind === 'doc') {
+        const summary = await api.invoke('summary:getDoc', result.refId)
+        if (summary) setSummaryPreview({ title: `${result.title} - ${t('summary.previewDocTitle')}`, text: storyText(summary) })
+        else toast.info(t('summary.noDocSummary'))
+      } else if (result.summaryKind === 'chat') {
+        const summary = await api.invoke('summary:getChat', result.refId)
+        if (summary) setSummaryPreview({ title: `${result.title} - ${t('summary.previewChatTitle')}`, text: chatText(summary) })
+        else toast.info(t('summary.noChatSummary'))
+      } else {
+        const summary = await api.invoke('summary:getResource', { projectId: result.projectId, resourceId: result.refId })
+        if (summary) setSummaryPreview({ title: `${result.title} - ${t('summary.previewResTitle')}`, text: resourceText(summary) })
+        else toast.info(t('summary.noResSummary'))
+      }
+    } catch (err) {
+      toast.error((err as Error).message)
+    }
   }
 
   async function promptName(label: string, def = ''): Promise<string | null> {
@@ -292,7 +425,112 @@ export default function Sidebar(): JSX.Element {
         </div>
       </div>
 
+      <div className="border-b px-2 py-1.5" style={{ borderColor: 'var(--border)' }}>
+        <div
+          className="flex items-center gap-1 rounded border px-2 py-1"
+          style={{ background: 'var(--panel2)', borderColor: 'var(--border)' }}
+        >
+          <Search size={14} style={{ color: 'var(--muted)' }} />
+          <input
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') clearSearch()
+            }}
+            placeholder={t('sidebar.searchPlaceholder')}
+            aria-label={t('sidebar.searchPlaceholder')}
+            className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-[var(--muted)]"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              className="rounded p-0.5 hover:opacity-70"
+              style={{ color: 'var(--muted)' }}
+              onClick={clearSearch}
+              aria-label={t('sidebar.clearSearch')}
+              title={t('sidebar.clearSearch')}
+            >
+              <X size={13} />
+            </button>
+          )}
+        </div>
+      </div>
+
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
+        {normalizedQuery ? (
+          <div className="px-2">
+            <div className="px-1 pb-1 text-[11px]" style={{ color: 'var(--muted)' }}>
+              {t('sidebar.searchResults', { count: searchResults.length })}
+            </div>
+            {searchResults.length === 0 ? (
+              <div className="px-1 py-6 text-center text-xs" style={{ color: 'var(--muted)' }}>
+                {t('sidebar.searchNoResults')}
+              </div>
+            ) : (
+              (['doc', 'chat', 'resource', 'summary'] as SearchResultKind[]).map((kind) => {
+                const results = searchResults.filter((result) => result.kind === kind)
+                if (results.length === 0) return null
+                const label =
+                  kind === 'doc'
+                    ? t('sidebar.searchDocs')
+                    : kind === 'chat'
+                      ? t('sidebar.searchChats')
+                      : kind === 'resource'
+                        ? t('sidebar.searchResources')
+                        : t('sidebar.searchSummaries')
+                return (
+                  <section key={kind} className="mb-2">
+                    <div className="px-1 py-0.5 text-[11px] font-medium" style={{ color: 'var(--muted)' }}>
+                      {label}
+                    </div>
+                    <div className="space-y-0.5">
+                      {results.map((result) => {
+                        const isActive =
+                          (result.kind === 'doc' && activeDocId === result.refId) ||
+                          (result.kind === 'chat' && activeChatId === result.refId)
+                        const resultLabel = result.parentTitle ? `${result.projectName} / ${result.parentTitle}` : result.projectName
+                        const suffix = result.kind === 'summary' ? ` - ${result.preview}` : ''
+                        return (
+                          <button
+                            key={result.key}
+                            type="button"
+                            className="flex w-full items-start gap-1 border-l-2 px-1.5 py-1 text-left text-[12px] hover:bg-[var(--panel3)]"
+                            style={{
+                              background: isActive ? 'var(--accent-soft)' : undefined,
+                              borderLeftColor: isActive ? 'var(--accent)' : 'transparent'
+                            }}
+                            aria-current={isActive ? 'page' : undefined}
+                            onClick={() => openSearchResult(result)}
+                            title={`${resultLabel}${suffix}`}
+                          >
+                            {result.kind === 'doc' ? (
+                              <FileText size={13} className="mt-0.5 shrink-0" style={{ color: isActive ? 'var(--accent)' : 'var(--muted)' }} />
+                            ) : result.kind === 'chat' ? (
+                              <MessageSquare size={13} className="mt-0.5 shrink-0" style={{ color: isActive ? 'var(--accent)' : 'var(--muted)' }} />
+                            ) : result.kind === 'resource' ? (
+                              <FileText size={13} className="mt-0.5 shrink-0" style={{ color: 'var(--muted)' }} />
+                            ) : (
+                              <Sparkles size={13} className="mt-0.5 shrink-0" style={{ color: 'var(--accent)' }} />
+                            )}
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate" style={{ color: isActive ? 'var(--text)' : 'var(--text)' }}>
+                                {result.title}
+                              </span>
+                              <span className="block truncate text-[10px]" style={{ color: 'var(--muted)' }}>
+                                {resultLabel}{suffix}
+                              </span>
+                            </span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </section>
+                )
+              })
+            )}
+          </div>
+        ) : (
+          <>
         {workspace.projects.length === 0 && (
           <div className="px-3 py-6 text-center text-xs" style={{ color: 'var(--muted)' }}>
             {t('sidebar.empty')}
@@ -450,7 +688,23 @@ export default function Sidebar(): JSX.Element {
             </div>
           )
         })}
+          </>
+        )}
       </div>
+
+      {summaryPreview && (
+        <Modal
+          title={summaryPreview.title}
+          onClose={() => setSummaryPreview(null)}
+          footer={
+            <button className="btn" onClick={() => setSummaryPreview(null)}>
+              {t('upload.close')}
+            </button>
+          }
+        >
+          <pre className="max-h-[60vh] overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed">{summaryPreview.text}</pre>
+        </Modal>
+      )}
 
       {previewRes && (
         <Modal

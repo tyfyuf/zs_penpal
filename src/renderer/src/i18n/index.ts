@@ -64,6 +64,14 @@ const zh: Record<string, string> = {
   'sidebar.actionOptimize': '优化',
   'sidebar.expandDocChats': '展开文档对话',
   'sidebar.collapseDocChats': '折叠文档对话',
+  'sidebar.searchPlaceholder': '搜索项目内文档、对话和摘要…',
+  'sidebar.clearSearch': '清除搜索',
+  'sidebar.searchResults': '搜索结果（{count}）',
+  'sidebar.searchNoResults': '未找到匹配项',
+  'sidebar.searchDocs': '文档',
+  'sidebar.searchChats': '对话',
+  'sidebar.searchResources': '资源文件',
+  'sidebar.searchSummaries': '摘要',
 
   'tabs.unsavedClose': '文档有未保存改动，是否保存后关闭？',
 
@@ -394,6 +402,14 @@ const en: Record<string, string> = {
   'sidebar.actionOptimize': 'Optimize',
   'sidebar.expandDocChats': 'Expand document chats',
   'sidebar.collapseDocChats': 'Collapse document chats',
+  'sidebar.searchPlaceholder': 'Search documents, chats, and summaries...',
+  'sidebar.clearSearch': 'Clear search',
+  'sidebar.searchResults': 'Search results ({count})',
+  'sidebar.searchNoResults': 'No matching items',
+  'sidebar.searchDocs': 'Documents',
+  'sidebar.searchChats': 'Chats',
+  'sidebar.searchResources': 'Resource files',
+  'sidebar.searchSummaries': 'Summaries',
 
   'tabs.unsavedClose': 'The document has unsaved changes. Save before closing?',
 
