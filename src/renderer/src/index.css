@@ -192,3 +192,300 @@ html.light .cm-editor .cm-content ::selection {
 select.input {
   appearance: auto;
 }
+
+
+/* Context chat range controls: compact, centered, and outside the message scroll area. */
+.context-panel-shell {
+  flex: 0 0 auto;
+  padding: 8px 12px 10px;
+  background: var(--panel);
+}
+
+.context-panel {
+  width: min(100%, 620px);
+  margin: 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel2);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.context-panel__header {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+}
+
+.context-panel__title-group {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.context-panel__title {
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.context-panel__lock {
+  overflow: hidden;
+  margin-left: 3px;
+  color: var(--warn);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-panel__summary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-panel__collapse {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 5px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.context-panel__collapse:hover {
+  background: var(--panel3);
+  color: var(--text);
+}
+
+.context-panel__collapse:focus-visible,
+.context-anchor-preview__trigger:focus-visible,
+.context-dual-slider__input:focus-visible,
+.context-panel__number input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.context-panel__body {
+  display: grid;
+  grid-template-columns: auto minmax(150px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 0 9px 9px;
+}
+
+.context-panel__number {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.context-panel__number input {
+  width: 64px;
+  min-width: 0;
+  padding: 3px 4px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.context-panel__number input:disabled,
+.context-dual-slider__input:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.context-dual-slider {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) 36px minmax(0, 1fr);
+  align-items: center;
+  gap: 0;
+}
+
+.context-dual-slider__input {
+  width: 100%;
+  min-width: 0;
+  height: 22px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.context-dual-slider__input::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--accent) 0 var(--range-fill), var(--border) var(--range-fill) 100%);
+}
+
+.context-dual-slider__input--before {
+  direction: rtl;
+}
+
+.context-dual-slider__input--before::-webkit-slider-runnable-track {
+  background: linear-gradient(to left, var(--accent) 0 var(--range-fill), var(--border) var(--range-fill) 100%);
+}
+
+.context-dual-slider__input::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border: 2px solid var(--panel2);
+  border-radius: 50%;
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.context-dual-slider__anchor {
+  position: relative;
+  display: flex;
+  height: 28px;
+  align-items: flex-start;
+  justify-content: center;
+  color: var(--accent);
+  font-size: 9px;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+}
+
+.context-dual-slider__anchor::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 999px;
+  background: var(--accent);
+  content: '';
+}
+
+.context-dual-slider__anchor span {
+  position: relative;
+  top: 18px;
+  padding: 0 2px;
+  background: var(--panel2);
+  white-space: nowrap;
+}
+
+.context-anchor-preview {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+
+.context-anchor-preview__trigger {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: help;
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
+.context-anchor-preview__popover {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  left: 0;
+  width: min(380px, calc(100vw - 40px));
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.22);
+}
+
+.context-anchor-preview__label {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.context-anchor-preview__text {
+  max-height: 132px;
+  overflow: auto;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.context-anchor-preview__marker {
+  display: inline-block;
+  margin: 0 1px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.context-panel-shell__regenerate {
+  width: min(100%, 620px);
+  margin: 6px auto 0;
+  padding: 0 4px;
+  color: var(--warn);
+  font-size: 11px;
+  text-align: center;
+}
+
+@media (max-width: 560px) {
+  .context-panel-shell {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .context-panel__body {
+    grid-template-columns: 1fr 1fr;
+    gap: 5px 10px;
+  }
+
+  .context-dual-slider {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+
+  .context-panel__number--before {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .context-panel__number--after {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: end;
+  }
+
+  .context-panel__summary {
+    display: none;
+  }
+}

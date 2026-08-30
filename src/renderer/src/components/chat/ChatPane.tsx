@@ -139,6 +139,8 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   const scrollRef = useRef<HTMLDivElement>(null)
   const scrollContentRef = useRef<HTMLDivElement>(null)
   const [historyLoaded, setHistoryLoaded] = useState(false)
+  /** A fresh Context chat expands once for range setup; chats with history reopen compact. */
+  const [contextPanelDefaultCollapsed, setContextPanelDefaultCollapsed] = useState(true)
   const initialScrollDoneRef = useRef(false)
   const hiddenContentChangedRef = useRef(false)
 
@@ -155,6 +157,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   }, [workspace, chat?.docId])
 
   useEffect(() => {
+    let cancelled = false
     injectionRecoveryRef.current = null
     expandedReasoningRef.current = {}
     setExpandedReasoning({})
@@ -166,7 +169,11 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
     followBottomRef.current = true
     initialScrollDoneRef.current = false
     setHistoryLoaded(false)
+    setContextPanelDefaultCollapsed(true)
     void api.invoke('chat:get', chatId).then(({ chat, messages }) => {
+      if (cancelled) return
+      // Range controls should be visible for a new Context chat, but reopen compact once it has history.
+      setContextPanelDefaultCollapsed(messages.length > 0)
       setChat(chat)
       setMessages(messages)
       setHistoryLoaded(true)
@@ -176,6 +183,9 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
       setActiveInjections(chat.injectionOverrides?.active ?? null)
       setPendingEnabled(chat.injectionOverrides?.pending ?? [])
     })
+    return () => {
+      cancelled = true
+    }
   }, [chatId])
 
   // 摘要概览（注入开关面板数据）
@@ -816,16 +826,18 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
 
       {/* 上下文调控面板固定在窗口顶部，始终可见 */}
       {isContext && chat && chat.docId && range && (
-        <div className="space-y-2 border-b px-3 py-2" style={{ borderColor: 'var(--border)' }}>
+        <div className="context-panel-shell border-b" style={{ borderColor: 'var(--border)' }}>
           <ContextPanel
+            key={chat.id}
             docId={chat.docId}
             range={range}
             disabled={!!streaming}
+            defaultCollapsed={contextPanelDefaultCollapsed}
             onChange={updateRange}
             minBefore={lockedRange?.before}
             minAfter={lockedRange?.after}
           />
-          {regenerateBanner}
+          {regenerateBanner && <div className="context-panel-shell__regenerate">{regenerateBanner}</div>}
         </div>
       )}
 
