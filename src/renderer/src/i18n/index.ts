@@ -72,6 +72,8 @@ const zh: Record<string, string> = {
   'sidebar.searchChats': '对话',
   'sidebar.searchResources': '资源文件',
   'sidebar.searchSummaries': '摘要',
+  'sidebar.resize': '调整侧边栏宽度',
+  'sidebar.resizeResetHint': '拖动调整侧边栏宽度；双击恢复默认宽度',
 
   'tabs.unsavedClose': '文档有未保存改动，是否保存后关闭？',
 
@@ -421,6 +423,8 @@ const en: Record<string, string> = {
   'sidebar.searchChats': 'Chats',
   'sidebar.searchResources': 'Resource files',
   'sidebar.searchSummaries': 'Summaries',
+  'sidebar.resize': 'Resize sidebar',
+  'sidebar.resizeResetHint': 'Drag to resize the sidebar; double-click to restore the default width',
 
   'tabs.unsavedClose': 'The document has unsaved changes. Save before closing?',
 

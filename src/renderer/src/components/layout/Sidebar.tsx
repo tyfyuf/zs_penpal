@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import {
   Archive,
   ChevronDown,
@@ -35,6 +35,29 @@ import Modal from '../common/Modal'
 
 const ALLOWED_EXT = ['.txt', '.md', '.csv']
 const SIDEBAR_EXPANDED_STORAGE_KEY = 'vibewrite.sidebar.expanded'
+const SIDEBAR_WIDTH_STORAGE_KEY = 'vibewrite.sidebar.width'
+const DEFAULT_SIDEBAR_WIDTH = 260
+const MIN_SIDEBAR_WIDTH = 220
+const MAX_SIDEBAR_WIDTH = 480
+const MAX_SIDEBAR_VIEWPORT_RATIO = 0.4
+
+function getSidebarMaxWidth(viewportWidth: number): number {
+  return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, Math.floor(viewportWidth * MAX_SIDEBAR_VIEWPORT_RATIO)))
+}
+
+function clampSidebarWidth(width: number, viewportWidth: number): number {
+  return Math.min(getSidebarMaxWidth(viewportWidth), Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)))
+}
+
+function readSidebarWidth(): number {
+  try {
+    const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY))
+    if (Number.isFinite(stored)) return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(stored)))
+  } catch {
+    // Ignore storage failures and use the default width.
+  }
+  return DEFAULT_SIDEBAR_WIDTH
+}
 
 type SearchResultKind = 'doc' | 'chat' | 'resource' | 'summary'
 type SummaryKind = 'doc' | 'chat' | 'resource'
@@ -82,6 +105,13 @@ export default function Sidebar(): JSX.Element {
   const openResource = useAppStore((s) => s.openResource)
   const [expanded, setExpanded] = useState<Record<string, boolean>>(readSidebarExpanded)
   const [autoExpanded, setAutoExpanded] = useState<Record<string, boolean>>({})
+  const sidebarRef = useRef<HTMLDivElement>(null)
+  const resizeOriginLeftRef = useRef(0)
+  const [preferredSidebarWidth, setPreferredSidebarWidth] = useState(readSidebarWidth)
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
+  const [isResizing, setIsResizing] = useState(false)
+  const sidebarMaxWidth = getSidebarMaxWidth(viewportWidth)
+  const sidebarWidth = clampSidebarWidth(preferredSidebarWidth, viewportWidth)
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
   const activeDocId = activeTab?.kind === 'doc' ? activeTab.refId ?? null : null
   const activeChatId = activeTab?.kind === 'chat' ? activeTab.refId ?? null : null
@@ -144,6 +174,64 @@ export default function Sidebar(): JSX.Element {
       // Ignore storage failures; collapsing remains functional for this session.
     }
   }, [expanded])
+
+  useEffect(() => {
+    const handleResize = (): void => setViewportWidth(window.innerWidth)
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(preferredSidebarWidth))
+    } catch {
+      // Ignore storage failures; resizing remains functional for this session.
+    }
+  }, [preferredSidebarWidth])
+
+  useEffect(() => {
+    if (!isResizing) return
+
+    const previousCursor = document.body.style.cursor
+    const previousUserSelect = document.body.style.userSelect
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+
+    const handlePointerMove = (event: PointerEvent): void => {
+      setPreferredSidebarWidth(clampSidebarWidth(event.clientX - resizeOriginLeftRef.current, window.innerWidth))
+    }
+    const stopResizing = (): void => setIsResizing(false)
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', stopResizing)
+    window.addEventListener('pointercancel', stopResizing)
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', stopResizing)
+      window.removeEventListener('pointercancel', stopResizing)
+      document.body.style.cursor = previousCursor
+      document.body.style.userSelect = previousUserSelect
+    }
+  }, [isResizing])
+
+  const beginSidebarResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (event.button !== 0) return
+    resizeOriginLeftRef.current = sidebarRef.current?.getBoundingClientRect().left ?? 0
+    event.preventDefault()
+    setIsResizing(true)
+  }
+
+  const handleSidebarResizeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    let nextWidth: number | null = null
+    const step = event.shiftKey ? 40 : 10
+    if (event.key === 'ArrowLeft') nextWidth = sidebarWidth - step
+    else if (event.key === 'ArrowRight') nextWidth = sidebarWidth + step
+    else if (event.key === 'Home') nextWidth = MIN_SIDEBAR_WIDTH
+    else if (event.key === 'End') nextWidth = sidebarMaxWidth
+    if (nextWidth === null) return
+    event.preventDefault()
+    setPreferredSidebarWidth(clampSidebarWidth(nextWidth, viewportWidth))
+  }
   const fileInput = useRef<HTMLInputElement>(null)
   const [uploadProject, setUploadProject] = useState<string | null>(null)
   const [previewRes, setPreviewRes] = useState<{ name: string; content: string } | null>(null)
@@ -399,7 +487,11 @@ export default function Sidebar(): JSX.Element {
   }
 
   return (
-    <div className="flex w-[260px] shrink-0 flex-col border-r" style={{ background: 'var(--panel)', borderColor: 'var(--border)' }}>
+    <div
+      ref={sidebarRef}
+      className="relative flex shrink-0 flex-col border-r"
+      style={{ width: sidebarWidth, background: 'var(--panel)', borderColor: 'var(--border)' }}
+    >
       <input
         ref={fileInput}
         type="file"
@@ -721,6 +813,28 @@ export default function Sidebar(): JSX.Element {
           </pre>
         </Modal>
       )}
+
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t('sidebar.resize')}
+        aria-valuemin={MIN_SIDEBAR_WIDTH}
+        aria-valuemax={sidebarMaxWidth}
+        aria-valuenow={sidebarWidth}
+        tabIndex={0}
+        title={t('sidebar.resizeResetHint')}
+        className="group absolute -right-[3px] top-0 z-40 h-full w-[6px] cursor-col-resize outline-none"
+        style={{ touchAction: 'none' }}
+        onPointerDown={beginSidebarResize}
+        onDoubleClick={() => setPreferredSidebarWidth(DEFAULT_SIDEBAR_WIDTH)}
+        onKeyDown={handleSidebarResizeKeyDown}
+      >
+        <span
+          className={`absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-[var(--accent)] transition-opacity ${
+            isResizing ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus:opacity-100'
+          }`}
+        />
+      </div>
     </div>
   )
 }

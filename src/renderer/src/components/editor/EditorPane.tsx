@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Compartment, EditorState, type Extension } from '@codemirror/state'
 import { Decoration, EditorView } from '@codemirror/view'
-import { AlignCenter, ClipboardPaste, Copy, Download, IndentIncrease, Minus, Plus, Save, Scissors } from 'lucide-react'
+import { AlignCenter, ClipboardPaste, Copy, Download, IndentIncrease, Minus, Plus, Save, Scissors, Stethoscope, TrendingUp, Wand2, type LucideIcon } from 'lucide-react'
 import type { ChatAction, ContextRange, DocEditorFormat, DocMeta } from '@shared/types'
 import type { Tab } from '../../store/app.store'
 import { useAppStore } from '../../store/app.store'
@@ -20,10 +20,10 @@ import {
   toggleSelectedParagraphsCentered
 } from './editor-setup'
 
-const ACTIONS: { value: ChatAction; labelKey: string }[] = [
-  { value: 'diagnose', labelKey: 'sidebar.actionDiagnose' },
-  { value: 'plot', labelKey: 'sidebar.actionPlot' },
-  { value: 'optimize', labelKey: 'sidebar.actionOptimize' }
+const ACTIONS: { value: ChatAction; labelKey: string; icon: LucideIcon }[] = [
+  { value: 'diagnose', labelKey: 'sidebar.actionDiagnose', icon: Stethoscope },
+  { value: 'plot', labelKey: 'sidebar.actionPlot', icon: TrendingUp },
+  { value: 'optimize', labelKey: 'sidebar.actionOptimize', icon: Wand2 }
 ]
 
 interface MenuState {
@@ -472,15 +472,19 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
             {t('editor.paste')}
           </button>
           <div className="mx-2 my-1 border-t" style={{ borderColor: 'var(--border)' }} />
-          {ACTIONS.filter((a) => a.value !== 'optimize' || !menu.empty).map((a) => (
-            <button
-              key={a.value}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]"
-              onClick={() => void runAction(a.value)}
-            >
-              {t(a.labelKey)}
-            </button>
-          ))}
+          {ACTIONS.filter((a) => a.value !== 'optimize' || !menu.empty).map((a) => {
+            const Icon = a.icon
+            return (
+              <button
+                key={a.value}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]"
+                onClick={() => void runAction(a.value)}
+              >
+                <Icon size={13} />
+                {t(a.labelKey)}
+              </button>
+            )
+          })}
         </div>
       )}
     </div>
