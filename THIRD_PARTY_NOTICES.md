@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-VibeWrite bundles the following third-party components for local semantic retrieval.
+Penpal bundles the following third-party components for local semantic retrieval.
 
 ## BAAI bge-small-zh-v1.5
 
@@ -9,7 +9,7 @@ VibeWrite bundles the following third-party components for local semantic retrie
 - License: MIT License
 - Purpose: Local Chinese text embedding and semantic retrieval
 
-The model is distributed for local inference. VibeWrite does not upload document text to a model hosting service for this feature.
+The model is distributed for local inference. Penpal does not upload document text to a model hosting service for this feature.
 
 ## Transformers.js
 

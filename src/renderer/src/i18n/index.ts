@@ -7,15 +7,15 @@ export type Locale = 'zh' | 'en'
 // ---------------------------------------------------------------------------
 
 const zh: Record<string, string> = {
-  'app.title': '氛围写作',
+  'app.title': '笔伴',
   'app.loading': '加载中…',
   'app.recoveryTitle': '恢复上次会话',
   'app.recoveryText': '上次应用异常退出，是否恢复上次打开的内容？',
   'app.recoveryYes': '恢复上次打开的内容',
   'app.recoveryNo': '不恢复',
 
-  'setup.title': '氛围写作',
-  'setup.subtitle': '氛围写作 VibeWrite —— 辅助创作者决策，不替代创作者完成写作成果',
+  'setup.title': '笔伴',
+  'setup.subtitle': '笔伴 Penpal —— 辅助创作者决策，不替代创作者完成写作成果',
   'setup.choose': '选择工作目录',
   'setup.busy': '处理中…',
   'setup.hint': '首次使用需要指定一个本地文件夹作为工作目录。所有项目、文档、对话与资源都将以文件形式保存在该目录中。',
@@ -78,6 +78,9 @@ const zh: Record<string, string> = {
   'editor.unsaved': '未保存',
   'editor.fontDown': '缩小字号',
   'editor.fontUp': '放大字号',
+  'editor.center': '居中对齐',
+  'editor.firstLineIndent': '段落首行缩进',
+  'editor.characters': '字符：{total}（不含空白：{nonWhitespace}）',
   'editor.save': '保存 (Ctrl+S)',
   'editor.exportMd': '导出 Markdown',
   'editor.exportOk': '已导出：{path}',
@@ -353,15 +356,15 @@ const zh: Record<string, string> = {
 }
 
 const en: Record<string, string> = {
-  'app.title': 'VibeWrite',
+  'app.title': 'Penpal',
   'app.loading': 'Loading…',
   'app.recoveryTitle': 'Restore session',
   'app.recoveryText': 'The app exited unexpectedly last time. Restore the previously opened content?',
   'app.recoveryYes': 'Restore previous content',
   'app.recoveryNo': 'Don’t restore',
 
-  'setup.title': 'VibeWrite',
-  'setup.subtitle': 'VibeWrite (氛围写作) — assists your decisions, never replaces your writing',
+  'setup.title': 'Penpal',
+  'setup.subtitle': 'Penpal (笔伴) — assists your decisions, never replaces your writing',
   'setup.choose': 'Choose workspace folder',
   'setup.busy': 'Working…',
   'setup.hint': 'Choose a local folder as the workspace. All projects, documents, chats and resources are stored there as files.',
@@ -424,6 +427,9 @@ const en: Record<string, string> = {
   'editor.unsaved': 'Unsaved',
   'editor.fontDown': 'Decrease font size',
   'editor.fontUp': 'Increase font size',
+  'editor.center': 'Center align',
+  'editor.firstLineIndent': 'First-line indent',
+  'editor.characters': 'Characters: {total} (excluding whitespace: {nonWhitespace})',
   'editor.save': 'Save (Ctrl+S)',
   'editor.exportMd': 'Export Markdown',
   'editor.exportOk': 'Exported: {path}',
@@ -737,9 +743,3 @@ export function useT(): (key: string, vars?: Record<string, string | number>) =>
 export function tGlobal(key: string, vars?: Record<string, string | number>): string {
   return translate(useI18nStore.getState().locale, key, vars)
 }
-  'editor.center': '????',
-  'editor.firstLineIndent': '??????',
-  'editor.characters': '???{total}??????{nonWhitespace}?',
-  'editor.center': 'Center align',
-  'editor.firstLineIndent': 'First-line indent',
-  'editor.characters': 'Characters: {total} (excluding whitespace: {nonWhitespace})',

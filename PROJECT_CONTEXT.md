@@ -1,4 +1,4 @@
-# PROJECT_CONTEXT.md — 氛围写作 VibeWrite 交接文档
+# PROJECT_CONTEXT.md — 笔伴 Penpal 交接文档
 
 > 本文件是项目唯一权威交接文档。新会话/新窗口必须**先读本文档再动手**。
 > 产品需求：`writing-agent-prd-v1.3.md`；技术选型：`writing-agent-tech-stack-v1.0.md`；
@@ -12,7 +12,8 @@
 
 ### 1.1 产品
 
-- 产品名：**氛围写作 / VibeWrite**（旧临时名 WritingAgent 已废弃）
+- 产品名：**笔伴 / Penpal**（旧临时名 WritingAgent 已废弃）
+- Branding compatibility: display names use Penpal; keep `appId: com.vibewrite.app`, the `writing-agent` user-data directory, `VIBEWRITE_EMBED_MODEL_DIR`, and existing localStorage keys unchanged so installed users retain their data and settings.
 - 定位：桌面端写作专精辅助 Agent。**核心边界：AI 不自动修改/生成/替换写作文档，输出只进对话区，由用户手动复制**。
 - 平台：Windows（首批）；桌面安装包（NSIS，无签名）。
 - 版本：1.3.0（与 PRD 版本对齐；内部 `package.json` 的 `name` 保留 `writing-agent`——**刻意为之**，它决定 Electron userData 目录为 `%APPDATA%\writing-agent`，改名会丢用户配置）。
@@ -112,7 +113,7 @@ D:\ds h-project\
 ├─ out/                  # electron-vite 构建产物（gitignore）
 ├─ dist/                 # electron-builder 安装包（gitignore）
 ├─ .npm-cache/ .electron-cache/ .electron-builder-cache/   # 沙箱缓存（gitignore）
-├─ electron-builder.yml  # 打包配置（productName VibeWrite、文件关联、快捷方式“氛围写作”）
+├─ electron-builder.yml  # 打包配置（productName Penpal、文件关联、快捷方式“笔伴”）
 ├─ start.cmd / start-dev.cmd  # 双击启动（生产 / 开发）
 └─ writing-agent-{prd,tech-stack}*.md  # 需求与选型文档
 ```
@@ -135,7 +136,7 @@ npm run dev            # 开发模式（HMR）；或双击 start-dev.cmd
 # 生产启动：npm run build 后双击 start.cmd（等价 electron out/）
 
 # 4) 打包安装器
-npm run dist           # 产物 dist/VibeWrite Setup 1.3.0.exe
+npm run dist           # 产物 dist/Penpal Setup 1.3.0.exe
 ```
 
 ### 3.1 本机（DSH 沙箱环境）特殊注意事项 ⚠️
@@ -254,7 +255,7 @@ export interface ChatMeta {
 - [x] 设置（API 配置+联通测试+模型列表获取下拉/手动兜底、语言 zh/en、自动保存、摘要、大摘要、归档回收站、版本、用量）
 - [x] i18n（界面文案 zh/en 完整双语；语言切换联动 LLM 输出语言与摘要语言）
 - [x] 提示词风格：理性务实（结论先行、少客套）
-- [x] 正式命名 氛围写作 / VibeWrite（窗口标题/侧栏/提示词/安装器/快捷方式）
+- [x] 正式命名 笔伴 / Penpal（窗口标题/侧栏/提示词/安装器/快捷方式）
 
 ---
 
@@ -402,7 +403,7 @@ Setting-v2 writes an independent sidecar checkpoint and publishes only after req
 - 原子写：`util.ts atomicWrite`（临时文件+rename+EPERM 退避+按文件串行队列）。
 - 单实例/文件关联：`main/index.ts`。
 - 退出流程：`before-quit` → `flushRenderer` → `commitAllProjects` → `waitForSummaryQueue(8000)` → `clearRecovery` → `app.exit(0)`。
-- Git 身份：`git.service.ts ensureCommitIdentity`（应用配置优先，缺失写仓库级默认 VibeWrite）。
+- Git 身份：`git.service.ts ensureCommitIdentity`（应用配置优先，缺失写仓库级默认 Penpal）。
 - 摘要生成状态：`markGenerating/markDone` → 广播 `summary:status` → 黄点/绿点。
 - 生命周期：元数据 `status` 字段驱动，物理删除仅在 purge。
 - 错误日志：`log.service.ts logError`（按天文件，7 天清理；IPC wrapper、`uncaughtException`、渲染层 `window.onerror` 已覆盖；摘要失败目前仅部分路径接入，见 §6.2）。

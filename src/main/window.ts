@@ -6,9 +6,9 @@ let mainWindow: BrowserWindow | null = null
 
 function windowTitle(): string {
   try {
-    return getConfigCached().language === 'en' ? 'VibeWrite' : '氛围写作'
+    return getConfigCached().language === 'en' ? 'Penpal' : '笔伴'
   } catch {
-    return '氛围写作'
+    return '笔伴'
   }
 }
 

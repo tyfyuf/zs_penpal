@@ -3,6 +3,7 @@ import { createLlmAdapter, createOpenAIClient } from './llm/llm-client'
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
 import type {
   AppConfig,
+  ChatAction,
   ChatAttachment,
   ChatMessage,
   ChatMeta,
@@ -31,9 +32,15 @@ import {
   buildRollupCatalogBlock,
 } from './summary.service'
 import { ensureDocSummaryInWorker } from './summary-job-manager'
-import { logToolProtocolEvent } from './log.service'
+import { logChatCompatibilityEvent, logToolProtocolEvent } from './log.service'
 import { recordUsage } from './usage.service'
 import { executeStructuredTask } from './structured-generation.service'
+import {
+  enableReasoningReplay,
+  loadModelCapabilityProfile,
+  modelCapabilityFingerprint
+} from './llm/model-capabilities'
+import { isReasoningReplayRequiredError } from './llm/reasoning'
 import { searchVectorIndex } from './vector.service'
 import {
   appendMessage,
@@ -62,7 +69,7 @@ import { broadcast } from '../window'
 /** 系统提示词：理性务实的回答风格 + 跟随界面语言输出 */
 function buildSystemPrompt(lang: 'zh' | 'en'): string {
   if (lang === 'en') {
-    return `You are the writing assistant of VibeWrite (氛围写作). Your job is to help the writer make decisions, not to replace their writing.
+    return `You are the writing assistant of Penpal (笔伴). Your job is to help the writer make decisions, not to replace their writing.
 Rules:
 1. Never modify the user's documents automatically, and never generate, replace or export finished files automatically.
 2. You may provide diagnosis, rewritten text, examples and plot suggestions in the chat, in any form.
@@ -73,7 +80,7 @@ Style:
 - Stay accurate when quoting or rewriting the original text; state clearly when uncertain.
 Always respond in English.`
   }
-  return `你是「氛围写作（VibeWrite）」的写作助手，职责是辅助创作者决策，不替代创作者完成写作成果。
+  return `你是「笔伴（Penpal）」的写作助手，职责是辅助创作者决策，不替代创作者完成写作成果。
 规则：
 1. 你不得自动修改用户的写作文档，也不得自动生成、替换或导出成品文件。
 2. 你可以在对话中给出诊断、优化文本、改写示例和后续走向建议，表达形式不限。
@@ -83,6 +90,79 @@ Always respond in English.`
 - 直接指出问题与可操作的改进点，不空泛鼓励；
 - 涉及原文引用或改写时保持准确，不确定之处明确说明。
 请用中文回答。`
+}/** Build the task-specific role contract for Context chats.
+ *
+ * This deliberately stays in the single chat request: it borrows OpenFic's
+ * separation of agent responsibilities without introducing extra LLM calls.
+ */
+export function buildContextActionPrompt(
+  action: ChatAction | undefined,
+  lang: 'zh' | 'en',
+  compareWrittenContinuation = false
+): string {
+  const languageInstruction = lang === 'en'
+    ? 'Always respond in English.'
+    : '\u8bf7\u7528\u4e2d\u6587\u56de\u7b54\u3002'
+  const shared = `Context-chat role contract:
+- This window is focused on the selected excerpt of one writing document.
+- Treat the supplied document excerpt as source text. Do not invent facts that are not supported by it or by clearly identified conversation context.
+- The author makes the final decisions. Give analysis, options and examples in chat; never modify the document automatically.
+- Keep the current role as the primary focus. You may answer a different explicit sub-question briefly, but do not let it replace the current role.
+- Separate observations grounded in the excerpt from inferences and recommendations. State uncertainty when the available context is insufficient.
+- ${languageInstruction}`
+
+  if (!action) {
+    return `${shared}
+
+Current role: general context assistant.
+Help the author understand and discuss the selected passage without assuming that the task is literary optimization, narrative diagnosis or plot projection. When the user's intent is ambiguous, ask a focused clarification question or clearly separate the possible readings.`
+  }
+
+  if (action === 'optimize') {
+    return `${shared}
+
+Current role: literary editor for the selected passage.
+Primary objective: improve the passage's literary effect while preserving its established plot facts, character identities, worldbuilding and intended meaning.
+Focus on:
+- diction, sentence and paragraph quality, narrative voice, point of view and clarity;
+- rhythm, pacing, emotional transmission, imagery, sensory detail and atmosphere;
+- dialogue, character presentation and the timing of information disclosure.
+Response priorities:
+1. Assess the current literary effect.
+2. Identify the highest-value improvements and explain why they matter.
+3. Offer concrete revision directions and, when useful, short local rewrite examples.
+Do not make logic diagnosis the main task. Mention a logic issue only briefly when it directly harms the literary effect. Do not mechanically rewrite the entire passage unless the author explicitly asks for that.`
+  }
+
+  if (action === 'diagnose') {
+    return `${shared}
+
+Current role: narrative and character-behavior diagnostician for the selected passage.
+Primary objective: determine whether the passage is coherent within its surrounding narrative and whether the characters' actions are adequately motivated.
+Check:
+- causal links, chronology, scene transitions and information flow;
+- what each character knows at the moment of acting, their motives, choices and reactions;
+- continuity with the surrounding narrative, established setting and character facts;
+- whether conflict escalation and consequences are supported by the text.
+Response priorities:
+1. State the overall judgment first.
+2. Identify concrete problems, the location or trigger of each problem, and the reason it is a problem.
+3. Distinguish confirmed problems, plausible reader-confusion risks and issues that depend on the author's intention or later text.
+4. Give targeted repair directions.
+Do not turn this into a literary-polish pass or a long rewrite. Any rewrite must serve a specific logic, causality or behavior repair, not merely improve style.`
+  }
+
+  const continuationRule = compareWrittenContinuation
+    ? `
+
+Special rule for this context: the excerpt contains a substantial piece of text after the anchor or within the selected continuation. Treat that material as the author's already-written continuation, not as blank future space. First derive possible branches from the anchor situation; then compare each branch with the author's written continuation. State which branch it follows or diverges from, what the written version gains or risks, which branches it rules out, and which possibilities remain open. Keep the comparison explicit and do not merely retell the supplied text.`
+    : ''
+  return `${shared}
+
+Current role: plot-development analyst for the selected passage.
+Primary objective: project plausible developments after the anchor and help the author choose among them.
+First identify the current situation, active conflict, unresolved pressure, character positions and meaningful suspense. Then propose 2-4 distinct plausible branches. For each branch, explain its core development, trigger or prerequisite, effects on characters and conflict, and major risks.
+Do not present a speculative branch as an established fact, force a single answer, or spend the response mainly polishing or repeating the current passage. Base projections on textual evidence and clearly label inference.${continuationRule}`
 }
 
 interface UsageLike {
@@ -242,14 +322,24 @@ type ThinkingCompatibleAssistantMessage = ChatCompletionMessageParam & {
 
 function appendAssistantTurnForReplay(
   conversation: ChatCompletionMessageParam[],
-  state: StreamRoundState
+  state: StreamRoundState,
+  replayReasoning: boolean
 ): void {
   if (!state.content && !state.reasoning) return
   conversation.push({
     role: 'assistant',
     content: state.content || null,
-    ...(state.reasoning ? { reasoning_content: state.reasoning } : {})
+    ...(replayReasoning && state.reasoning ? { reasoning_content: state.reasoning } : {})
   } as ThinkingCompatibleAssistantMessage)
+}
+
+function hasAssistantReasoning(messages: ChatMessage[]): boolean {
+  return messages.some((message) => message.role === 'assistant' && !!message.reasoning?.trim())
+}
+
+function compactCompatibilityError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.replace(/\s+/g, ' ').slice(0, 300)
 }
 
 const PROJECT_SEARCH_TOOL = {
@@ -484,8 +574,9 @@ async function streamAnswerWithTools(options: {
   controller: AbortController
   chatId: string
   requestId: string
+  replayReasoning: boolean
 }): Promise<{ content: string; reasoning: string; usage?: UsageLike }> {
-  const { client, settings, projectId, memory, controller, chatId, requestId } = options
+  const { client, settings, projectId, memory, controller, chatId, requestId, replayReasoning } = options
   const capabilityInstruction: ChatCompletionMessageParam = {
     role: 'system',
     content: settings.language === 'en'
@@ -552,7 +643,7 @@ async function streamAnswerWithTools(options: {
         usage = addUsage(usage, chunk.usage as UsageLike | undefined)
       }
     } catch (error) {
-      if (useTools && isToolCompatibilityError(error)) {
+      if (useTools && isToolCompatibilityError(error) && !isReasoningReplayRequiredError(error)) {
         reasoning += state.reasoning
         toolsDisabledForRequest = true
         toolProtocolLog('compatibility-retry', roundStartedAt, state, undefined, settings.apiProtocol)
@@ -593,7 +684,7 @@ async function streamAnswerWithTools(options: {
       conversation.push({
         role: 'assistant',
         content: null,
-        ...(state.reasoning ? { reasoning_content: state.reasoning } : {}),
+        ...(replayReasoning && state.reasoning ? { reasoning_content: state.reasoning } : {}),
         tool_calls: [assistantToolCall]
       } as ThinkingCompatibleAssistantMessage)
 
@@ -628,7 +719,7 @@ async function streamAnswerWithTools(options: {
       toolProtocolLog(outcome, roundStartedAt, state, nativeCalls.length, settings.apiProtocol)
       if (repairAttempts < MAX_TOOL_REPAIR_ATTEMPTS && useTools) {
         repairAttempts++
-        appendAssistantTurnForReplay(conversation, state)
+        appendAssistantTurnForReplay(conversation, state, replayReasoning)
         conversation.push(buildToolRepairInstruction(settings.language))
         logToolProtocolEvent({ protocol: settings.apiProtocol, outcome: 'repair', durationMs: protocolDuration(roundStartedAt) })
         continue
@@ -636,7 +727,7 @@ async function streamAnswerWithTools(options: {
       if (!noToolFallbackUsed) {
         toolsDisabledForRequest = true
         noToolFallbackUsed = true
-        appendAssistantTurnForReplay(conversation, state)
+        appendAssistantTurnForReplay(conversation, state, replayReasoning)
         conversation.push(buildNoToolFallbackInstruction(settings.language))
         logToolProtocolEvent({ protocol: settings.apiProtocol, outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
         continue
@@ -649,7 +740,7 @@ async function streamAnswerWithTools(options: {
       if (!noToolFallbackUsed) {
         toolsDisabledForRequest = true
         noToolFallbackUsed = true
-        appendAssistantTurnForReplay(conversation, state)
+        appendAssistantTurnForReplay(conversation, state, replayReasoning)
         conversation.push(buildNoToolFallbackInstruction(settings.language))
         logToolProtocolEvent({ protocol: settings.apiProtocol, outcome: 'no-tool-fallback', durationMs: protocolDuration(roundStartedAt) })
         continue
@@ -844,13 +935,18 @@ function applyBudget(
     a.pop()
     used = totalOf(systemMsgs) + totalOf(a) + totalOf(h) + totalOf(tailMsgs)
   }
-  // 3) 最后：截断关联文档全文/切片块（systemMsgs[1]）
-  if (used > inputBudget && systemMsgs.length > 1) {
-    const ctxMsg = systemMsgs[1]
+  // 3) Finally truncate the linked document context block. The role contract may
+  // precede it, so do not rely on a fixed system-message index.
+  const contextIndex = systemMsgs.findIndex((message, index) => {
+    if (index === 0 || typeof message.content !== 'string') return false
+    return message.content.includes('[Document context]') || message.content.includes('\u3010\u6587\u6863\u4e0a\u4e0b\u6587\u3011')
+  })
+  if (used > inputBudget && contextIndex >= 0) {
+    const ctxMsg = systemMsgs[contextIndex]
     const ctxText = typeof ctxMsg.content === 'string' ? ctxMsg.content : ''
     const others = used - tok(ctxText, model)
     const needed = Math.max(0, inputBudget - others)
-    systemMsgs[1] = { role: 'system', content: truncateToTokens(ctxText, needed, model) }
+    systemMsgs[contextIndex] = { role: 'system', content: truncateToTokens(ctxText, needed, model) }
   }
 
   return [...systemMsgs, ...a, ...h, ...tailMsgs]
@@ -1063,7 +1159,8 @@ async function buildMessages(
   req: StreamRequest,
   chat: ChatMeta,
   history: ChatMessage[],
-  appendUser: boolean
+  appendUser: boolean,
+  replayReasoning: boolean
 ): Promise<{ messages: ChatCompletionMessageParam[]; memory: MemoryContext }> {
   const cfg = await loadConfig()
   const settings = await loadApiSettings()
@@ -1089,6 +1186,7 @@ async function buildMessages(
 
   // 关联文档上下文（切片 或 全文）
   let docContent: string | null = null
+  let compareWrittenContinuation = false
   if (chat.kind === 'context' && chat.docId && req.contextRange && projectDocs.has(chat.docId)) {
     const contextDocId = chat.docId
     const content = (await readDoc(contextDocId)).content
@@ -1096,6 +1194,11 @@ async function buildMessages(
       docContent = content
       const slice = sliceContext(docContent, req.contextRange)
       const title = projectDocs.get(contextDocId)?.title ?? contextDocId
+      // A long selected/core or following excerpt is already-written material
+      // that the plot role should compare against its own projected branches.
+      const hasLongSelectedText = req.contextRange.selectionFrom !== undefined && req.contextRange.selectionTo !== undefined && req.contextRange.selectionTo > req.contextRange.selectionFrom && slice.coreText.trim().length >= 500
+      const hasLongFollowingText = slice.afterText.trim().length >= 500
+      compareWrittenContinuation = chat.action === 'plot' && (hasLongSelectedText || hasLongFollowingText)
       systemMsgs.push({ role: 'system', content: buildContextBlock(slice, { id: contextDocId, title }, lang) })
     }
   } else if (chat.kind === 'doc' && chat.docId && projectDocs.has(chat.docId)) {
@@ -1117,6 +1220,12 @@ async function buildMessages(
   }
 
   // 重新生成引导（扩大范围/补充摘要）
+  if (chat.kind === 'context') {
+    const rolePrompt = buildContextActionPrompt(chat.action, lang, compareWrittenContinuation)
+    // Keep the role contract before document content and preserve context-budget trimming.
+    systemMsgs.splice(1, 0, { role: 'system', content: rolePrompt })
+  }
+
   if (req.regenerate && req.regenerateReason) {
     const guidance = await buildRegenerateGuidance(req, chat, docContent, lang)
     if (guidance) systemMsgs.push({ role: 'system', content: guidance })
@@ -1174,7 +1283,7 @@ async function buildMessages(
           : 'message_attachment',
           m.id)
         : m.content,
-      ...(m.role === 'assistant' && m.reasoning ? { reasoning_content: m.reasoning } : {})
+      ...(replayReasoning && m.role === 'assistant' && m.reasoning ? { reasoning_content: m.reasoning } : {})
     } as ThinkingCompatibleAssistantMessage))
 
   const currentUserMessage = history.find((m) => m.role === 'user' && m.id === req.userMessageId)
@@ -1258,8 +1367,6 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
     historyForPrompt = (await getChat(req.chatId)).messages
   }
 
-  const built = await buildMessages(req, chat, historyForPrompt, !req.regenerate)
-
   if (!settings.apiKey) {
     const done: StreamDonePayload = { chatId: req.chatId, requestId: req.requestId, content: '', error: '未配置 API Key，请先在设置中配置' }
     broadcast(EVENTS.streamDone, done)
@@ -1270,40 +1377,48 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
   const controller = new AbortController()
   controllers.set(req.requestId, controller)
 
+  let compatibility = await loadModelCapabilityProfile(settings)
+  let replayReasoning = compatibility.reasoningReplay
+  const prepareMessages = async (replay: boolean): Promise<{ messages: ChatCompletionMessageParam[]; memory: MemoryContext }> => {
+    const built = await buildMessages(req, chat, historyForPrompt, !req.regenerate, replay)
   // C-layer retrieval starts in the host. It never depends on summary settings,
-  // regenerate mode, or whether a model follows a planning prompt.
-  let finalMessages = built.messages
-  if (shouldAutoRetrieve(req.userText)) {
-    const automatic = await retrieveProjectOriginals(chat.projectId, req.userText, settings.language, 'automatic')
-    finalMessages = insertIntoSystemPrefix(finalMessages, automatic.messages)
-    appendVectorAttempt(built.memory, automatic.attempt, automatic.items)
-  } else {
-    built.memory.vectorTrace = { attempted: false, outcome: 'skipped', hitCount: 0, attempts: [] }
-  }
+    // regenerate mode, or whether a model follows a planning prompt.
+      let finalMessages = built.messages
+    if (shouldAutoRetrieve(req.userText)) {
+      const automatic = await retrieveProjectOriginals(chat.projectId, req.userText, settings.language, 'automatic')
+      finalMessages = insertIntoSystemPrefix(finalMessages, automatic.messages)
+      appendVectorAttempt(built.memory, automatic.attempt, automatic.items)
+    } else {
+      built.memory.vectorTrace = { attempted: false, outcome: 'skipped', hitCount: 0, attempts: [] }
+    }
 
-  // B-layer planning only expands rollups. Original-source retrieval is handled
-  // independently by the host and the bounded search tool loop.
-  if (!req.regenerate) {
-    const cfg = await loadConfig()
-    if (cfg.summaryEnabled) {
-      const rollups = await readDocRollups(chat.projectId)
-      try {
-        const plan = await planMemory(settings, built.messages, rollups)
-        finalMessages = insertIntoSystemPrefix(finalMessages, plan.extraMsgs)
-        built.memory.rollups.push(...plan.rollupItems)
-        if (plan.reason) built.memory.reason = plan.reason
-      } catch {
-        // Rollup planning failure must not discard host retrieval or block the answer.
+    // B-layer planning only expands rollups. Original-source retrieval is handled
+    // independently by the host and the bounded search tool loop.
+    if (!req.regenerate) {
+      const cfg = await loadConfig()
+      if (cfg.summaryEnabled) {
+        const rollups = await readDocRollups(chat.projectId)
+        try {
+          const plan = await planMemory(settings, built.messages, rollups)
+          finalMessages = insertIntoSystemPrefix(finalMessages, plan.extraMsgs)
+          built.memory.rollups.push(...plan.rollupItems)
+          if (plan.reason) built.memory.reason = plan.reason
+        } catch {
+          // Rollup planning failure must not discard host retrieval or block the answer.
+        }
       }
     }
-  }
 
-  finalMessages = insertIntoSystemPrefix(finalMessages, [{
-    role: 'system',
-    content: settings.language === 'en'
-      ? 'Project original-text excerpts, when present above, were retrieved by the host application. Use them as source evidence. If retrieval returned nothing, say that no relevant excerpt was found; do not claim that you lack permission to access project sources.'
-      : '\u4e0a\u65b9\u5982\u6709\u9879\u76ee\u539f\u6587\u7247\u6bb5\uff0c\u5b83\u4eec\u7531\u5bbf\u4e3b\u7a0b\u5e8f\u68c0\u7d22\u5e76\u53ef\u4f5c\u4e3a\u4f5c\u7b54\u8bc1\u636e\u3002\u82e5\u672a\u547d\u4e2d\uff0c\u5e94\u8bf4\u660e\u672c\u6b21\u68c0\u7d22\u672a\u627e\u5230\u76f8\u5173\u539f\u6587\uff0c\u4e0d\u8981\u58f0\u79f0\u6ca1\u6709\u8bbf\u95ee\u9879\u76ee\u539f\u6587\u7684\u6743\u9650\u3002'
-  }])
+    finalMessages = insertIntoSystemPrefix(finalMessages, [{
+      role: 'system',
+      content: settings.language === 'en'
+        ? 'Project original-text excerpts, when present above, were retrieved by the host application. Use them as source evidence. If retrieval returned nothing, say that no relevant excerpt was found; do not claim that you lack permission to access project sources.'
+        : '\u4e0a\u65b9\u5982\u6709\u9879\u76ee\u539f\u6587\u7247\u6bb5\uff0c\u5b83\u4eec\u7531\u5bbf\u4e3b\u7a0b\u5e8f\u68c0\u7d22\u5e76\u53ef\u4f5c\u4e3a\u4f5c\u7b54\u8bc1\u636e\u3002\u82e5\u672a\u547d\u4e2d\uff0c\u5e94\u8bf4\u660e\u672c\u6b21\u68c0\u7d22\u672a\u627e\u5230\u76f8\u5173\u539f\u6587\uff0c\u4e0d\u8981\u58f0\u79f0\u6ca1\u6709\u8bbf\u95ee\u9879\u76ee\u539f\u6587\u7684\u6743\u9650\u3002'
+    }])
+
+    return { messages: finalMessages, memory: built.memory }
+  }
+  let prepared = await prepareMessages(replayReasoning === 'when_present')
 
   let acc = ''
   let reasoning = ''
@@ -1312,16 +1427,57 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
   let persistedMessageId: string | undefined
 
   try {
-    const result = await streamAnswerWithTools({
+    const runPreparedChat = () => streamAnswerWithTools({
       client,
       settings,
-      messages: finalMessages,
+      messages: prepared.messages,
       projectId: chat.projectId,
-      memory: built.memory,
+      memory: prepared.memory,
       controller,
       chatId: req.chatId,
-      requestId: req.requestId
+      requestId: req.requestId,
+      replayReasoning: replayReasoning === 'when_present'
     })
+
+    let result
+    try {
+      result = await runPreparedChat()
+    } catch (error) {
+      const shouldLearnReplay = settings.apiProtocol === 'chat_completions'
+        && replayReasoning === 'never'
+        && !controller.signal.aborted
+        && hasAssistantReasoning(historyForPrompt)
+        && isReasoningReplayRequiredError(error)
+      if (!shouldLearnReplay) throw error
+
+      const retryStartedAt = Date.now()
+      compatibility = await enableReasoningReplay(settings)
+      replayReasoning = compatibility.reasoningReplay
+      prepared = await prepareMessages(true)
+      try {
+        result = await runPreparedChat()
+        logChatCompatibilityEvent({
+          protocol: settings.apiProtocol,
+          providerFamily: compatibility.providerFamily,
+          reasoningReplay: compatibility.reasoningReplay,
+          endpointKey: modelCapabilityFingerprint(compatibility),
+          outcome: 'learned-retry',
+          durationMs: Date.now() - retryStartedAt,
+          error: compactCompatibilityError(error)
+        })
+      } catch (retryError) {
+        logChatCompatibilityEvent({
+          protocol: settings.apiProtocol,
+          providerFamily: compatibility.providerFamily,
+          reasoningReplay: compatibility.reasoningReplay,
+          endpointKey: modelCapabilityFingerprint(compatibility),
+          outcome: 'retry-failure',
+          durationMs: Date.now() - retryStartedAt,
+          error: compactCompatibilityError(retryError)
+        })
+        throw retryError
+      }
+    }
     acc = result.content
     reasoning = result.reasoning
     usage = result.usage
@@ -1360,7 +1516,7 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
   // 成功：持久化回答（含思维链）+ 记录用量
   if (!failed && acc.length > 0) {
     if (req.regenerate) {
-      persistedMessageId = (await replaceLastAssistantMessage(req.chatId, acc, reasoning || undefined, built.memory)) ?? undefined
+      persistedMessageId = (await replaceLastAssistantMessage(req.chatId, acc, reasoning || undefined, prepared.memory)) ?? undefined
     }
     if (!persistedMessageId) {
       persistedMessageId = newId()
@@ -1370,7 +1526,7 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
         content: acc,
         createdAt: nowIso(),
         reasoning: reasoning || undefined,
-        memory: built.memory
+        memory: prepared.memory
       })
     }
   }
@@ -1387,7 +1543,7 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
       content: acc,
       reasoning: reasoning || undefined,
       usage: usage ? { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, total_tokens: usage.total_tokens } : undefined,
-      memory: built.memory,
+      memory: prepared.memory,
       messageId: persistedMessageId,
       regenerated: req.regenerate
     })
@@ -1479,42 +1635,228 @@ async function planMemory(
 // Automatic chat-title generation
 // ---------------------------------------------------------------------------
 
-export async function generateChatTitle(chatId: string): Promise<{ ok: boolean; title?: string; error?: string }> {
-  try {
-    const settings = await loadApiSettings()
-    if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }
-    const { messages } = await getChat(chatId)
-    const turns = messages.filter((m) => m.role === 'user' || m.role === 'assistant')
-    if (turns.length === 0) return { ok: false, error: '对话为空，无法生成标题' }
+const titleRequests = new Map<string, Promise<{ ok: boolean; title?: string; error?: string }>>()
+const TITLE_PRIMARY_BUDGET = 5200
+const TITLE_COMPACT_BUDGET = 2600
 
-    const client = makeClient(settings)
-    const en = settings.language === 'en'
-    const dialogue = turns
-      .map((m) => `${m.role === 'user' ? (en ? 'User' : '用户') : 'AI'}：${m.content}`)
-      .join('\n')
-      .slice(0, 8000)
-    const res = await client.createChatCompletion({
-      model: settings.model,
+function normalizedTitleText(value: string): string {
+  return value
+    .normalize('NFKC')
+    .replace(/^```(?:text|markdown)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .replace(/^\s*(?:\u6807\u9898|\u9898\u76ee|title)\s*[:\uFF1A\-\u2014]\s*/i, '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^["'\u201C\u201D\u2018\u2019\u300A\u300B\u300C\u300D\u300E\u300F]+|["'\u201C\u201D\u2018\u2019\u300A\u300B\u300C\u300D\u300E\u300F]+$/g, '')
+    .trim()
+    .replace(/[\u3002\uFF0E.!\uFF01?\uFF1F;\uFF1B:\uFF1A,\uFF0C\u3001]+$/g, '')
+    .trim()
+}
+
+function compactChineseTitle(value: string): string {
+  const chars = Array.from(value)
+  if (chars.length <= 20) return value
+  const firstClause = value.split(/[\uFF0C,\uFF1A:\uFF1B;\u3002.!\uFF01?\uFF1F\u2014\u2013\-]/, 1)[0]?.trim()
+  if (firstClause && Array.from(firstClause).length >= 4 && Array.from(firstClause).length <= 20) return firstClause
+  return chars.slice(0, 20).join('').replace(/[\uFF0C,\uFF1A:\uFF1B;\u3002.!\uFF01?\uFF1F\u2014\u2013\-]+$/g, '').trim()
+}
+
+function compactEnglishTitle(value: string): string {
+  const words = value.split(/\s+/).filter(Boolean)
+  if (words.length <= 10) return value
+  return words.slice(0, 10).join(' ').replace(/[,:;.!?\u2014\u2013\-]+$/g, '').trim()
+}
+
+function parseChatTitle(raw: string, lang: 'zh' | 'en'): string | null {
+  let candidate = raw.trim()
+  if (candidate.startsWith('{') && candidate.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(candidate) as { title?: unknown }
+      if (typeof parsed.title === 'string') candidate = parsed.title
+    } catch {
+      // Keep the raw response; the normalizer below will reject malformed wrappers.
+    }
+  }
+  let title = normalizedTitleText(candidate)
+  if (!title) return null
+  if (/^(?:here(?:'s| is)|sure[,!]?|\u5F53\u7136|\u597D\u7684|\u4EE5\u4E0B\u662F|\u6211\u5EFA\u8BAE|\u5EFA\u8BAE\u6807\u9898)/i.test(title)) return null
+  if (/^(?:\u65B0\u5BF9\u8BDD|\u672A\u547D\u540D\u5BF9\u8BDD|\u5173\u4E8E.+(?:\u7684\u8BA8\u8BBA|\u7684\u5BF9\u8BDD)|new chat|untitled chat)$/i.test(title)) return null
+  title = lang === 'en' ? compactEnglishTitle(title) : compactChineseTitle(title)
+  if (!title || title.length < 2) return null
+  if (lang === 'en' && title.split(/\s+/).filter(Boolean).length > 10) return null
+  if (lang === 'zh' && Array.from(title).length > 20) return null
+  return title
+}
+
+function localTitleFallback(turns: ChatMessage[], lang: 'zh' | 'en'): string | null {
+  const userMessages = turns.filter((message) => message.role === 'user' && message.content.trim())
+  const latest = userMessages[userMessages.length - 1]
+  if (!latest) return null
+  const attachmentName = latest.attachments
+    ?.map((attachment) => cleanAttachmentName(attachment.name, ''))
+    .find(Boolean)
+  if (attachmentName) {
+    const attached = lang === 'en' ? `${attachmentName} Review` : `${attachmentName}\u5185\u5BB9\u5206\u6790`
+    return parseChatTitle(attached, lang)
+  }
+
+  let candidate = normalizedTitleText(latest.content.split(/[\r\n]/, 1)[0] ?? '')
+  if (lang === 'en') {
+    candidate = candidate
+      .replace(/^(?:please\s+)?(?:help\s+me\s+)?(?:analyze|review|improve|diagnose|discuss|explain|evaluate)\s+/i, '')
+      .split(/[.!?;:]/, 1)[0]
+      .trim()
+    const words = candidate.split(/\s+/).filter(Boolean)
+    if (words.length < 2 || words.length > 10) return null
+  } else {
+    candidate = candidate
+      .replace(/^\u8BF7(?:\u4F60)?(?:\u5E2E\u6211)?(?:\u5206\u6790|\u770B\u770B|\u8BC4\u4EF7|\u4F18\u5316|\u8BCA\u65AD|\u8BA8\u8BBA|\u8BF4\u660E|\u89E3\u91CA)?/, '')
+      .split(/[\uFF0C,\u3002.!\uFF01?\uFF1F\uFF1B;\uFF1A:]/, 1)[0]
+      .trim()
+    const length = Array.from(candidate).length
+    if (length < 4 || length > 20) return null
+  }
+  return parseChatTitle(candidate, lang)
+}
+
+function titleAttachmentLine(message: ChatMessage, lang: 'zh' | 'en'): string {
+  if (!message.attachments?.length) return ''
+  const names = message.attachments
+    .map((attachment) => cleanAttachmentName(attachment.name, lang === 'en' ? 'unnamed file' : '\u672A\u547D\u540D\u6587\u4EF6'))
+    .map((name) => lang === 'en' ? `"${name}"` : `\u300A${name}\u300B`)
+  return lang === 'en'
+    ? `Attached to this user message: ${names.join(', ')}`
+    : `\u6B64\u6761\u7528\u6237\u6D88\u606F\u9644\u6709\uFF1A${names.join('\u3001')}`
+}
+
+function titleTurnText(message: ChatMessage, lang: 'zh' | 'en'): string {
+  const speaker = message.role === 'user' ? (lang === 'en' ? 'User' : '\u7528\u6237') : 'AI'
+  const attachmentLine = message.role === 'user' ? titleAttachmentLine(message, lang) : ''
+  return `${speaker}: ${message.content.trim()}${attachmentLine ? `\n${attachmentLine}` : ''}`
+}
+
+function selectTitleTurns(turns: ChatMessage[], budget: number): ChatMessage[] {
+  if (turns.length <= 4) return turns
+  const firstUserIndex = turns.findIndex((message) => message.role === 'user')
+  const selected = new Set<number>()
+  if (firstUserIndex >= 0) selected.add(firstUserIndex)
+  for (let index = Math.max(0, turns.length - 4); index < turns.length; index++) selected.add(index)
+  const ordered = [...selected].sort((a, b) => a - b)
+  let total = 0
+  const kept: number[] = []
+  for (const index of [...ordered].reverse()) {
+    const length = turns[index].content.length + 80
+    if (kept.length > 0 && total + length > budget) continue
+    kept.push(index)
+    total += length
+  }
+  if (firstUserIndex >= 0 && !kept.includes(firstUserIndex)) kept.push(firstUserIndex)
+  return kept.sort((a, b) => a - b).map((index) => turns[index])
+}
+
+function titleContextMetadata(chat: ChatMeta, docTitle: string | undefined, lang: 'zh' | 'en'): string {
+  const action = chat.action === 'diagnose'
+    ? (lang === 'en' ? 'diagnosis' : '\u8BCA\u65AD')
+    : chat.action === 'plot'
+      ? (lang === 'en' ? 'plot direction' : '\u8D70\u5411')
+      : chat.action === 'optimize'
+        ? (lang === 'en' ? 'literary optimization' : '\u4F18\u5316')
+        : undefined
+  const rows = [
+    docTitle ? (lang === 'en' ? `Parent document: "${docTitle}"` : `\u4E0A\u5C5E\u6587\u6863\uFF1A\u300A${docTitle}\u300B`) : '',
+    action ? (lang === 'en' ? `Context task: ${action}` : `Context \u5BF9\u8BDD\u4EFB\u52A1\uFF1A${action}`) : ''
+  ].filter(Boolean)
+  return rows.join('\n')
+}
+
+function buildTitleContext(
+  turns: ChatMessage[],
+  lang: 'zh' | 'en',
+  budget: number,
+  metadata: string
+): string {
+  const selected = selectTitleTurns(turns, Math.max(400, budget - metadata.length))
+  const sections: string[] = metadata ? [metadata] : []
+  let remaining = budget - metadata.length
+  for (const message of selected) {
+    const rendered = titleTurnText(message, lang)
+    if (rendered.length <= remaining) {
+      sections.push(rendered)
+      remaining -= rendered.length
+      continue
+    }
+    if (sections.length === (metadata ? 1 : 0)) {
+      sections.push(Array.from(rendered).slice(0, Math.max(200, remaining)).join(''))
+    }
+  }
+  return sections.join('\n\n')
+}
+
+function titleSystemPrompt(lang: 'zh' | 'en', compact: boolean): string {
+  if (lang === 'en') {
+    return compact
+      ? 'Name this writing conversation in 3-8 English words. Output only the title: no quotes, prefix, markdown, numbering, punctuation, or explanation.'
+      : 'Generate one consistent, specific title for this writing-assistant conversation. Use a concise noun phrase of 3-8 English words that identifies the actual subject or writing problem. Preserve proper nouns when useful. Output only the title. Do not add quotes, markdown, numbering, a Title: prefix, terminal punctuation, explanations, or generic labels such as New Chat or Discussion About.'
+  }
+  return compact
+    ? '\u8BF7\u75288\u201418\u4E2A\u6C49\u5B57\u4E3A\u8FD9\u6BB5\u5199\u4F5C\u5BF9\u8BDD\u547D\u540D\u3002\u53EA\u8F93\u51FA\u6807\u9898\uFF0C\u4E0D\u52A0\u5F15\u53F7\u3001\u524D\u7F00\u3001Markdown\u3001\u7F16\u53F7\u3001\u53E5\u672B\u6807\u70B9\u6216\u89E3\u91CA\u3002'
+    : '\u8BF7\u4E3A\u8FD9\u6BB5\u5199\u4F5C\u52A9\u624B\u5BF9\u8BDD\u751F\u6210\u4E00\u4E2A\u98CE\u683C\u7EDF\u4E00\u3001\u5177\u4F53\u660E\u786E\u7684\u4E2D\u6587\u6807\u9898\u3002\u4F7F\u75288\u201418\u4E2A\u6C49\u5B57\u7684\u7B80\u77ED\u540D\u8BCD\u6027\u6216\u4E3B\u9898\u6027\u77ED\u8BED\uFF0C\u51C6\u786E\u6307\u51FA\u5B9E\u9645\u8BA8\u8BBA\u5BF9\u8C61\u6216\u5199\u4F5C\u95EE\u9898\uFF1B\u5FC5\u8981\u65F6\u4FDD\u7559\u4F5C\u54C1\u540D\u3001\u4EBA\u7269\u540D\u3001\u8BBE\u5B9A\u540D\u7B49\u4E13\u6709\u540D\u8BCD\u3002\u53EA\u8F93\u51FA\u6807\u9898\u672C\u8EAB\uFF0C\u4E0D\u52A0\u5F15\u53F7\u3001Markdown\u3001\u7F16\u53F7\u3001\u201C\u6807\u9898\uFF1A\u201D\u524D\u7F00\u3001\u53E5\u672B\u6807\u70B9\u6216\u89E3\u91CA\uFF1B\u4E0D\u8981\u4F7F\u7528\u201C\u65B0\u5BF9\u8BDD\u201D\u201C\u5173\u4E8E\u67D0\u67D0\u7684\u8BA8\u8BBA\u201D\u7B49\u7A7A\u6CDB\u540D\u79F0\u3002'
+}
+
+async function generateChatTitleOnce(chatId: string): Promise<{ ok: boolean; title?: string; error?: string }> {
+  const settings = await loadApiSettings()
+  if (!settings.apiKey) return { ok: false, error: '\u672A\u914D\u7F6E API Key' }
+  const { chat, messages } = await getChat(chatId)
+  const turns = messages.filter((message) => message.role === 'user' || message.role === 'assistant')
+  if (turns.length === 0) return { ok: false, error: '\u5BF9\u8BDD\u4E3A\u7A7A\uFF0C\u65E0\u6CD5\u751F\u6210\u6807\u9898' }
+
+  let docTitle: string | undefined
+  if (chat.docId) {
+    try {
+      docTitle = (await readDoc(chat.docId)).doc.title
+    } catch {
+      // The parent document may have been removed; the conversation can still be titled.
+    }
+  }
+  const lang = settings.language
+  const metadata = titleContextMetadata(chat, docTitle, lang)
+  try {
+    const title = await executeStructuredTask<string>({
+      task: 'chat_title',
+      settings,
       messages: [
-        {
-          role: 'system',
-          content: en
-            ? 'Generate a short title (max 20 words) for the following writing discussion. Output only the title text, written in English.'
-            : '请为下面这段写作讨论对话生成一个简短标题（不超过 20 字），只输出标题文本本身。'
-        },
-        { role: 'user', content: dialogue }
+        { role: 'system', content: titleSystemPrompt(lang, false) },
+        { role: 'user', content: buildTitleContext(turns, lang, TITLE_PRIMARY_BUDGET, metadata) }
       ],
-      temperature: 0.3,
-      max_tokens: 64
+      compactMessages: [
+        { role: 'system', content: titleSystemPrompt(lang, true) },
+        { role: 'user', content: buildTitleContext(turns, lang, TITLE_COMPACT_BUDGET, metadata) }
+      ],
+      outputTokens: 96,
+      compactOutputTokens: 64,
+      outputMode: 'prompt_only',
+      maxAttempts: 2,
+      parseAndValidate: (raw) => parseChatTitle(raw, lang)
     })
-    if (res.usage) await recordUsage(res.usage, 'summary')
-    const title = (res.choices[0]?.message?.content ?? '').trim().slice(0, 20)
-    if (!title) return { ok: false, error: '标题生成失败' }
     await renameChat(chatId, title)
     return { ok: true, title }
-  } catch (err) {
-    return { ok: false, error: (err as Error).message }
+  } catch (error) {
+    const fallback = localTitleFallback(turns, lang)
+    if (!fallback) throw error
+    await renameChat(chatId, fallback)
+    return { ok: true, title: fallback }
   }
+}
+
+export async function generateChatTitle(chatId: string): Promise<{ ok: boolean; title?: string; error?: string }> {
+  const existing = titleRequests.get(chatId)
+  if (existing) return existing
+  const request = generateChatTitleOnce(chatId)
+    .catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+    .finally(() => titleRequests.delete(chatId))
+  titleRequests.set(chatId, request)
+  return request
 }
 
 export async function testConnection(): Promise<ConnectionTestResult> {

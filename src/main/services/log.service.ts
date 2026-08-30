@@ -18,6 +18,10 @@ function summaryAttemptsPath(): string {
   return join(logsDir(), `summary-attempts-${format(new Date(), 'yyyy-MM-dd')}.jsonl`)
 }
 
+function chatCompatibilityPath(): string {
+  return join(logsDir(), `chat-compatibility-${format(new Date(), 'yyyy-MM-dd')}.jsonl`)
+}
+
 function vectorEventsPath(): string {
   return join(logsDir(), `vector-events-${format(new Date(), 'yyyy-MM-dd')}.jsonl`)
 }
@@ -41,6 +45,8 @@ export function logStructuredGenerationAttempt(event: {
   task: string
   protocol?: 'chat_completions' | 'responses'
   reasoningControl?: string
+  providerFamily?: string
+  reasoningReplay?: 'never' | 'when_present'
   endpointKey: string
   attempt: number
   mode: string
@@ -59,6 +65,30 @@ export function logStructuredGenerationAttempt(event: {
     }
   })
 }
+
+/**
+ * Chat compatibility audit. It never records API keys, prompts, source text,
+ * model output, or reasoning content; only an endpoint/model compatibility event.
+ */
+export function logChatCompatibilityEvent(event: {
+  protocol: 'chat_completions' | 'responses'
+  providerFamily: string
+  reasoningReplay: 'never' | 'when_present'
+  endpointKey: string
+  outcome: 'learned-retry' | 'retry-failure'
+  durationMs: number
+  error?: string
+}): void {
+  queue = queue.then(async () => {
+    try {
+      await mkdir(logsDir(), { recursive: true })
+      await appendFile(chatCompatibilityPath(), `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`, 'utf8')
+    } catch {
+      // Logging must never affect the chat request.
+    }
+  })
+}
+
 
 /** 向量嵌入审计：不记录项目 ID、查询文本、文档原文或向量，只记录后端状态和性能元数据。 */
 export function logVectorEvent(event: {

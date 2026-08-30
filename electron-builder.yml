@@ -1,5 +1,5 @@
 appId: com.vibewrite.app
-productName: VibeWrite
+productName: Penpal
 directories:
   buildResources: build
   output: dist
@@ -73,4 +73,4 @@ nsis:
   perMachine: false
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: 氛围写作
+  shortcutName: 笔伴

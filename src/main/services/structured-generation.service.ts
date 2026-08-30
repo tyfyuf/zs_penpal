@@ -2,41 +2,27 @@ import type { LlmAdapter } from './llm/llm-client'
 import { createLlmAdapter } from './llm/llm-client'
 import type { StructuredResponse } from './llm/llm.types'
 import {
-  inferStructuredReasoningControl,
-  isReasoningControl,
   reasoningControlLabel,
-  STRUCTURED_REASONING_CONTROL_FIELD,
-  type StructuredReasoningControl
+  STRUCTURED_REASONING_CONTROL_FIELD
 } from './llm/reasoning'
+import {
+  defaultModelCapabilityProfile,
+  loadModelCapabilityStore,
+  modelCapabilityFingerprint,
+  normalizeModelCapabilityProfile,
+  updateModelCapabilityProfile,
+  type ModelCapabilityProfile,
+  type StructuredOutputMode
+} from './llm/model-capabilities'
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
 import type { ApiSettings } from './api-settings'
 import { recordUsage } from './usage.service'
-import { atomicWriteJson, readJson } from '../util'
-import { getUserDataDir } from '../paths'
-import { join } from 'path'
-import { createHash } from 'crypto'
 import { logStructuredGenerationAttempt } from './log.service'
 import { noteSummaryRateLimit, noteSummaryRequestSuccess } from './summary-task-scheduler'
 
-export type StructuredOutputMode = 'json_schema' | 'json_object' | 'prompt_only'
+export type { StructuredOutputMode } from './llm/model-capabilities'
 export type StructuredRetryPolicy = 'compact' | 'split-required'
-type ReasoningControl = StructuredReasoningControl
-type OutputTokenParam = 'max_tokens' | 'max_completion_tokens'
 
-interface ModelCapabilityProfile {
-  key: string
-  source: 'preset' | 'runtime-fallback'
-  structuredOutput: StructuredOutputMode
-  reasoningControl: ReasoningControl
-  outputTokenParam: OutputTokenParam
-  temperature: 'supported' | 'unsupported'
-  updatedAt: string
-  profileVersion: 3
-}
-
-interface CapabilityStore {
-  profiles: Record<string, ModelCapabilityProfile>
-}
 
 export interface StructuredTaskOptions<T> {
   task: string
@@ -47,6 +33,10 @@ export interface StructuredTaskOptions<T> {
   compactOutputTokens: number
   parseAndValidate: (raw: string) => T | null
   jsonSchema?: Record<string, unknown>
+  /** Override the model's normal structured-output mode for small specialized tasks. */
+  outputMode?: StructuredOutputMode
+  /** Limit total attempts for tasks where retries must stay strictly bounded. */
+  maxAttempts?: number
   /** split-required reports truncation and timeout to the caller instead of hiding them behind a compact retry. */
   retryPolicy?: StructuredRetryPolicy
 }
@@ -55,86 +45,6 @@ export class StructuredGenerationError extends Error {
   constructor(message: string, public readonly code: 'unsupported' | 'truncated' | 'invalid' | 'empty' | 'timeout' | 'request') {
     super(message)
     this.name = 'StructuredGenerationError'
-  }
-}
-
-function capabilityPath(): string {
-  return join(getUserDataDir(), 'model-capabilities.json')
-}
-
-function normalizedBaseUrl(baseURL: string): string {
-  return baseURL.trim().replace(/\/+$/, '').toLowerCase()
-}
-
-function profileKey(settings: ApiSettings): string {
-  return `${settings.apiProtocol}::${normalizedBaseUrl(settings.baseURL)}::${settings.model.trim().toLowerCase()}`
-}
-
-function isOfficialDeepSeekEndpoint(baseURL: string): boolean {
-  try {
-    const host = new URL(baseURL).hostname.toLowerCase()
-    return host === 'api.deepseek.com' || host.endsWith('.api.deepseek.com')
-  } catch {
-    return false
-  }
-}
-
-async function loadCapabilityStore(): Promise<CapabilityStore> {
-  return (await readJson<CapabilityStore>(capabilityPath())) ?? { profiles: {} }
-}
-
-let capabilityWriteQueue: Promise<void> = Promise.resolve()
-
-function normalizeProfile(
-  cached: ModelCapabilityProfile | undefined,
-  fallback: ModelCapabilityProfile
-): ModelCapabilityProfile {
-  if (!cached) return fallback
-
-  // Capability files predate the provider-neutral reasoning control. Preserve
-  // their learned JSON/token/temperature capabilities, but refresh the
-  // reasoning dialect from the current endpoint/model inference once.
-  const reasoningControl = cached.profileVersion === 3 && isReasoningControl(cached.reasoningControl)
-    ? cached.reasoningControl
-    : fallback.reasoningControl
-  return {
-    ...fallback,
-    ...cached,
-    key: fallback.key,
-    reasoningControl,
-    profileVersion: 3
-  }
-}
-
-async function updateProfile(
-  fallback: ModelCapabilityProfile,
-  mutate: (current: ModelCapabilityProfile) => ModelCapabilityProfile
-): Promise<ModelCapabilityProfile> {
-  let saved = fallback
-  const next = capabilityWriteQueue.then(async () => {
-    const store = await loadCapabilityStore()
-    saved = mutate(normalizeProfile(store.profiles[fallback.key], fallback))
-    store.profiles[saved.key] = { ...saved, profileVersion: 3 }
-    await atomicWriteJson(capabilityPath(), store)
-  })
-  capabilityWriteQueue = next.catch(() => {})
-  await next
-  return saved
-}
-
-function defaultProfile(settings: ApiSettings): ModelCapabilityProfile {
-  const deepseek = isOfficialDeepSeekEndpoint(settings.baseURL)
-  const reasoningControl = inferStructuredReasoningControl(settings)
-  return {
-    key: profileKey(settings),
-    source: deepseek || reasoningControl !== 'provider_default_only' ? 'preset' : 'runtime-fallback',
-    // json_object is widely implemented by OpenAI-compatible endpoints. A 400 automatically falls back.
-    structuredOutput: 'json_object',
-    reasoningControl,
-    outputTokenParam: 'max_tokens',
-    temperature: 'supported',
-    updatedAt: new Date().toISOString(),
-    profileVersion: 3
   }
 }
 
@@ -192,10 +102,6 @@ function usageForRecord(response: StructuredResponse): {
     completion_tokens: usage.output_tokens,
     total_tokens: totalTokens
   }
-}
-
-function endpointFingerprint(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 16)
 }
 
 function buildRequest(
@@ -265,7 +171,9 @@ async function runAttempt<T>(
       task: options.task,
       protocol: options.settings.apiProtocol,
       reasoningControl: reasoningControlLabel(profile.reasoningControl),
-      endpointKey: endpointFingerprint(profile.key),
+      providerFamily: profile.providerFamily,
+      reasoningReplay: profile.reasoningReplay,
+      endpointKey: modelCapabilityFingerprint(profile),
       attempt,
       mode,
       compact,
@@ -280,7 +188,9 @@ async function runAttempt<T>(
       task: options.task,
       protocol: options.settings.apiProtocol,
       reasoningControl: reasoningControlLabel(profile.reasoningControl),
-      endpointKey: endpointFingerprint(profile.key),
+      providerFamily: profile.providerFamily,
+      reasoningReplay: profile.reasoningReplay,
+      endpointKey: modelCapabilityFingerprint(profile),
       attempt,
       mode,
       compact,
@@ -297,7 +207,7 @@ function downgradedProfile(profile: ModelCapabilityProfile, error: unknown): Mod
   const common = { source: 'runtime-fallback' as const, updatedAt: new Date().toISOString() }
   if (/(thinking|reasoning)/.test(text)) {
     return profile.reasoningControl !== 'provider_default_only'
-      ? { ...profile, ...common, reasoningControl: 'provider_default_only', profileVersion: 3 }
+      ? { ...profile, ...common, reasoningControl: 'provider_default_only' }
       : profile
   }
   if (/(response_format|json_schema|json object)/.test(text)) {
@@ -330,30 +240,37 @@ function downgradedProfile(profile: ModelCapabilityProfile, error: unknown): Mod
  */
 export async function executeStructuredTask<T>(options: StructuredTaskOptions<T>): Promise<T> {
   if (!options.settings.apiKey) throw new StructuredGenerationError('未配置 API Key', 'request')
-  const store = await loadCapabilityStore()
-  const fallbackProfile = defaultProfile(options.settings)
-  let profile = normalizeProfile(store.profiles[fallbackProfile.key], fallbackProfile)
+  const store = await loadModelCapabilityStore()
+  const fallbackProfile = defaultModelCapabilityProfile(options.settings)
+  let profile = normalizeModelCapabilityProfile(store.profiles[fallbackProfile.key], fallbackProfile)
   const client = makeClient(options.settings)
-  const primaryMode = profile.structuredOutput === 'json_schema' && !options.jsonSchema ? 'json_object' : profile.structuredOutput
+  const inferredMode = profile.structuredOutput === 'json_schema' && !options.jsonSchema ? 'json_object' : profile.structuredOutput
+  const primaryMode = options.outputMode ?? inferredMode
   const retryPolicy = options.retryPolicy ?? 'compact'
-  const attempts: Array<{ mode: StructuredOutputMode; compact: boolean }> = retryPolicy === 'split-required'
+  const attempts: Array<{ mode: StructuredOutputMode; compact: boolean }> = options.outputMode
     ? [
-        { mode: primaryMode, compact: false },
-        { mode: 'prompt_only', compact: false }
+        { mode: options.outputMode, compact: false },
+        { mode: options.outputMode, compact: true }
       ]
-    : [
-        { mode: primaryMode, compact: false },
-        { mode: 'prompt_only', compact: false },
-        { mode: 'prompt_only', compact: true }
-      ]
+    : retryPolicy === 'split-required'
+      ? [
+          { mode: primaryMode, compact: false },
+          { mode: 'prompt_only', compact: false }
+        ]
+      : [
+          { mode: primaryMode, compact: false },
+          { mode: 'prompt_only', compact: false },
+          { mode: 'prompt_only', compact: true }
+        ]
   let lastError: unknown
   let capabilityFallbacks = 0
-  for (let index = 0; index < attempts.length; index++) {
+  const maxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? attempts.length))
+  for (let index = 0; index < attempts.length && index < maxAttempts; index++) {
     const current = attempts[index]
     try {
       const value = await runAttempt(client, options, profile, index + 1, current.mode, current.compact)
-      if (profile.structuredOutput !== current.mode && current.mode === 'prompt_only') {
-        profile = await updateProfile(profile, (latest) => ({
+      if (!options.outputMode && profile.structuredOutput !== current.mode && current.mode === 'prompt_only') {
+        profile = await updateModelCapabilityProfile(profile, (latest) => ({
           ...latest,
           structuredOutput: 'prompt_only',
           source: 'runtime-fallback',
@@ -373,10 +290,10 @@ export async function executeStructuredTask<T>(options: StructuredTaskOptions<T>
         }
       }
       if (isUnsupportedParameter(error) && capabilityFallbacks < 4) {
-        profile = await updateProfile(profile, (latest) => downgradedProfile(latest, error))
+        profile = await updateModelCapabilityProfile(profile, (latest) => downgradedProfile(latest, error))
         capabilityFallbacks++
         // Retry immediately with revised capabilities; this is not a semantic compact retry.
-        attempts.splice(index + 1, 0, { mode: profile.structuredOutput, compact: false })
+        attempts.splice(index + 1, 0, { mode: options.outputMode ?? profile.structuredOutput, compact: false })
       } else if (isTransportError(error) && index === 0) {
         await new Promise((resolve) => setTimeout(resolve, 600))
       }

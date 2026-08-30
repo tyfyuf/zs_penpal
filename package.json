@@ -1,9 +1,9 @@
 {
   "name": "writing-agent",
   "version": "1.3.0",
-  "description": "氛围写作 VibeWrite —— 桌面端写作专精辅助 Agent：辅助创作者决策，不替代创作者完成写作成果",
+  "description": "Penpal - desktop writing assistant for creators: assists decisions without replacing the creator work",
   "main": "./out/main/index.js",
-  "author": "VibeWrite",
+  "author": "Penpal",
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",

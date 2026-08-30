@@ -629,7 +629,7 @@ export default function SettingsPane(): JSX.Element {
                   className="input"
                   value={gitAuthorName}
                   onChange={(e) => setGitAuthorName(e.target.value)}
-                  placeholder="VibeWrite"
+                  placeholder="Penpal"
                 />
               </Field>
               <Field label={t('settings.gitAuthorEmail')}>
@@ -637,7 +637,7 @@ export default function SettingsPane(): JSX.Element {
                   className="input"
                   value={gitAuthorEmail}
                   onChange={(e) => setGitAuthorEmail(e.target.value)}
-                  placeholder="vibewrite@localhost"
+                  placeholder="penpal@localhost"
                 />
               </Field>
               <button
