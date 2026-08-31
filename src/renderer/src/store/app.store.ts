@@ -1,9 +1,9 @@
 import { create } from 'zustand'
-import type { AppConfig, ChatAction, ChatMeta, ContextRange, DocMeta, WorkspaceSnapshot } from '@shared/types'
+import type { AppConfig, ChatAction, ChatMeta, ContextRange, DocMeta, ExternalFileResult, ResourceMeta, WorkspaceSnapshot } from '@shared/types'
 import { api } from '../lib/api'
 import { useI18nStore } from '../i18n'
 
-export type TabKind = 'doc' | 'chat' | 'settings' | 'resource'
+export type TabKind = 'doc' | 'chat' | 'settings' | 'resource' | 'external-resource'
 
 export interface Tab {
   id: string
@@ -14,6 +14,8 @@ export interface Tab {
   chatKind?: 'project' | 'doc' | 'context'
   contextRange?: ContextRange
   action?: ChatAction
+  externalFile?: Required<Pick<ExternalFileResult, 'name' | 'path' | 'content' | 'data'>> &
+    Pick<ExternalFileResult, 'sourceFormat' | 'contentFormat' | 'warnings'>
 }
 
 interface AppStore {
@@ -39,6 +41,8 @@ interface AppStore {
   openChat(chat: ChatMeta): void
   openSettings(): void
   openResource(projectId: string, resourceId: string, name: string): void
+  openExternalResource(file: ExternalFileResult): void
+  promoteExternalResource(tabId: string, resource: ResourceMeta): void
   closeTab(tabId: string): void
   activateTab(tabId: string): void
   setDirty(docId: string, v: boolean): void
@@ -103,10 +107,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
       activeTabId = tabs[tabs.length - 1]?.id ?? null
     }
 
-    // 清理已删除文档的脏标记
+    // 清理已删除文档/资源的脏标记；外部临时标签使用标签 id 保留。
     const dirty = { ...get().dirty }
+    const externalTabIds = new Set(tabs.filter((tab) => tab.kind === 'external-resource').map((tab) => tab.id))
     for (const id of Object.keys(dirty)) {
-      if (!normalDocIds.has(id)) delete dirty[id]
+      if (!normalDocIds.has(id) && !normalResourceIds.has(id) && !externalTabIds.has(id)) delete dirty[id]
     }
 
     set({ workspace, tabs, activeTabId, dirty })
@@ -172,6 +177,47 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({ tabs: [...tabs, tab], activeTabId: tab.id })
   },
 
+  openExternalResource(file) {
+    if (!file.ok || !file.name || !file.path || file.content === undefined || !file.data) return
+    const { tabs } = get()
+    const existing = tabs.find((tab) => tab.kind === 'external-resource' && tab.externalFile?.path === file.path)
+    if (existing) {
+      set({ activeTabId: existing.id })
+      return
+    }
+    const tab: Tab = {
+      id: `external-resource:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      kind: 'external-resource',
+      title: file.name,
+      externalFile: {
+        name: file.name,
+        path: file.path,
+        content: file.content,
+        data: file.data,
+        sourceFormat: file.sourceFormat,
+        contentFormat: file.contentFormat,
+        warnings: file.warnings
+      }
+    }
+    set({ tabs: [...tabs, tab], activeTabId: tab.id })
+  },
+
+  promoteExternalResource(tabId, resource) {
+    const canonicalId = `resource:${resource.id}`
+    const nextId = canonicalId
+    const tabs = get().tabs
+      .filter((tab) => tab.id === tabId || !(tab.kind === 'resource' && tab.refId === resource.id))
+      .map((tab) =>
+        tab.id === tabId
+          ? { id: nextId, kind: 'resource' as const, title: resource.name, refId: resource.id, projectId: resource.projectId }
+          : tab
+      )
+    const dirty = { ...get().dirty }
+    delete dirty[tabId]
+    delete dirty[resource.id]
+    set({ tabs, activeTabId: nextId, dirty })
+  },
+
   closeTab(tabId) {
     const { tabs, activeTabId } = get()
     const idx = tabs.findIndex((t) => t.id === tabId)
@@ -181,7 +227,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
     if (activeTabId === tabId) {
       nextActive = next[Math.min(idx, next.length - 1)]?.id ?? null
     }
-    set({ tabs: next, activeTabId: nextActive })
+    const dirty = { ...get().dirty }
+    const closing = tabs[idx]
+    const dirtyKey = closing.kind === 'external-resource' ? closing.id : closing.refId
+    if (dirtyKey) delete dirty[dirtyKey]
+    set({ tabs: next, activeTabId: nextActive, dirty })
   },
 
   activateTab(tabId) {

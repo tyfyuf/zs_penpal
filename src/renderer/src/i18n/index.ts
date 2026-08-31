@@ -57,7 +57,7 @@ const zh: Record<string, string> = {
   'sidebar.confirmDeleteResource': '删除该资源文件？',
   'sidebar.confirmPurgeDoc': '彻底删除该文档？关联对话将转为孤儿对话进入归档区。',
   'sidebar.confirmPurgeProject': '彻底删除该项目？其下所有数据将一并删除。',
-  'sidebar.badExt': '仅支持 .txt / .md / .csv 文本文件',
+  'sidebar.badExt': '仅支持 .txt / .md / .csv / .doc / .docx 文件',
   'sidebar.preview': '预览',
   'sidebar.actionDiagnose': '诊断',
   'sidebar.actionPlot': '走向',
@@ -75,7 +75,8 @@ const zh: Record<string, string> = {
   'sidebar.resize': '调整侧边栏宽度',
   'sidebar.resizeResetHint': '拖动调整侧边栏宽度；双击恢复默认宽度',
 
-  'tabs.unsavedClose': '文档有未保存改动，是否保存后关闭？',
+  'tabs.unsavedClose': '内容有未保存改动，是否保存后关闭？',
+  'tabs.externalUnsavedClose': '该外部文件尚未上传到资源区，关闭后本次修改将丢失。仍要关闭吗？',
 
   'editor.unsaved': '未保存',
   'editor.fontDown': '缩小字号',
@@ -348,13 +349,30 @@ const zh: Record<string, string> = {
   'distill.titleFail': '标题生成失败',
 
   'resource.readonly': '资源文件（只读）',
+  'resource.editable': '资源文本（可编辑）',
   'resource.loading': '加载中…',
+  'resource.saving': '保存中…',
+  'resource.distilling': '蒸馏中，暂不可编辑',
+  'resource.characters': '字符：{n}',
   'resource.encoding': '源编码：{encoding}',
   'resource.encodingWarning': '检测到疑似编码乱码',
   'resource.encodingWarningHint': '该内容不会进入摘要、会话附件或向量索引。请重新选择原文件，应用会自动识别编码并覆盖此资源。',
   'resource.reimport': '重新导入原文件',
   'resource.reimporting': '正在重新导入…',
-  'resource.reimported': '资源已按正确编码重新导入；旧摘要和索引已失效'
+  'resource.reimported': '资源已重新导入，摘要已标记为过期',
+  'resource.reimportOverwriteConfirm': '该资源的内部文本已经编辑过。重新导入原文件会覆盖这些修改，是否继续？',
+
+  'external.temporary': '外部文件（临时副本）',
+  'external.upload': '上传到资源区',
+  'external.copyHint': '编辑不会覆盖磁盘原文件',
+  'external.chooseProject': '选择目标项目',
+  'external.searchProject': '搜索项目…',
+  'external.resourceCount': '{n} 个资源',
+  'external.uploading': '正在上传…',
+  'external.uploaded': '已上传到项目“{project}”',
+  'external.conflictPrompt': '目标项目中已存在同名资源“{name}”，请选择处理方式。',
+  'external.overwrite': '覆盖现有资源',
+  'external.renameImport': '作为新资源导入'
 }
 
 const en: Record<string, string> = {
@@ -408,7 +426,7 @@ const en: Record<string, string> = {
   'sidebar.confirmDeleteResource': 'Delete this resource file?',
   'sidebar.confirmPurgeDoc': 'Delete this document permanently? Related chats will become orphan chats in the archive.',
   'sidebar.confirmPurgeProject': 'Delete this project permanently? All data inside will be removed.',
-  'sidebar.badExt': 'Only .txt / .md / .csv text files are supported',
+  'sidebar.badExt': 'Only .txt / .md / .csv / .doc / .docx files are supported',
   'sidebar.preview': 'Preview',
   'sidebar.actionDiagnose': 'Diagnose',
   'sidebar.actionPlot': 'Plot direction',
@@ -426,7 +444,8 @@ const en: Record<string, string> = {
   'sidebar.resize': 'Resize sidebar',
   'sidebar.resizeResetHint': 'Drag to resize the sidebar; double-click to restore the default width',
 
-  'tabs.unsavedClose': 'The document has unsaved changes. Save before closing?',
+  'tabs.unsavedClose': 'This content has unsaved changes. Save before closing?',
+  'tabs.externalUnsavedClose': 'This external file has not been uploaded. Closing it will discard your edits. Close anyway?',
 
   'editor.unsaved': 'Unsaved',
   'editor.fontDown': 'Decrease font size',
@@ -703,13 +722,30 @@ const en: Record<string, string> = {
   'distill.titleFail': 'Title generation failed',
 
   'resource.readonly': 'Resource file (read-only)',
+  'resource.editable': 'Resource text (editable)',
   'resource.loading': 'Loading…',
+  'resource.saving': 'Saving…',
+  'resource.distilling': 'Distilling; editing is temporarily disabled',
+  'resource.characters': 'Characters: {n}',
   'resource.encoding': 'Source encoding: {encoding}',
   'resource.encodingWarning': 'Possible text-encoding corruption detected',
   'resource.encodingWarningHint': 'This content is excluded from summaries, chat attachments, and vector indexes. Re-select the original file to auto-detect its encoding and replace this resource.',
   'resource.reimport': 'Re-import original',
   'resource.reimporting': 'Re-importing…',
-  'resource.reimported': 'Resource re-imported; the old summary and vector index were invalidated'
+  'resource.reimported': 'Resource re-imported; the summary is now marked outdated',
+  'resource.reimportOverwriteConfirm': 'The internal resource text has been edited. Re-importing will overwrite those changes. Continue?',
+
+  'external.temporary': 'External file (temporary copy)',
+  'external.upload': 'Upload to resources',
+  'external.copyHint': 'Edits do not overwrite the file on disk',
+  'external.chooseProject': 'Choose target project',
+  'external.searchProject': 'Search projects…',
+  'external.resourceCount': '{n} resources',
+  'external.uploading': 'Uploading…',
+  'external.uploaded': 'Uploaded to project “{project}”',
+  'external.conflictPrompt': 'A resource named “{name}” already exists in this project. Choose how to proceed.',
+  'external.overwrite': 'Overwrite existing',
+  'external.renameImport': 'Import as new resource'
 }
 
 const dictionaries: Record<Locale, Record<string, string>> = { zh, en }

@@ -8,6 +8,20 @@ export type ChatKind = 'project' | 'doc' | 'context'
 export type ChatAction = 'diagnose' | 'plot' | 'optimize'
 
 /** 该对话的摘要注入覆盖（对当前对话窗口单独生效） */
+export interface ChatRelevanceLearningTerm {
+  score: number
+  userTurns: number
+  assistantTurns: number
+  lastSeenRound: number
+}
+
+/** Per-conversation, local relevance signals learned from completed turns. */
+export interface ChatRelevanceLearning {
+  completedRounds: number
+  terms: Record<string, ChatRelevanceLearningTerm>
+  updatedAt?: string
+}
+
 export interface ChatInjectionOverrides {
   /** 关闭的注入键：'fulltext' | 'doc:<docId>' | 'chat:<chatId>' | 'res:<resourceId>' */
   disabled: string[]
@@ -80,6 +94,8 @@ export interface ChatMeta {
   lockedRange?: { before: number; after: number }
   /** 该对话的摘要注入覆盖（对当前对话窗口单独生效） */
   injectionOverrides?: ChatInjectionOverrides
+  /** Dynamic, conversation-local relevance signals; never shared across chats. */
+  summaryLearning?: ChatRelevanceLearning
 }
 
 export interface ResourceMeta {
@@ -93,6 +109,13 @@ export interface ResourceMeta {
   sourceEncoding?: string
   sourceEncodingConfidence?: number
   sourceHadBom?: boolean
+  /** Original import format and normalized internal representation. */
+  sourceFormat?: import('./resource-formats').ResourceSourceFormat
+  contentFormat?: import('./resource-formats').ResourceContentFormat
+  conversionWarnings?: string[]
+  /** Last time the normalized internal text was edited inside Penpal. */
+  contentEditedAt?: string
+  updatedAt?: string
 }
 
 export type TextIntegrityIssue = 'replacement-characters' | 'nul-characters' | 'control-characters' | 'mojibake'
@@ -720,12 +743,16 @@ export interface ConnectionTestResult {
 export interface ExternalFileResult {
   ok: boolean
   error?: string
-  projectId?: string
-  resourceId?: string
   name?: string
+  path?: string
   content?: string
-  created?: boolean
+  data?: Uint8Array
+  sourceFormat?: import('./resource-formats').ResourceSourceFormat
+  contentFormat?: import('./resource-formats').ResourceContentFormat
+  warnings?: string[]
 }
+
+export type ResourceImportConflict = 'overwrite' | 'rename'
 
 export interface ExportProjectOptions {
   includeChats: boolean

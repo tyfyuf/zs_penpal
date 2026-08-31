@@ -10,7 +10,7 @@ import { clearRecovery } from './services/recovery.service'
 import { initErrorLog, logError } from './services/log.service'
 import { disposeNeuralEmbedder } from './services/neural-embed.service'
 
-const ALLOWED_EXT = ['.txt', '.md', '.csv']
+const ALLOWED_EXT = ['.txt', '.md', '.csv', '.doc', '.docx']
 
 // 全局错误落盘（供维护查阅）
 process.on('uncaughtException', (err) => {

@@ -1,5 +1,6 @@
 appId: com.vibewrite.app
 productName: Penpal
+afterPack: scripts/after-pack.cjs
 directories:
   buildResources: build
   output: dist
@@ -55,18 +56,26 @@ win:
     - target: nsis
       arch:
         - x64
-  # 无签名证书：跳过 exe 资源编辑与签名，避免下载含 darwin 符号链接的 winCodeSign（Windows 无符号链接权限时解压失败）
+  executableName: Penpal
+  # Metadata is written by scripts/after-pack.cjs with the vendored rcedit binary.
+  # This avoids electron-builder's winCodeSign archive, which requires Windows symlink privileges.
   signAndEditExecutable: false
   fileAssociations:
     - ext: md
       name: Markdown Document
-      description: Markdown 文本文档
+      description: Markdown document
     - ext: txt
       name: Text Document
-      description: 纯文本文档
+      description: Plain text document
     - ext: csv
       name: CSV Document
-      description: CSV 文本文档
+      description: CSV text document
+    - ext: doc
+      name: Word 97-2003 Document
+      description: Word 97-2003 document
+    - ext: docx
+      name: Word Document
+      description: Word document
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true

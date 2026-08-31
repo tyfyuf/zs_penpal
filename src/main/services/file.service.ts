@@ -1,6 +1,6 @@
-import { join } from 'path'
+﻿import { join } from 'path'
 import { basename } from 'path'
-import { mkdir, readdir, readFile, rm, writeFile } from 'fs/promises'
+import { mkdir, readdir, readFile, rm } from 'fs/promises'
 import type {
   ChatKind,
   ChatMessage,
@@ -22,10 +22,13 @@ import type {
 import { getConfigCached } from './config.service'
 import { appendJsonl, atomicWrite, atomicWriteJson, newId, nowIso, readJson, readJsonl } from '../util'
 import { computeSourceInfo, SUMMARY_SCHEMA_VERSION } from '../summary-source'
-import { assertTextIntegrity, decodeTextBuffer, readDecodedTextFile } from './text-decoding.service'
+import { assertTextIntegrity, readDecodedTextFile } from './text-decoding.service'
+import { convertResourceInput, type ConvertedResourceInput } from './resource-conversion.service'
+import { getResourceSourceFormat, isSupportedResourceFile } from '@shared/resource-formats'
+import { isSummaryGenerating } from './summary-state.service'
 
 // ---------------------------------------------------------------------------
-// 目录结构（依据 tech-stack 7.2，生命周期状态存于元数据 JSON，不依赖目录移动）
+// 鐩綍缁撴瀯锛堜緷鎹?tech-stack 7.2锛岀敓鍛藉懆鏈熺姸鎬佸瓨浜庡厓鏁版嵁 JSON锛屼笉渚濊禆鐩綍绉诲姩锛?
 // <workspace>/app-index.json
 // <workspace>/<project-id>/{ meta.json, docs/, chats/, summaries/, resources/, .git/ }
 //   docs/<doc-id>.meta.json + <doc-id>.md
@@ -116,7 +119,7 @@ function resourceSourcePath(projectId: string, fileId: string): string {
 
 
 // ---------------------------------------------------------------------------
-// 工作目录索引
+// 宸ヤ綔鐩綍绱㈠紩
 // ---------------------------------------------------------------------------
 
 async function loadIndex(): Promise<AppIndex> {
@@ -142,13 +145,13 @@ async function mutateProject(projectId: string, patch: Partial<ProjectMeta>): Pr
   if (i < 0) throw new Error('project not found')
   idx.projects[i] = { ...idx.projects[i], ...patch, updatedAt: nowIso() }
   await saveIndex(idx)
-  // 同步写入项目目录 meta.json，供 Git 跟踪
+  // 鍚屾鍐欏叆椤圭洰鐩綍 meta.json锛屼緵 Git 璺熻釜
   await atomicWriteJson(join(projectDir(projectId), 'meta.json'), idx.projects[i])
   return idx.projects[i]
 }
 
 // ---------------------------------------------------------------------------
-// 项目
+// 椤圭洰
 // ---------------------------------------------------------------------------
 
 export async function listProjects(status?: ProjectMeta['status']): Promise<ProjectMeta[]> {
@@ -188,7 +191,7 @@ export async function purgeProject(projectId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// 文档
+// 鏂囨。
 // ---------------------------------------------------------------------------
 
 async function listDocMetas(projectId: string): Promise<DocMeta[]> {
@@ -211,7 +214,7 @@ export async function createDoc(projectId: string, title: string): Promise<DocMe
   const id = newId()
   const meta: DocMeta = { id, projectId, title, status: 'normal', createdAt: nowIso(), updatedAt: nowIso() }
   await atomicWriteJson(docMetaPath(projectId, id), meta)
-  // 新建文档：UTF-8，空内容（LF）
+  // 鏂板缓鏂囨。锛歎TF-8锛岀┖鍐呭锛圠F锛?
   await atomicWrite(docContentPath(projectId, id), '')
   return meta
 }
@@ -228,7 +231,7 @@ export async function readDoc(docId: string): Promise<{ doc: DocMeta; content: s
   return { doc, content }
 }
 
-/** 跨项目查找文档元数据（用于 readDoc 等按 id 定位的场景） */
+/** 璺ㄩ」鐩煡鎵炬枃妗ｅ厓鏁版嵁锛堢敤浜?readDoc 绛夋寜 id 瀹氫綅鐨勫満鏅級 */
 export async function findDocMeta(docId: string): Promise<DocMeta> {
   const projects = await listProjects()
   for (const p of projects) {
@@ -273,10 +276,10 @@ export async function restoreDoc(docId: string): Promise<DocMeta> {
 }
 
 /**
- * 彻底删除文档（PRD 4.1.3 / 4.1.5）：
- * - 文档本体 + 文档摘要删除
- * - 仍关联的文档级对话 → 孤儿归档
- * - 已被用户单独归档的文档级对话 → 一并移除
+ * 褰诲簳鍒犻櫎鏂囨。锛圥RD 4.1.3 / 4.1.5锛夛細
+ * - 鏂囨。鏈綋 + 鏂囨。鎽樿鍒犻櫎
+ * - 浠嶅叧鑱旂殑鏂囨。绾у璇?鈫?瀛ゅ効褰掓。
+ * - 宸茶鐢ㄦ埛鍗曠嫭褰掓。鐨勬枃妗ｇ骇瀵硅瘽 鈫?涓€骞剁Щ闄?
  */
 export async function purgeDoc(docId: string): Promise<void> {
   const doc = await findDocMeta(docId)
@@ -301,7 +304,7 @@ export async function purgeDoc(docId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// 对话
+// 瀵硅瘽
 // ---------------------------------------------------------------------------
 
 async function listChatMetas(projectId: string): Promise<ChatMeta[]> {
@@ -384,10 +387,10 @@ export async function createChat(
   return meta
 }
 
-/** 更新对话 meta 的可变字段（contextRange / lockedRange / injectionOverrides） */
+/** 鏇存柊瀵硅瘽 meta 鐨勫彲鍙樺瓧娈碉紙contextRange / lockedRange / injectionOverrides锛?*/
 export async function updateChatMeta(
   chatId: string,
-  patch: Partial<Pick<ChatMeta, 'contextRange' | 'lockedRange' | 'injectionOverrides'>>
+  patch: Partial<Pick<ChatMeta, 'contextRange' | 'lockedRange' | 'injectionOverrides' | 'summaryLearning'>>
 ): Promise<ChatMeta> {
   return mutateChatMeta(chatId, (chat) => ({ ...chat, ...patch, updatedAt: nowIso() }))
 }
@@ -402,7 +405,7 @@ export async function renameChat(chatId: string, title: string): Promise<ChatMet
   return mutateChatMeta(chatId, (chat) => ({ ...chat, title, updatedAt: nowIso() }))
 }
 
-/** 更新上下文对话的上下文范围（PRD 6.4 / 6.6） */
+/** 鏇存柊涓婁笅鏂囧璇濈殑涓婁笅鏂囪寖鍥达紙PRD 6.4 / 6.6锛?*/
 export async function updateChatContext(
   chatId: string,
   contextRange: import('@shared/types').ContextRange
@@ -437,12 +440,12 @@ export async function replaceLastAssistantMessage(
   return messageId
 }
 
-/** 用户归档对话（PRD 4.2.1） */
+/** 鐢ㄦ埛褰掓。瀵硅瘽锛圥RD 4.2.1锛?*/
 export async function deleteChat(chatId: string): Promise<void> {
   await mutateChatMeta(chatId, (chat) => ({ ...chat, status: 'user_archived', updatedAt: nowIso() }))
 }
 
-/** 从归档区恢复对话（PRD 4.2.3） */
+/** 浠庡綊妗ｅ尯鎭㈠瀵硅瘽锛圥RD 4.2.3锛?*/
 export async function restoreChat(chatId: string): Promise<ChatMeta> {
   return mutateChatMeta(chatId, async (chat) => {
     // Restore the original relation when its document still exists; otherwise restore as a project chat.
@@ -464,7 +467,7 @@ export async function purgeChat(chatId: string): Promise<void> {
   await rm(chatMetaPath(chat.projectId, chatId), { force: true })
   await rm(chatJsonlPath(chat.projectId, chatId), { force: true })
   await rm(chatSummaryPath(chat.projectId, chatId), { force: true })
-  // 删除该对话的快照文件
+  // 鍒犻櫎璇ュ璇濈殑蹇収鏂囦欢
   const { readdir } = await import('fs/promises')
   let entries: string[] = []
   try {
@@ -480,7 +483,7 @@ export async function purgeChat(chatId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// 资源与快照
+// 璧勬簮涓庡揩鐓?
 // ---------------------------------------------------------------------------
 
 export async function listResources(projectId: string): Promise<ResourceMeta[]> {
@@ -503,23 +506,96 @@ export async function uploadResource(
   name: string,
   content: string
 ): Promise<ResourceMeta> {
-  const id = newId()
-  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : 'txt'
-  const meta: ResourceMeta = {
+  const sourceFormat = getResourceSourceFormat(name) ?? 'txt'
+  return createResourceFiles(projectId, name, Buffer.from(content, 'utf8'), {
+    content,
+    sourceFormat,
+    contentFormat: sourceFormat === 'md' ? 'markdown' : 'plain_text',
+    warnings: [],
+    encoding: {
+      encoding: 'utf-8',
+      confidence: 100,
+      hadBom: false,
+      suspicious: false,
+      replacementCount: 0,
+      nulCount: 0,
+      controlCount: 0,
+      mojibakeCount: 0
+    }
+  })
+}
+
+function buildResourceMeta(
+  projectId: string,
+  id: string,
+  name: string,
+  converted: ConvertedResourceInput,
+  previous?: ResourceMeta,
+  contentEdited = false
+): ResourceMeta {
+  const timestamp = nowIso()
+  return {
+    ...(previous ?? {}),
     id,
     projectId,
     name,
-    ext,
-    size: Buffer.byteLength(content, 'utf8'),
-    createdAt: nowIso(),
-    sourceEncoding: 'utf-8',
-    sourceEncodingConfidence: 100,
-    sourceHadBom: false
+    ext: converted.sourceFormat,
+    size: Buffer.byteLength(converted.content, 'utf8'),
+    createdAt: previous?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    sourceEncoding: converted.encoding?.encoding,
+    sourceEncodingConfidence: converted.encoding?.confidence,
+    sourceHadBom: converted.encoding?.hadBom,
+    sourceFormat: converted.sourceFormat,
+    contentFormat: converted.contentFormat,
+    conversionWarnings: converted.warnings,
+    ...(contentEdited ? { contentEditedAt: timestamp } : { contentEditedAt: undefined })
   }
-  await atomicWriteJson(resourceMetaPath(projectId, id), meta)
-  await atomicWrite(resourceContentPath(projectId, id), content)
-  return meta
 }
+
+async function invalidateResourceDistillationCheckpoint(projectId: string, resourceId: string): Promise<void> {
+  await rm(settingDistillationCheckpointPath(projectId, resourceId), { force: true })
+}
+
+async function removeResourceDerivedData(projectId: string, resourceId: string): Promise<void> {
+  await rm(resourceSummaryPath(projectId, resourceId), { force: true })
+  await invalidateResourceDistillationCheckpoint(projectId, resourceId)
+}
+
+const resourceCreateLocks = new Map<string, Promise<void>>()
+
+async function createResourceFiles(
+  projectId: string,
+  name: string,
+  data: Uint8Array,
+  converted: ConvertedResourceInput,
+  contentOverride?: string
+): Promise<ResourceMeta> {
+  const previous = resourceCreateLocks.get(projectId) ?? Promise.resolve()
+  let release!: () => void
+  const current = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  resourceCreateLocks.set(projectId, current)
+  await previous
+
+  try {
+    const finalName = uniqueResourceName(name, await listResources(projectId))
+    const id = newId()
+    const content = contentOverride ?? converted.content
+    if (!content.trim()) throw new Error(`Resource \"${finalName}\" has no text content to save`)
+    const effective = { ...converted, content }
+    const meta = buildResourceMeta(projectId, id, finalName, effective, undefined, content !== converted.content)
+    await atomicWrite(resourceSourcePath(projectId, id), data)
+    await atomicWrite(resourceContentPath(projectId, id), content)
+    await atomicWriteJson(resourceMetaPath(projectId, id), meta)
+    return meta
+  } finally {
+    release()
+    if (resourceCreateLocks.get(projectId) === current) resourceCreateLocks.delete(projectId)
+  }
+}
+
 
 export async function uploadResourceBytes(
   projectId: string,
@@ -527,129 +603,152 @@ export async function uploadResourceBytes(
   data: Uint8Array,
   encodingHint?: string
 ): Promise<ResourceMeta> {
-  const decoded = decodeTextBuffer(data, encodingHint)
-  assertTextIntegrity(decoded.info, name)
-  const id = newId()
-  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : 'txt'
-  const meta: ResourceMeta = {
-    id,
-    projectId,
-    name,
-    ext,
-    size: Buffer.byteLength(decoded.text, 'utf8'),
-    createdAt: nowIso(),
-    sourceEncoding: decoded.info.encoding,
-    sourceEncodingConfidence: decoded.info.confidence,
-    sourceHadBom: decoded.info.hadBom
-  }
-  await atomicWriteJson(resourceMetaPath(projectId, id), meta)
-  await atomicWrite(resourceContentPath(projectId, id), decoded.text)
-  await writeFile(resourceSourcePath(projectId, id), Buffer.from(data))
-  return meta
+  const converted = await convertResourceInput(name, data, encodingHint)
+  return createResourceFiles(projectId, name, data, converted)
 }
 
 export async function readResource(projectId: string, resourceId: string): Promise<{
   content: string
   name: string
   encoding: TextEncodingInfo
+  meta: ResourceMeta
 }> {
   const meta = await readJson<ResourceMeta>(resourceMetaPath(projectId, resourceId))
+  if (!meta) throw new Error('resource not found')
   const decoded = await readDecodedTextFile(resourceContentPath(projectId, resourceId))
   return {
     content: decoded.text,
-    name: meta?.name ?? resourceId,
+    name: meta.name,
+    meta,
     encoding: {
       ...decoded.info,
-      encoding: meta?.sourceEncoding ?? decoded.info.encoding,
-      confidence: meta?.sourceEncodingConfidence ?? decoded.info.confidence,
-      hadBom: meta?.sourceHadBom ?? decoded.info.hadBom
+      encoding: meta.sourceEncoding ?? decoded.info.encoding,
+      confidence: meta.sourceEncodingConfidence ?? decoded.info.confidence,
+      hadBom: meta.sourceHadBom ?? decoded.info.hadBom
     }
   }
+}
+
+export async function saveResourceText(
+  projectId: string,
+  resourceId: string,
+  content: string
+): Promise<ResourceMeta> {
+  assertResourceMutationAllowed(resourceId)
+  const current = await readJson<ResourceMeta>(resourceMetaPath(projectId, resourceId))
+  if (!current) throw new Error('resource not found')
+  const timestamp = nowIso()
+  const next: ResourceMeta = {
+    ...current,
+    size: Buffer.byteLength(content, 'utf8'),
+    updatedAt: timestamp,
+    contentEditedAt: timestamp
+  }
+  await atomicWrite(resourceContentPath(projectId, resourceId), content)
+  await atomicWriteJson(resourceMetaPath(projectId, resourceId), next)
+  await invalidateResourceDistillationCheckpoint(projectId, resourceId)
+  return next
 }
 
 export async function replaceResourceBytes(
   projectId: string,
   resourceId: string,
   data: Uint8Array,
-  encodingHint?: string
+  encodingHint?: string,
+  sourceName?: string
 ): Promise<ResourceMeta> {
+  assertResourceMutationAllowed(resourceId)
   const current = await readJson<ResourceMeta>(resourceMetaPath(projectId, resourceId))
   if (!current) throw new Error('resource not found')
-  const decoded = decodeTextBuffer(data, encodingHint)
-  assertTextIntegrity(decoded.info, current.name)
-  const next: ResourceMeta = {
-    ...current,
-    size: Buffer.byteLength(decoded.text, 'utf8'),
-    sourceEncoding: decoded.info.encoding,
-    sourceEncodingConfidence: decoded.info.confidence,
-    sourceHadBom: decoded.info.hadBom
-  }
-  await atomicWrite(resourceContentPath(projectId, resourceId), decoded.text)
-  await writeFile(resourceSourcePath(projectId, resourceId), Buffer.from(data))
+  const converted = await convertResourceInput(sourceName ?? current.name, data, encodingHint)
+  const next = buildResourceMeta(projectId, resourceId, current.name, converted, current, true)
+  await atomicWrite(resourceSourcePath(projectId, resourceId), data)
+  await atomicWrite(resourceContentPath(projectId, resourceId), converted.content)
   await atomicWriteJson(resourceMetaPath(projectId, resourceId), next)
-  await rm(resourceSummaryPath(projectId, resourceId), { force: true })
-  await rm(settingDistillationCheckpointPath(projectId, resourceId), { force: true })
+  await invalidateResourceDistillationCheckpoint(projectId, resourceId)
   return next
 }
 
 export async function deleteResource(projectId: string, resourceId: string): Promise<void> {
+  assertResourceMutationAllowed(resourceId)
   await rm(resourceDir(projectId, resourceId), { recursive: true, force: true })
-  // 资源删除 → 其摘要一并移除（资源摘要生命周期）
-  await rm(resourceSummaryPath(projectId, resourceId), { force: true })
-  await rm(settingDistillationCheckpointPath(projectId, resourceId), { force: true })
+  await removeResourceDerivedData(projectId, resourceId)
 }
 
-/**
- * 单实例文件关联：打开外部文本文件（PRD 1.5 / 9.24 / 9.29）。
- * 非文本文件拒绝；文件不属于任何项目时自动创建项目并作为资源导入。
- */
+function assertResourceMutationAllowed(resourceId: string): void {
+  if (isSummaryGenerating(`res:${resourceId}`)) {
+    throw new Error('璧勬簮姝ｅ湪钂搁锛屾殏涓嶅彲缂栬緫锛岃绛夊緟钂搁瀹屾垚鍚庡啀鎿嶄綔')
+  }
+}
+
+function uniqueResourceName(name: string, resources: ResourceMeta[]): string {
+  const used = new Set(resources.map((resource) => resource.name.toLocaleLowerCase()))
+  if (!used.has(name.toLocaleLowerCase())) return name
+  const dot = name.lastIndexOf('.')
+  const base = dot > 0 ? name.slice(0, dot) : name
+  const suffix = dot > 0 ? name.slice(dot) : ''
+  for (let index = 2; ; index += 1) {
+    const candidate = `${base} (${index})${suffix}`
+    if (!used.has(candidate.toLocaleLowerCase())) return candidate
+  }
+}
+
+export async function importExternalResource(
+  projectId: string,
+  name: string,
+  data: Uint8Array,
+  editedContent: string,
+  conflict: 'overwrite' | 'rename'
+): Promise<ResourceMeta> {
+  const converted = await convertResourceInput(name, data)
+  if (!editedContent.trim()) throw new Error('澶栭儴鏂囦欢娌℃湁鍙繚瀛樼殑姝ｆ枃鍐呭')
+  const resources = await listResources(projectId)
+  const existing = resources.find((resource) => resource.name.toLocaleLowerCase() === name.toLocaleLowerCase())
+  if (existing && conflict === 'overwrite') {
+    assertResourceMutationAllowed(existing.id)
+    const effective = { ...converted, content: editedContent }
+    const next = buildResourceMeta(projectId, existing.id, existing.name, effective, existing, true)
+    await atomicWrite(resourceSourcePath(projectId, existing.id), data)
+    await atomicWrite(resourceContentPath(projectId, existing.id), editedContent)
+    await atomicWriteJson(resourceMetaPath(projectId, existing.id), next)
+    await invalidateResourceDistillationCheckpoint(projectId, existing.id)
+    return next
+  }
+  return createResourceFiles(projectId, name, data, converted, editedContent)
+}
+
+/** Read and normalize an associated file without adding it to any project. */
 export async function importExternalFile(filePath: string): Promise<{
   ok: boolean
   error?: string
-  projectId?: string
-  resourceId?: string
   name?: string
+  path?: string
   content?: string
-  created?: boolean
+  data?: Uint8Array
+  sourceFormat?: import('@shared/resource-formats').ResourceSourceFormat
+  contentFormat?: import('@shared/resource-formats').ResourceContentFormat
+  warnings?: string[]
 }> {
-  const dot = filePath.lastIndexOf('.')
-  const ext = dot >= 0 ? filePath.slice(dot).toLowerCase() : ''
-  if (!['.txt', '.md', '.csv'].includes(ext)) {
-    return { ok: false, error: '不支持的文件类型，仅支持 .txt / .md / .csv' }
-  }
-  let bytes: Buffer
-  let content: string
-  try {
-    bytes = await readFile(filePath)
-    const decoded = decodeTextBuffer(bytes)
-    assertTextIntegrity(decoded.info, basename(filePath))
-    content = decoded.text
-  } catch (err) {
-    return { ok: false, error: `无法读取文件：${(err as Error).message}` }
+  if (!isSupportedResourceFile(filePath)) {
+    return { ok: false, error: '涓嶆敮鎸佺殑鏂囦欢绫诲瀷锛屼粎鏀寔 .txt / .md / .csv / .doc / .docx' }
   }
   const name = basename(filePath)
-
-  // 查找是否已属于某项目（按同名资源匹配）
-  const projects = await listProjects()
-  for (const p of projects) {
-    if (p.status !== 'normal') continue
-    const resources = await listResources(p.id)
-    const existing = resources.find((r) => r.name === name)
-    if (existing) {
-      const res = await readResource(p.id, existing.id)
-      if (res.encoding.suspicious) {
-        await replaceResourceBytes(p.id, existing.id, bytes)
-        return { ok: true, projectId: p.id, resourceId: existing.id, name, content, created: false }
-      }
-      return { ok: true, projectId: p.id, resourceId: existing.id, name, content: res.content, created: false }
+  try {
+    const bytes = await readFile(filePath)
+    const converted = await convertResourceInput(name, bytes)
+    return {
+      ok: true,
+      name,
+      path: filePath,
+      content: converted.content,
+      data: new Uint8Array(bytes),
+      sourceFormat: converted.sourceFormat,
+      contentFormat: converted.contentFormat,
+      warnings: converted.warnings
     }
+  } catch (err) {
+    return { ok: false, error: `鏃犳硶璇诲彇鏂囦欢锛?{(err as Error).message}` }
   }
-
-  // 新建项目并作为资源导入
-  const base = name.replace(/\.[^.]+$/, '') || '导入文件'
-  const project = await createProject(base)
-  const resource = await uploadResourceBytes(project.id, name, bytes)
-  return { ok: true, projectId: project.id, resourceId: resource.id, name, content, created: true }
 }
 
 interface SnapshotFile {
@@ -661,8 +760,8 @@ interface SnapshotFile {
 }
 
 /**
- * 把资源内容以“上传时快照”写入对话内部（PRD 5.5 / 9.16）。
- * 历史会话引用该快照，后续修改/删除原资源不影响会话。
+ * 鎶婅祫婧愬唴瀹逛互鈥滀笂浼犳椂蹇収鈥濆啓鍏ュ璇濆唴閮紙PRD 5.5 / 9.16锛夈€?
+ * 鍘嗗彶浼氳瘽寮曠敤璇ュ揩鐓э紝鍚庣画淇敼/鍒犻櫎鍘熻祫婧愪笉褰卞搷浼氳瘽銆?
  */
 export async function attachResourceSnapshot(
   chatId: string,
@@ -701,10 +800,10 @@ export async function readSnapshot(projectId: string, chatId: string, snapshotId
 }
 
 // ---------------------------------------------------------------------------
-// 摘要读写
+// 鎽樿璇诲啓
 // ---------------------------------------------------------------------------
 
-/** 读取文档摘要；仅接受当前 schema，旧格式视为未生成。 */
+/** 璇诲彇鏂囨。鎽樿锛涗粎鎺ュ彈褰撳墠 schema锛屾棫鏍煎紡瑙嗕负鏈敓鎴愩€?*/
 export async function readDocSummary(projectId: string, docId: string): Promise<DocSummary | null> {
   const s = await readJson<DocSummary>(docSummaryPath(projectId, docId))
   if (!s || s.schemaVersion !== SUMMARY_SCHEMA_VERSION) return null
@@ -716,7 +815,7 @@ export async function writeDocSummary(projectId: string, docId: string, summary:
   await atomicWriteJson(docSummaryPath(projectId, docId), summary)
 }
 
-/** 读取对话摘要；旧格式（单标签版）视为无摘要，触发重新生成 */
+/** 璇诲彇瀵硅瘽鎽樿锛涙棫鏍煎紡锛堝崟鏍囩鐗堬級瑙嗕负鏃犳憳瑕侊紝瑙﹀彂閲嶆柊鐢熸垚 */
 export async function readChatSummary(projectId: string, chatId: string): Promise<ChatSummary | null> {
   const s = await readJson<ChatSummary>(chatSummaryPath(projectId, chatId))
   if (!s || !Array.isArray(s.items)) return null
@@ -773,7 +872,7 @@ export async function writeVectorIndex(projectId: string, index: VectorIndex): P
 }
 
 // ---------------------------------------------------------------------------
-// 工作区快照
+// 宸ヤ綔鍖哄揩鐓?
 // ---------------------------------------------------------------------------
 
 async function buildProjectTree(p: ProjectMeta): Promise<ProjectTree> {

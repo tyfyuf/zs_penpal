@@ -21,6 +21,7 @@ import {
   findDocMeta,
   getChat,
   importExternalFile,
+  importExternalResource,
   listResources,
   purgeChat,
   purgeDoc,
@@ -38,6 +39,7 @@ import {
   restoreDoc,
   restoreProject,
   saveDoc,
+  saveResourceText,
   updateChatContext,
   updateChatMeta,
   uploadResourceBytes
@@ -187,9 +189,19 @@ export function registerIpcHandlers(): void {
     return result
   })
   handle(IPC.resourceRead, (req) => readResource(req.projectId, req.resourceId))
-  handle(IPC.resourceReplace, async (req) => {
-    const result = await replaceResourceBytes(req.projectId, req.resourceId, req.data, req.encodingHint)
+  handle(IPC.resourceSaveText, async (req) => {
+    const result = await saveResourceText(req.projectId, req.resourceId, req.content)
     queueVectorSourceSync(req.projectId, req.resourceId, 'res')
+    return result
+  })
+  handle(IPC.resourceReplace, async (req) => {
+    const result = await replaceResourceBytes(req.projectId, req.resourceId, req.data, req.encodingHint, req.sourceName)
+    queueVectorSourceSync(req.projectId, req.resourceId, 'res')
+    return result
+  })
+  handle(IPC.resourceImportExternal, async (req) => {
+    const result = await importExternalResource(req.projectId, req.name, req.data, req.content, req.conflict)
+    queueVectorSourceSync(req.projectId, result.id, 'res')
     return result
   })
   handle(IPC.resourceDelete, async (req) => {
@@ -199,11 +211,7 @@ export function registerIpcHandlers(): void {
   })
   handle(IPC.resourceDistill, (req) => distillResourceInWorker(req.projectId, req.resourceId, req.type, req.force))
   handle(IPC.resourceUndistill, (req) => undistillResource(req.projectId, req.resourceId))
-  handle(IPC.fileOpenExternal, async (path) => {
-    const result = await importExternalFile(path)
-    if (result.ok && result.projectId && result.resourceId) queueVectorSourceSync(result.projectId, result.resourceId, 'res')
-    return result
-  })
+  handle(IPC.fileOpenExternal, (path) => importExternalFile(path))
 
   // AI
   handle(IPC.apiStreamChat, (req) => {

@@ -344,13 +344,14 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
         {distilledResources.length === 0 && <div className="text-[11px]" style={{ color: 'var(--muted)' }}>{t('summary.noResources')}</div>}
         {distilledResources.map((r) => {
           const progress = progressByKeyObject[`res:${r.resourceId}`]
+          const generating = r.generating || (!!progress && !isTerminalProgress(progress))
           const failed = progress?.phase === 'failed'
           return (
             <div key={r.resourceId} className="flex items-start gap-1 text-[12px]">
-              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: r.generating ? 'var(--warn)' : failed ? 'var(--danger)' : r.stale || r.incomplete ? 'var(--warn)' : 'var(--ok)' }} />
+              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: generating ? 'var(--warn)' : failed ? 'var(--danger)' : r.stale || r.incomplete ? 'var(--warn)' : 'var(--ok)' }} />
               <span className="min-w-0 flex-1" title={r.name}>
                 <span className="block truncate">{r.name}</span>
-                {r.generating ? (
+                {generating ? (
                   <span className="text-[10px]" style={{ color: 'var(--warn)' }}>{t('summary.generating')}</span>
                 ) : failed ? (
                   <span className="text-[10px]" style={{ color: 'var(--danger)' }}>{t('summary.progress.failed')}</span>
@@ -363,9 +364,9 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
                 )}
                 <MiniProgress progress={progress} t={t} />
               </span>
-              {!r.generating && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewResource(r.resourceId)} />}
-              {!r.generating && r.type && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.retryDistill')} disabled={busy} onClick={() => void regenResource(r.resourceId, r.type!)} />}
-              {!r.generating && (
+              {!generating && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewResource(r.resourceId)} />}
+              {!generating && r.type && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.retryDistill')} disabled={busy} onClick={() => void regenResource(r.resourceId, r.type!)} />}
+              {!generating && (
                 <IconBtn icon={<Trash2 size={12} />} title={t('summary.undistill')} onClick={() => void runUndistill(projectId, r.resourceId).then(load)} />
               )}
             </div>

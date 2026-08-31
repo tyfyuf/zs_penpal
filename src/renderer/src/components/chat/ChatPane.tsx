@@ -116,6 +116,8 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   const [disabledInjections, setDisabledInjections] = useState<string[]>([])
   /** 对话开始（首条消息）时冻结的激活注入键；此后新摘要默认关闭 */
   const [activeInjections, setActiveInjections] = useState<string[] | null>(null)
+  /** Dynamic summaries used by the latest answer; UI-only and never persisted into fixed active keys. */
+  const [dynamicInjections, setDynamicInjections] = useState<string[]>([])
   /** 对话开始后手动开启、尚未随消息使用的键（仍可自由关闭；发送消息后并入 active） */
   const [pendingEnabled, setPendingEnabled] = useState<string[]>([])
   /** 该对话默认激活的注入键（相关度采样结果，首条消息前的“默认开”） */
@@ -169,11 +171,16 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
     followBottomRef.current = true
     initialScrollDoneRef.current = false
     setHistoryLoaded(false)
+    setDynamicInjections([])
     setContextPanelDefaultCollapsed(true)
     void api.invoke('chat:get', chatId).then(({ chat, messages }) => {
       if (cancelled) return
       // Range controls should be visible for a new Context chat, but reopen compact once it has history.
       setContextPanelDefaultCollapsed(messages.length > 0)
+      const latestMemory = [...messages].reverse().find((message) => message.role === 'assistant')?.memory
+      setDynamicInjections((latestMemory?.small ?? [])
+        .map((item) => item.key)
+        .filter((key) => key.startsWith('doc:') || key.startsWith('chat:') || key.startsWith('res:') || key === 'fulltext'))
       setChat(chat)
       setMessages(messages)
       setHistoryLoaded(true)
@@ -271,6 +278,11 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
         pendingReasonRef.current = null
         pendingNewlyEnabledRef.current = []
         return
+      }
+      if (p.memory) {
+        setDynamicInjections((p.memory.small ?? [])
+          .map((item) => item.key)
+          .filter((key) => key.startsWith('doc:') || key.startsWith('chat:') || key.startsWith('res:') || key === 'fulltext'))
       }
       if (p.content) {
         const id = p.messageId ?? `a-${p.requestId}`
@@ -512,6 +524,19 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
     return items
   }, [chat, overview, config, t])
 
+  // The main list only shows active entries; inactive entries remain searchable for manual activation.
+  const visibleInjectionItems = useMemo(() => {
+    return injectionItems.filter((item) => {
+      if (started) {
+        return (activeInjections?.includes(item.key) ?? false)
+          || pendingEnabled.includes(item.key)
+          || dynamicInjections.includes(item.key)
+      }
+      return !disabledInjections.includes(item.key)
+        && ((defaultActive?.includes(item.key) ?? false) || pendingEnabled.includes(item.key))
+    })
+  }, [injectionItems, started, activeInjections, pendingEnabled, dynamicInjections, disabledInjections, defaultActive])
+
   // Repair legacy/corrupted started chats whose first-message freeze was lost.
   // `active: []` is valid; only an absent `active` field violates the state-machine invariant.
   useEffect(() => {
@@ -552,7 +577,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   function toggleInjection(key: string): void {
     if (streaming || titleGenerating) return
     if (started) {
-      const isActive = activeInjections?.includes(key) ?? false
+      const isActive = (activeInjections?.includes(key) ?? false) || dynamicInjections.includes(key)
       const isPending = pendingEnabled.includes(key)
       if (isActive) return // 已随消息使用的摘要：锁定，不能关闭
       if (isPending) {
@@ -974,11 +999,11 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
                 </div>
               )}
               <div className="max-h-40 space-y-0.5 overflow-y-auto">
-                {injectionItems.map((item) => {
+                {visibleInjectionItems.map((item) => {
                   const enabled = started
-                    ? (activeInjections?.includes(item.key) ?? false) || pendingEnabled.includes(item.key)
+                    ? (activeInjections?.includes(item.key) ?? false) || pendingEnabled.includes(item.key) || dynamicInjections.includes(item.key)
                     : !disabledInjections.includes(item.key) && ((defaultActive?.includes(item.key) ?? false) || pendingEnabled.includes(item.key))
-                  const locked = started && (activeInjections?.includes(item.key) ?? false)
+                  const locked = started && ((activeInjections?.includes(item.key) ?? false) || dynamicInjections.includes(item.key))
                   return (
                     <label
                       key={item.key}

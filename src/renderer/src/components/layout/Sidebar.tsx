@@ -22,6 +22,7 @@ import {
   X
 } from 'lucide-react'
 import type { ChatMeta, DocMeta, ProjectTree } from '@shared/types'
+import { RESOURCE_FILE_ACCEPT, isSupportedResourceFile } from '@shared/resource-formats'
 import { useAppStore } from '../../store/app.store'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
@@ -33,7 +34,6 @@ import type { ProjectSummariesOverview } from '@shared/types'
 import SummaryArea from './SummaryArea'
 import Modal from '../common/Modal'
 
-const ALLOWED_EXT = ['.txt', '.md', '.csv']
 const SIDEBAR_EXPANDED_STORAGE_KEY = 'vibewrite.sidebar.expanded'
 const SIDEBAR_WIDTH_STORAGE_KEY = 'vibewrite.sidebar.width'
 const DEFAULT_SIDEBAR_WIDTH = 260
@@ -168,6 +168,17 @@ export default function Sidebar(): JSX.Element {
   }, [workspace.projects])
 
   useEffect(() => {
+    const off = api.on('summary:status', (payload) => {
+      if (!payload.key.startsWith('res:')) return
+      setSummaryGeneratingResources((current) => ({
+        ...current,
+        [payload.key.slice(4)]: payload.generating
+      }))
+    })
+    return off
+  }, [])
+
+  useEffect(() => {
     try {
       localStorage.setItem(SIDEBAR_EXPANDED_STORAGE_KEY, JSON.stringify(expanded))
     } catch {
@@ -237,6 +248,7 @@ export default function Sidebar(): JSX.Element {
   const [previewRes, setPreviewRes] = useState<{ name: string; content: string } | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [summaryOverviews, setSummaryOverviews] = useState<Record<string, ProjectSummariesOverview>>({})
+  const [summaryGeneratingResources, setSummaryGeneratingResources] = useState<Record<string, boolean>>({})
   const [summaryPreview, setSummaryPreview] = useState<SummaryPreview | null>(null)
   const isOpen = (key: string, defaultOpen = false): boolean => autoExpanded[key] ?? expanded[key] ?? defaultOpen
   const toggle = (key: string, defaultOpen = false): void => {
@@ -427,8 +439,7 @@ export default function Sidebar(): JSX.Element {
     const projectId = uploadProject
     setUploadProject(null)
     if (!projectId) return
-    const ext = '.' + file.name.split('.').pop()?.toLowerCase()
-    if (!ALLOWED_EXT.includes(ext)) {
+    if (!isSupportedResourceFile(file.name)) {
       toast.error(t('sidebar.badExt'))
       return
     }
@@ -441,7 +452,17 @@ export default function Sidebar(): JSX.Element {
     }
   }
 
+  function isResourceGenerating(projectId: string, resourceId: string): boolean {
+    const eventState = summaryGeneratingResources[resourceId]
+    if (eventState !== undefined) return eventState
+    return summaryOverviews[projectId]?.resources.some((resource) => resource.resourceId === resourceId && resource.generating) ?? false
+  }
+
   async function deleteResource(projectId: string, resourceId: string): Promise<void> {
+    if (isResourceGenerating(projectId, resourceId)) {
+      toast.error(t('resource.distilling'))
+      return
+    }
     if (!(await confirmDialog(t('sidebar.confirmDeleteResource')))) return
     await api.invoke('resource:delete', { projectId, resourceId })
     await refresh()
@@ -495,7 +516,7 @@ export default function Sidebar(): JSX.Element {
       <input
         ref={fileInput}
         type="file"
-        accept=".txt,.md,.csv"
+        accept={RESOURCE_FILE_ACCEPT}
         className="hidden"
         onChange={(e) => {
           const f = e.target.files?.[0]
@@ -746,7 +767,9 @@ export default function Sidebar(): JSX.Element {
 
                   <Section label={t('sidebar.secResources')} open={isOpen(`${projectKey}:res`)} onToggle={() => toggle(`${projectKey}:res`)} onAdd={() => void uploadResource(p.project.id)}>
                     {isOpen(`${projectKey}:res`) &&
-                      p.resources.map((r) => (
+                      p.resources.map((r) => {
+                        const generating = isResourceGenerating(p.project.id, r.id)
+                        return (
                         <div key={r.id} className="group flex items-center gap-1 py-0.5 pl-6 pr-1 text-[13px] hover:bg-[var(--panel3)]">
                           <FileText size={13} style={{ color: 'var(--muted)' }} />
                           <span className="min-w-0 flex-1 cursor-pointer truncate" onClick={() => openResource(p.project.id, r.id, r.name)} title={r.name}>
@@ -765,11 +788,12 @@ export default function Sidebar(): JSX.Element {
                                 }
                               }}
                             />
-                            <IconButton icon={<FlaskConical size={12} />} title={t('sidebar.distill')} onClick={() => void runDistill(p.project.id, r.id)} />
-                            <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteResource(p.project.id, r.id)} />
+                            <IconButton icon={<FlaskConical size={12} />} title={generating ? t('resource.distilling') : t('sidebar.distill')} disabled={generating} onClick={() => void runDistill(p.project.id, r.id)} />
+                            <IconButton icon={<Trash2 size={12} />} title={generating ? t('resource.distilling') : t('sidebar.delete')} disabled={generating} onClick={() => void deleteResource(p.project.id, r.id)} />
                           </div>
                         </div>
-                      ))}
+                        )
+                      })}
                   </Section>
 
                   <Section label={t('sidebar.secSummary')} open={isOpen(`${projectKey}:summary`)} onToggle={() => toggle(`${projectKey}:summary`)}>

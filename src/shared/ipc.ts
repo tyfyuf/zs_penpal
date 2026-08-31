@@ -24,6 +24,7 @@ import type {
   ProjectMeta,
   ProjectSummariesOverview,
   RecoveryState,
+  ResourceImportConflict,
   ResourceMeta,
   ResourceDistillType,
   ResourceSummary,
@@ -124,7 +125,9 @@ export const IPC = {
   resourceList: 'resource:list',
   resourceUpload: 'resource:upload',
   resourceRead: 'resource:read',
+  resourceSaveText: 'resource:saveText',
   resourceReplace: 'resource:replace',
+  resourceImportExternal: 'resource:importExternal',
   resourceDelete: 'resource:delete',
   resourceDistill: 'resource:distill',
   resourceUndistill: 'resource:undistill',
@@ -216,10 +219,24 @@ export interface IpcApi {
   [IPC.resourceUpload]: { req: ResourceUploadInput; res: ResourceMeta }
   [IPC.resourceRead]: {
     req: { resourceId: string; projectId: string }
-    res: { content: string; name: string; encoding: TextEncodingInfo }
+    res: { content: string; name: string; encoding: TextEncodingInfo; meta: ResourceMeta }
+  }
+  [IPC.resourceSaveText]: {
+    req: { resourceId: string; projectId: string; content: string }
+    res: ResourceMeta
   }
   [IPC.resourceReplace]: {
-    req: { resourceId: string; projectId: string; data: Uint8Array; encodingHint?: string }
+    req: { resourceId: string; projectId: string; data: Uint8Array; encodingHint?: string; sourceName?: string }
+    res: ResourceMeta
+  }
+  [IPC.resourceImportExternal]: {
+    req: {
+      projectId: string
+      name: string
+      data: Uint8Array
+      content: string
+      conflict: ResourceImportConflict
+    }
     res: ResourceMeta
   }
   [IPC.resourceDelete]: { req: { resourceId: string; projectId: string }; res: void }

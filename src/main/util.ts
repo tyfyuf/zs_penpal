@@ -22,11 +22,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function atomicWriteRaw(filePath: string, content: string, encoding: BufferEncoding): Promise<void> {
+async function atomicWriteRaw(filePath: string, content: string | Uint8Array, encoding: BufferEncoding): Promise<void> {
   const dir = dirname(filePath)
   await mkdir(dir, { recursive: true })
   const tmp = `${filePath}.${newId()}.tmp`
-  await writeFile(tmp, content, { encoding })
+  await writeFile(tmp, content, typeof content === 'string' ? { encoding } : undefined)
   try {
     await rename(tmp, filePath)
   } catch (err) {
@@ -35,7 +35,7 @@ async function atomicWriteRaw(filePath: string, content: string, encoding: Buffe
   }
 }
 
-export async function atomicWrite(filePath: string, content: string, encoding: BufferEncoding = 'utf8'): Promise<void> {
+export async function atomicWrite(filePath: string, content: string | Uint8Array, encoding: BufferEncoding = 'utf8'): Promise<void> {
   // 同一文件串行写入
   const prev = writeQueues.get(filePath) ?? Promise.resolve()
   const next = prev.then(async () => {

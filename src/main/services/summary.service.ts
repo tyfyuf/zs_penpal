@@ -1238,6 +1238,9 @@ async function distillResourceInner(
 }
 
 export async function undistillResource(projectId: string, resourceId: string): Promise<void> {
+  if (isSummaryGenerating(`res:${resourceId}`)) {
+    throw new Error('资源正在蒸馏，暂不可编辑，请等待蒸馏完成后再操作')
+  }
   await removeResourceSummary(projectId, resourceId)
 }
 
@@ -1246,8 +1249,9 @@ export async function checkResourceSummaryStale(projectId: string, resourceId: s
   const s = await readResourceSummary(projectId, resourceId)
   if (!s) return false
   try {
-    const { content, encoding } = await readResource(projectId, resourceId)
+    const { content, encoding, meta } = await readResource(projectId, resourceId)
     if (encoding.suspicious) return true
+    if (meta.contentEditedAt && (!s.updatedAt || meta.contentEditedAt > s.updatedAt)) return true
     return isSourceStale(s, content)
   } catch {
     return false

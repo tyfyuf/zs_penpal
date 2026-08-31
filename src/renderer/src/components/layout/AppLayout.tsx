@@ -5,6 +5,7 @@ import EditorPane from '../editor/EditorPane'
 import ChatPane from '../chat/ChatPane'
 import SettingsPane from '../settings/SettingsPane'
 import ResourceViewer from '../ResourceViewer'
+import ExternalResourceViewer from '../ExternalResourceViewer'
 
 function renderActiveTab(tab: Tab): JSX.Element | null {
   switch (tab.kind) {
@@ -14,6 +15,8 @@ function renderActiveTab(tab: Tab): JSX.Element | null {
       return <SettingsPane />
     case 'resource':
       return <ResourceViewer key={tab.id} tab={tab} />
+    case 'external-resource':
+      return <ExternalResourceViewer key={tab.id} tab={tab} />
     default:
       return null
   }

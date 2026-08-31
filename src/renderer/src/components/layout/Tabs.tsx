@@ -13,11 +13,18 @@ export default function Tabs(): JSX.Element {
   const closeTab = useAppStore((s) => s.closeTab)
 
   async function handleClose(tab: (typeof tabs)[number]): Promise<void> {
-    const isDirty = tab.kind === 'doc' && tab.refId && dirty[tab.refId]
-    if (isDirty && tab.refId) {
+    const dirtyKey = tab.kind === 'external-resource' ? tab.id : tab.refId
+    const isDirty = Boolean(dirtyKey && dirty[dirtyKey])
+    if (isDirty && tab.kind === 'external-resource') {
+      const discard = await confirmDialog(t('tabs.externalUnsavedClose'))
+      if (!discard) return
+      closeTab(tab.id)
+      return
+    }
+    if (isDirty && dirtyKey && (tab.kind === 'doc' || tab.kind === 'resource')) {
       const save = await confirmDialog(t('tabs.unsavedClose'))
       if (save) {
-        void flushDoc(tab.refId).then(() => closeTab(tab.id))
+        void flushDoc(dirtyKey).then(() => closeTab(tab.id))
         return
       }
     }
@@ -30,7 +37,8 @@ export default function Tabs(): JSX.Element {
     <div className="flex items-end overflow-x-auto" style={{ height: 38, background: 'var(--panel)', borderBottom: '1px solid var(--border)' }}>
       {tabs.map((t) => {
         const isActive = t.id === activeTabId
-        const isDirty = t.kind === 'doc' && t.refId && dirty[t.refId]
+        const dirtyKey = t.kind === 'external-resource' ? t.id : t.refId
+        const isDirty = Boolean(dirtyKey && dirty[dirtyKey])
         return (
           <div
             key={t.id}

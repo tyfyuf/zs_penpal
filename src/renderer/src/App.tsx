@@ -53,17 +53,12 @@ export default function App(): JSX.Element {
 
   async function handleExternalFile(path: string): Promise<void> {
     const res = await api.invoke('file:openExternal', path)
-    const { refreshWorkspace, openResource } = useAppStore.getState()
-    await refreshWorkspace()
     if (!res.ok) {
       toast.error(res.error ?? '无法打开文件')
       return
     }
-    if (res.created) toast.success(`已创建项目并导入资源：${res.name}`)
-    else toast.info(`已在项目中打开资源：${res.name}`)
-    if (res.projectId && res.resourceId && res.name) {
-      openResource(res.projectId, res.resourceId, res.name)
-    }
+    useAppStore.getState().openExternalResource(res)
+    toast.info(`已临时打开外部文件：${res.name}`)
   }
 
   async function confirmRecovery(restore: boolean): Promise<void> {

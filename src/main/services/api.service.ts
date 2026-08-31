@@ -23,7 +23,13 @@ import { EVENTS } from '@shared/ipc'
 import { loadApiSettings, type ApiSettings } from './api-settings'
 import { loadConfig } from './config.service'
 import { estimateTokens } from './tokenizer'
-import { collectApplicableKeys, computeActiveKeys, selectDefaultKeys } from '../summary-relevance'
+import {
+  collectApplicableKeys,
+  computeActiveKeys,
+  selectDefaultKeys,
+  selectDynamicKeys,
+  updateChatRelevanceLearning
+} from '../summary-relevance'
 import {
   buildChatSummaryBlock,
   buildDocSummaryBlock,
@@ -54,7 +60,8 @@ import {
   readResourceSummary,
   readSnapshot,
   renameChat,
-  replaceLastAssistantMessage
+  replaceLastAssistantMessage,
+  updateChatMeta
 } from './file.service'
 import { newId, nowIso } from '../util'
 import { analyzeTextIntegrity } from './text-decoding.service'
@@ -1166,8 +1173,9 @@ async function buildMessages(
   const settings = await loadApiSettings()
   const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
   const applicable = collectApplicableKeys(chat, cfg, tree)
-  const defaultSelected = await selectDefaultKeys(chat, applicable)
-  const activeKeys = computeActiveKeys(chat, applicable, defaultSelected)
+  const defaultSelected = await selectDefaultKeys(chat, applicable, tree)
+  const dynamicSelected = await selectDynamicKeys(chat, applicable, tree, defaultSelected)
+  const activeKeys = computeActiveKeys(chat, applicable, defaultSelected, dynamicSelected)
   const lang = cfg.language ?? 'zh'
   const en = lang === 'en'
 
@@ -1306,6 +1314,32 @@ async function buildMessages(
 /**
  * 任何异常都必须广播 stream:done（带 error），保证渲染层不会卡在“输入中”。
  */
+async function learnConversationRelevance(
+  chatId: string,
+  history: ChatMessage[],
+  userText: string,
+  attachments: ChatAttachment[] | undefined,
+  assistantText: string
+): Promise<void> {
+  const userCount = history.filter((message) => message.role === 'user').length
+  const assistantCount = history.filter((message) => message.role === 'assistant').length + 1
+  const completedRounds = Math.min(userCount, assistantCount)
+  const attachedNames = (attachments ?? []).map((attachment) => attachment.name).filter(Boolean)
+  const learningUserText = [userText, ...attachedNames].join('\n')
+  try {
+    const { chat: latestChat } = await getChat(chatId)
+    const learning = updateChatRelevanceLearning(
+      latestChat.summaryLearning,
+      learningUserText,
+      assistantText,
+      Math.max(latestChat.summaryLearning?.completedRounds ?? 0, completedRounds)
+    )
+    await updateChatMeta(chatId, { summaryLearning: learning })
+  } catch {
+    // Relevance learning is an optional optimization and must never fail a chat turn.
+  }
+}
+
 export async function streamChat(req: StreamRequest): Promise<void> {
   try {
     await streamChatInner(req)
@@ -1529,6 +1563,11 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
         memory: prepared.memory
       })
     }
+  }
+
+  if (!failed && !req.regenerate && acc.length > 0) {
+    const currentUser = historyForPrompt.find((message) => message.id === req.userMessageId)
+    await learnConversationRelevance(req.chatId, historyForPrompt, req.userText, currentUser?.attachments, acc)
   }
 
   if (usage) await recordUsage(usage, 'chat')

@@ -4,7 +4,7 @@
 > 产品需求：`writing-agent-prd-v1.3.md`；技术选型：`writing-agent-tech-stack-v1.0.md`；
 > 拆解指导（需求参考，非运行时）：`拆解指导文档/story-decomposition-guide.md`、`content-decomposition-guide-v1.0.md`。
 > 架构定稿：`docs/summary-distillation-refactor-plan-v2.md`（三层记忆架构，已按此实施）。
-> **Current baseline (2026-08-22)**: branch `codex/setting-distillation-v2` keeps Setting-v2 active. Story and Other use the legacy hierarchical path; Story omits the `foreshadowing` field and uses name-only knowledge validation. Job/Worker isolation and visual progress are not implemented.
+> **Current baseline (2026-08-30)**: branch `codex/setting-distillation-v2`; latest committed baseline is `99a2fc8 feat: add context action icons and resizable sidebar`. Setting-v2 remains active; Story and Other use the legacy hierarchical path, with Story omitting `foreshadowing` and using name-only validation. Summary/distillation jobs run in an Electron `utilityProcess` worker and publish visual progress. The working tree currently contains the approved DOC/DOCX import, editable-resource, external-resource upload, and Windows executable metadata implementation; it is intentionally uncommitted pending user acceptance.
 
 ---
 
@@ -35,6 +35,8 @@
 | Git | 系统 Git + simple-git | git 2.55.0（系统）/ simple-git 3.36.0 |
 | Tokenizer | js-tiktoken（纯 JS 版） | 1.0.21 |
 | Zip 导出 | archiver | 7.0.1 |
+| Word 资源转换 | Mammoth + Turndown/GFM + word-extractor | mammoth 1.12.2 / turndown 7.2.4 / turndown-plugin-gfm 1.0.2 / word-extractor 1.0.4 |
+| Windows EXE 元数据 | rcedit | 5.0.1（`afterPack` 阶段写入 Penpal 产品信息） |
 | 图表 | Recharts | 2.15.4 |
 | 图标 | lucide-react | 0.454.0 |
 | 日期 | date-fns | 4.4.0 |
@@ -108,6 +110,7 @@ D:\ds h-project\
 ├─ BAAI--bge-small-zh-v1.5/   # 用户提供的本地嵌入模型（PyTorch 权重，**gitignore**，见 §6.1）
 ├─ models/              # ONNX 转换输出目录（gitignore，转换脚本生成后使用）
 ├─ scripts/convert_bge_onnx.py  # 一次性 PyTorch→ONNX 转换脚本（需 Python）
+├─ scripts/after-pack.cjs        # Windows 打包后用 rcedit 写入 Penpal EXE 版本/产品元数据
 ├─ docs/summary-distillation-refactor-plan-v2.md  # 三层记忆架构定稿（实施依据）
 ├─ 拆解指导文档/          # 两份拆解指导（需求参考，不参与运行）
 ├─ out/                  # electron-vite 构建产物（gitignore）
@@ -221,17 +224,18 @@ export interface ChatMeta {
 
 ## 5. 已完成功能清单
 
-- [x] 单实例 + 文件关联（第二实例转交路径，非 `.txt/.md/.csv` 拒绝）
-- [x] 文件化存储（JSON/JSONL/Markdown，原子写入，元数据驱动生命周期）
+- [x] 单实例 + 文件关联（第二实例转交路径；支持 `.txt/.md/.csv/.doc/.docx`，其他格式拒绝）
+- [x] 文件化存储（JSON/JSONL/Markdown，原子写入，元数据驱动生命周期；资源保留 `source.bin` 原始字节并以 `content` 保存统一 UTF-8 文本）
 - [x] 项目/文档/对话/资源 CRUD 与软删除状态机（回收站/归档区/孤儿对话/恢复冲突改名）
-- [x] 编辑器（CodeMirror 6：行号/字号/暗色/选区高亮/复制剪切粘贴右键菜单/边界钳制/自动保存/CRLF 保留）
+- [x] 写作文档编辑器（CodeMirror 6：行号/字号/暗色/选区高亮/复制剪切粘贴右键菜单/边界钳制/自动保存/CRLF 保留/居中/首行缩进/字符统计）
+- [x] 资源编辑器（CodeMirror 6：延迟自动保存、`Ctrl+S`/按钮保存、dirty/关闭前 flush、字符统计、重新导入；保存后使旧摘要失效并排队同步向量索引）
 - [x] 右键「诊断/走向/优化」→ 创建上下文对话（默认标题“新对话”+ action 图标徽标）
 - [x] 上下文面板（前后文滑块+数字输入，固定在对话顶部，只可扩大下限持久化）
 - [x] 流式对话（OpenAI 兼容、include_usage、取消、失败提示、思维链 reasoning 可视化）
 - [x] 重新生成（范围/摘要变化联动提示，不重复调用，上一版对照，告知 LLM 新增上下文）
 - [x] **三层记忆架构（docs/summary-distillation-refactor-plan-v2.md 定稿）**：
   - [x] P0 Summary metadata: SummarySourceInfo source fingerprints + freshness levels; DocSummary no longer embeds full snapshots (legacy formats are treated as absent); resource summaries use lazy stale detection + a stale indicator.
-  - [x] P3 Generation protocol: enum/length/negative constraints + schema v2 token-aware chunking, knowledge verification, hierarchical merge, incomplete checkpoint and retry; document/resource paths support unchanged-chunk reuse. Resource distillation remains a synchronous main-process IPC operation in this baseline.
+  - [x] P3 Generation protocol: enum/length/negative constraints + schema v2 token-aware chunking, knowledge verification, hierarchical merge, incomplete checkpoint and retry; document/resource paths support unchanged-chunk reuse. Document/chat/resource/rollup summary jobs are dispatched through an Electron `utilityProcess` worker, deduplicated by job key, and report phase/item progress to the renderer.
   - [x] P1′ 注入：**内容相关度采样**（实体重叠+新鲜度，每类型默认最相关 10 条，替代“全部注入”）；默认激活集（`summary:defaultActive`）；注入面板**搜索框**（`summary:search` 手动激活）；首条消息冻结 = (默认采样 ∪ pending) − disabled
   - [x] P2′ 大摘要 rollup：写作文档 >50 时每 10 篇聚合成整体摘要（状态变化/因果/伏笔账本），设置页按项目管理（预览/单条重生成/无移除），三级新鲜度
   - [x] P2′ 聊天小摘要增量：尾部窗口 20 条逐条 + 历史区间压缩（触发：消息数 >40 或对话 token 估算 >60% 预算），每 10 条一个压缩区间，增量维护
@@ -244,7 +248,8 @@ export interface ChatMeta {
   - [x] 附件去重：写作文档“附加到对话”（读当前内容）+ 与全文注入去重（`ChatAttachment.docId` / `StreamRequest.docIds`，“关联文档全文已打开，无需上传”提示）
 - [x] 文档摘要 = 故事拆解（预算 60% 一次调用，超限拒绝提示；黄点生成中→绿点；失败写日志）
 - [x] 对话摘要（关闭窗口后台生成，逐条+区间、变化检测、手动重新生成）
-- [x] 资源蒸馏（启发式预筛+模型判定+置信度 0.8 兜底+不确定确认+force；`story/setting/other`；token-aware 分块、知识抽取/原文验证、分层合并、源指纹与未完成状态）——当前仍在主进程同步执行
+- [x] 摘要/蒸馏后台化与可视化进度（`summary-job-manager.ts` + `summary-worker.ts`；独立 `utilityProcess`、同键任务去重、退出等待/超时终止、阶段/块/角色进度事件和摘要区进度条）
+- [x] 资源蒸馏（启发式预筛+模型判定+置信度 0.8 兜底+不确定确认+force；`story/setting/other`；token-aware 分块、知识抽取/原文验证、分层合并、源指纹与未完成状态）——由摘要 worker 后台执行
 - [x] 注入配置（设置页按对话类型勾选）+ 每对话开关面板（冻结/锁定/pending 机制）
 - [x] Token 用量（按月/按小时/lifetime，总消耗+摘要标题两条折线；标题生成计入 summary 来源）
 - [x] Git 版本管理（每项目一仓库、自动提交、版本历史、回滚、身份自动补齐、手动提交按钮）
@@ -309,14 +314,24 @@ export interface ChatMeta {
 - **Root cause:** the old renderer used `File.text()`, which always decodes external files as UTF-8. GBK/GB18030, Big5 and UTF-16 files therefore acquired `U+FFFD` replacement characters before workspace persistence; summaries, distillation and indexes subsequently only received corrupted text.
 - **Import path:** renderer resource/local-attachment upload now sends `Uint8Array`; file-association import also reads bytes. `text-decoding.service.ts` applies BOM detection, strict UTF-8 validation, then `chardet` + `iconv-lite` decoding. Internal `content` is stored as UTF-8 while original bytes are retained in `source.bin` with detected encoding metadata.
 - **Isolation:** replacement characters, NUL/control characters and common mojibake patterns mark a resource as suspicious. It is rejected for distillation and chat snapshots, skipped by summary injection/default selection/search and vector indexing, and cannot block an entire chat or index build. Vector-index schema v3 forces old corrupt chunks out during rebuild; Settings reports the file as `encoding-error`.
-- **Repair:** Resource Viewer warns that the legacy content is excluded, and offers re-import of the original `.txt/.md/.csv`; repair removes the old resource summary and invalidates the index. Persisted `U+FFFD` content cannot be recovered by reverse decoding because its original bytes were already lost: the user must choose the source file again.
+- **Repair:** Resource Viewer warns that the legacy content is excluded, and offers re-import of the original `.txt/.md/.csv/.doc/.docx`; repair removes the old resource summary and invalidates the index. Persisted `U+FFFD` content cannot be recovered by reverse decoding because its original bytes were already lost: the user must choose the source file again.
 - **Verified:** UTF-8, GB18030, Big5, Shift-JIS and BOM UTF-16LE decoding; corruption guard; `npm run typecheck`; `npm run build`.
 - **Known conservative boundary:** automatic detection is reliable for normal/long text samples, but a very short non-UTF-8 file can have low confidence. A future optional encoding picker in the re-import flow can address such cases without allowing suspicious text into LLM/context/index paths.
 
-### 6.4 其他待办（原有）
+### 6.4.2 Word 资源、资源编辑与外部文件导入（已实施，待用户真实文件验收）
+
+- **统一格式**：资源入口统一接受 `.txt/.md/.csv/.doc/.docx`。DOCX 使用 Mammoth 转 HTML，再由 Turndown + GFM 转为 Markdown 式统一文本；补充自定义 Word 表格规则，图片用 `[图片]` 占位。旧 `.doc` 使用 `word-extractor` 提取正文/脚注/尾注并按纯文本处理。
+- **存储模型**：`resources/<resourceId>/source.bin` 保留原始上传字节，`content` 保存供摘要、蒸馏、搜索、向量索引和对话附件使用的 UTF-8 统一文本；`meta.json` 记录 `sourceFormat/contentFormat/conversionWarnings/contentEditedAt/updatedAt`。新建资源按 `source.bin → content → meta.json` 原子发布。
+- **可编辑资源**：Resource Viewer 改为 CodeMirror 文本编辑器，支持自动保存、`Ctrl+S`、按钮保存、dirty/关闭前 flush、字符统计和重新导入。编辑只改 `content`，不覆盖 `source.bin`；保存/覆盖/重新导入会删除旧资源摘要、清理 setting-v2 checkpoint 并排队同步向量索引。
+- **外部文件**：Windows 文件关联打开后先显示可编辑的临时副本，不自动创建项目，也不修改磁盘原文件。用户可从自定义项目选择框上传到任意正常项目；同名时支持覆盖、自动加序号或取消。上传成功后当前临时标签原地提升为正式资源标签。
+- **IPC**：新增 `resource:saveText`、`resource:importExternal`；`resource:read` 返回资源元数据；`resource:replace` 接受 `sourceName`。上传入口和对话本地附件共用 `src/shared/resource-formats.ts` 的格式白名单。
+- **Windows 品牌**：`productName/executableName` 为 Penpal，关联 `.doc/.docx`；`scripts/after-pack.cjs` 用 `rcedit` 写入 ProductName、FileDescription、OriginalFilename、InternalName、CompanyName 和版本号，修复“打开方式”显示 `electron`。保留 `appId: com.vibewrite.app`、包名 `writing-agent`、旧 userData 目录和 localStorage 键，避免用户数据迁移。
+- **打包边界**：electron-builder 自带的 winCodeSign 压缩包在当前 Windows 权限下因 macOS 符号链接无法解压，故使用 `signAndEditExecutable=false` + `afterPack/rcedit`。已验证 `dist/win-unpacked/Penpal.exe` 与 `dist/Penpal Setup 1.3.0.exe` 可生成，转换依赖存在于 app.asar。
+
+### 6.4.3 其他待办（原有）
 
 1. **应用图标**：当前用默认 Electron 图标；在 `build/icon.ico` 放置图标并在 `electron-builder.yml` 配置。
-2. **代码签名**：`win.signAndEditExecutable=false`；有证书后恢复并配置 `CSC_LINK`。
+2. **代码签名**：当前无证书；`win.signAndEditExecutable=false`，产品元数据由 `afterPack` + `rcedit` 写入。后续有证书时单独配置签名流程与 `CSC_LINK`，不要移除现有元数据步骤。
 3. **主进程错误文案英文化**：i18n 只覆盖界面；主进程错误仍为中文（用户知情并接受）。
 4. **多模型支持**：PRD 限定单模型；已预留扩展点 `summary.modelOverride`。
 5. （可选）非推理模型的“提示式思考”开关（当前 CoT 仅展示模型原生 reasoning_content）。
@@ -325,8 +340,7 @@ export interface ChatMeta {
 
 - **向量索引异步同步的可见延迟**：保存/删除/恢复会排队单源同步或移除，设置页可显示 stale/not-indexed 并手动触发；队列失败不会阻断编辑，但需要通过索引日志或再次操作恢复。
 - **大摘要规划仍可能增加一次 LLM 调用**：仅在摘要开启、非重新生成且项目存在 rollup 时执行 provider-neutral 结构化任务；无 rollup 时零调用。
-- **setting-v2 仍运行在主进程**：当前 `resource:distill` 仍是同步 IPC；虽然 LLM 任务已拆分并引入受控并发，但 Job/Worker 隔离、退出恢复和主进程防阻塞尚未实现。
-- **尚无生成可视化进度条**：当前 UI 仍只有 `markGenerating/markDone` 的生成中/完成状态；checkpoint 已具备任务级状态基础，但没有向 renderer 广播块/角色/归并阶段进度。
+- **摘要 worker 退出边界**：正常退出最多等待活动摘要任务 8 秒；未排空时终止 worker。已完成结果和 setting checkpoint 会保留，但尚未实现跨应用重启后自动续跑整个活动队列。
 - **真实端点仍可能暴露新的限制**：setting-v2 已针对截断、无效 JSON、上下文溢出、429 和失败任务复用设计恢复路径，但不同 Provider 的真实输出上限、错误文案和 reasoning 行为仍需 2–3 万字复杂设定回归验证。
 - **中文模型 token 估算为近似**：DeepSeek/GLM/Qwen 按 ~1.1 token/字（`estimateInputTokens`），可能边界误判。
 - **Legacy summary formats**: three-field, single-tag, and v1 snapshot formats are discarded as invalid; v2 reads require knowledge, generation, and chunkResults. No migration or automatic rebuild is performed; users regenerate manually (file.service.ts).
@@ -402,7 +416,7 @@ Setting-v2 writes an independent sidecar checkpoint and publishes only after req
 - 源指纹：`src/main/summary-source.ts`（`computeSourceInfo`/`isSourceStale`；三级新鲜度信号）。
 - 原子写：`util.ts atomicWrite`（临时文件+rename+EPERM 退避+按文件串行队列）。
 - 单实例/文件关联：`main/index.ts`。
-- 退出流程：`before-quit` → `flushRenderer` → `commitAllProjects` → `waitForSummaryQueue(8000)` → `clearRecovery` → `app.exit(0)`。
+- 退出流程：`before-quit` → `flushRenderer` → `commitAllProjects` → `shutdownSummaryJobManager(8000)` → `disposeNeuralEmbedder` → `clearRecovery` → `app.exit(0)`。
 - Git 身份：`git.service.ts ensureCommitIdentity`（应用配置优先，缺失写仓库级默认 Penpal）。
 - 摘要生成状态：`markGenerating/markDone` → 广播 `summary:status` → 黄点/绿点。
 - 生命周期：元数据 `status` 字段驱动，物理删除仅在 purge。
@@ -433,7 +447,7 @@ Setting-v2 writes an independent sidecar checkpoint and publishes only after req
 | --- | --- | --- |
 | 本地嵌入真实语料验收 | BGE/回退/打包链路已接通并通过隔离烟测 | 用实际小说项目比较语义命中；据结果决定是否调分块、查询指令、阈值或模型 |
 | setting-v2 真实语料与多 Provider 验收 | 三角色提取、分支归并、总览拆分、checkpoint 和 429 收缩已实现；精简协议第一阶段已接入 | 先用现有 5000 字/2 万字样本验证摘要体积、字段归属和原文复用率，再决定是否实施跨字段质量门及 timeout 拆分 |
-| 蒸馏后台化与进度可视化 | setting-v2 仍由主进程同步 IPC 编排；checkpoint 已提供任务级状态 | 后续设计 Job/Worker 隔离、退出恢复、取消语义和阶段/块/角色进度事件；本轮不实现 |
+| DOC/DOCX 真实文件兼容验收 | DOCX 转换、旧 DOC 纯文本提取、资源编辑与外部导入链路已实现并通过样本烟测 | 用用户真实 Word 文件验证复杂表格、脚注、图片、密码保护、损坏文件和旧版 `.doc`；根据结果只修兼容缺口，不引入排版编辑器 |
 | 向量索引自动刷新 | 已有源指纹、逐文件状态和手动重建；正文修改可显示 stale | 增加保存后增量/防抖重建 |
 | 无应用图标 / 无签名 | 默认图标；`signAndEditExecutable=false` | 图标与证书就绪后补齐 |
 | 主进程错误文案中文 | 界面 i18n 完成 | 计划在语言设置完善时统一 |
@@ -454,7 +468,7 @@ Setting-v2 writes an independent sidecar checkpoint and publishes only after req
 
 1. **文档驱动开发**：PRD（806 行）+ 技术栈文档先行；需求变更先“报根因+边界问题”再动手；三层记忆架构有定稿文档（`docs/summary-distillation-refactor-plan-v2.md`），按 P0→P7 分期实施，每期类型检查+构建验证。
 2. **对标研究驱动重构**：精读 OpenFic（会话压缩/区间摘要/惰性失效/分层注入）与 NeuroBook（事件溯源/分层记忆/矛盾规则化）源码，提取为改进方案；研究仓库在 `research/`（**已 gitignore，不入库**）。
-3. **受限网络/沙箱环境作战手册**：npmmirror 镜像、`electron_config_cache` 重定向、`--foreground-scripts`、构建提权跑 esbuild、关闭签名绕 winCodeSign 问题；**模型权重类资产在沙箱内无法获取，需用户机器配合**。
+3. **受限网络/沙箱环境作战手册**：npmmirror 镜像、`electron_config_cache` 重定向、`--foreground-scripts`、构建提权跑 esbuild；electron-builder 的 winCodeSign 压缩包在无符号链接权限的 Windows 环境会解压失败，因此使用 `signAndEditExecutable=false` + `afterPack/rcedit` 写 EXE 元数据；**模型权重类资产在沙箱内无法获取，需用户机器配合**。
 4. **Electron 踩坑清单**：渲染层 `window.prompt` 不支持；`simple-git customBinary` 开 `unsafe.allowUnsafeCustomBinary`；空仓库 `git log` 需捕获；`fs.rename` 覆盖目录 EPERM；dev 主进程改动必须重启；`safeStorage` 存 Key；**原生/WASM 依赖（onnxruntime）不能直接打包，需外部化或走 WASM**。
 5. **隐私打包红线**：应用代码使用 builder 白名单，生产依赖由 builder 收集；模型只通过 `extraResources` 分发。打包后核验 asar/resources 无用户数据，模型/缓存/复现文档一律 gitignore。
 6. **LLM 工程技巧**：OpenAI-compatible 不是统一能力契约；结构化任务应通过 capability profile + provider adapter 选择 JSON Schema/JSON mode/prompt-only、reasoning 与 token 参数。摘要请求现在共享最大并发 3：setting 块内角色并发，旧路径保持串行；429 后动态收缩。复杂大 JSON 应按语义角色、归并分支和总览任务拆开，截断/上下文溢出必须拆输入或拆任务，不得靠补括号、减少条目或 compact 内容冒充完整结果。
@@ -471,28 +485,31 @@ Setting-v2 writes an independent sidecar checkpoint and publishes only after req
 
 ```text
 branch: codex/setting-distillation-v2
-implementation: feat: add resilient setting distillation pipeline
-parent baseline: 8374d8a docs: update project handoff for 193f6a8 baseline
-working tree: 本实现提交后应为 clean
+latest committed baseline: 99a2fc8 feat: add context action icons and resizable sidebar
+working tree: DOC/DOCX 转换、资源编辑、外部文件临时打开/上传和 Windows EXE 元数据实现尚未提交，等待用户测试
+untracked user/test fixtures: `.tmp-*`、`settings/`，不得纳入提交
 ```
 
-当前历史中与本次交接最相关的提交（从新到旧；setting-v2 的准确提交哈希以实际 `git log` 为准）：
+当前历史中与本次交接最相关的提交（从新到旧）：
 
 ```
-feat: add resilient setting distillation pipeline
+99a2fc8 feat: add context action icons and resizable sidebar
+a4ffa0c feat: finalize Penpal model compatibility and title generation
+4b2e236 feat: compact context range panel
+93b2a25 feat: add editor formatting and character stats
+a2efc4d feat: add cross-project sidebar search
+048a580 feat: highlight active sidebar item
+64d01b6 feat: improve summary workflow and sidebar navigation
+c88bf11 fix: harden Responses API stream compatibility
+98f5cc1 fix: request and preserve Responses reasoning summaries
+8aa4b36 feat: support Responses API chat streaming
+75b7037 fix: normalize structured reasoning controls
+2e38d3c feat: add Responses API structured generation adapter
+216aa6d fix: replay reasoning content for thinking models
+27a7ebd feat: add resilient setting distillation pipeline
 8374d8a docs: update project handoff for 193f6a8 baseline
-193f6a8 feat: add verified hierarchical resource distillation
-6f4a3bf fix: preserve chat state across tab switches
-8a39ac3 fix: restore chat auto scroll
-186b4bd fix: restore visible chat streaming and memory cards
-4302af8 fix: harden LLM tool-call streaming
-83059d2 fix: decode legacy text encodings before indexing
-8887558 feat: make project retrieval host-driven with tool fallback
-62ccb0c feat: expose vector index and retrieval traces
-61eebf7 feat: bundle local neural embeddings
-1b235ef fix: harden summary structured generation
 ```
 
-> **Scope record**: this round keeps Setting-v2 semantic splitting, concurrency, recursive recovery, and sidecar checkpoint; Story is restored to the legacy hierarchical path with no `foreshadowing` field and name-only knowledge validation. Job/Worker, background IPC, and progress UI remain out of scope.
+> **Current implementation record (2026-08-30)**: Setting-v2 semantic splitting, concurrency, recursive recovery and checkpoint remain unchanged; Story stays on the legacy hierarchical path without `foreshadowing` and with name-only validation. Job/Worker background IPC and progress UI are already implemented. The present uncommitted round adds Word-resource conversion/editing/import and Windows branding hardening only.
 
-> **交接提醒**：新会话第一步读取本文件，并运行 `git status --short` 与 `git log --oneline -15`。若要继续本轮工作，优先用真实 2–3 万字复杂设定验证输出完整性、失败块复用和多 Provider 行为；后台化/进度条是后续独立阶段，不要与本轮 setting 协议一起重做。
+> **交接提醒**：新会话第一步读取本文件，并运行 `git status --short` 与 `git log --oneline -15`。若继续当前工作，先保留用户已有 `.tmp-*` 与 `settings/` 测试资料不动，完成 DOC/DOCX/资源编辑/外部导入的人工验收；用户明确“测试通过，可以提交”前不要提交。

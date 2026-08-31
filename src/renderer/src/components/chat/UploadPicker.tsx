@@ -1,6 +1,7 @@
 import { useRef } from 'react'
 import { FileText, Upload } from 'lucide-react'
 import type { UploadResult } from '@shared/types'
+import { RESOURCE_FILE_ACCEPT, isSupportedResourceFile } from '@shared/resource-formats'
 import { useAppStore } from '../../store/app.store'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
@@ -14,7 +15,6 @@ interface Props {
   onClose: () => void
 }
 
-const ALLOWED_EXT = ['.txt', '.md', '.csv']
 
 export default function UploadPicker({ chatId, projectId, onAttached, onClose }: Props): JSX.Element {
   const t = useT()
@@ -32,8 +32,7 @@ export default function UploadPicker({ chatId, projectId, onAttached, onClose }:
   }
 
   async function attachLocal(file: File): Promise<void> {
-    const ext = '.' + file.name.split('.').pop()?.toLowerCase()
-    if (!ALLOWED_EXT.includes(ext)) {
+    if (!isSupportedResourceFile(file.name)) {
       toast.error(t('sidebar.badExt'))
       return
     }
@@ -60,7 +59,7 @@ export default function UploadPicker({ chatId, projectId, onAttached, onClose }:
       <input
         ref={fileInput}
         type="file"
-        accept=".txt,.md,.csv"
+        accept={RESOURCE_FILE_ACCEPT}
         className="hidden"
         onChange={(e) => {
           const f = e.target.files?.[0]
