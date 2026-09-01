@@ -10,6 +10,9 @@ module.exports = async function afterPack(context) {
   const { rcedit } = await import('rcedit')
 
   await rcedit(executablePath, {
+    // electron-builder uses this for some installer assets, but the Windows
+    // executable itself must also receive the icon resource explicitly.
+    icon: path.join(context.packager.buildResourcesDir, 'icon.ico'),
     'file-version': version,
     'product-version': version,
     'version-string': {

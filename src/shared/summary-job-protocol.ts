@@ -2,7 +2,7 @@
 
 export const SUMMARY_WORKER_PROTOCOL_VERSION = 1 as const
 
-export type SummaryJobKey = `doc:${string}` | `chat:${string}` | `res:${string}` | `rollup:${string}` | `rollup:${string}:${string}`
+export type SummaryJobKey = `doc:${string}` | `chat:${string}` | `res:${string}` | `rollup:${string}`
 
 export type SummaryProgressPhase =
   | 'queued'

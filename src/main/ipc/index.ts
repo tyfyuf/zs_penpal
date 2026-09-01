@@ -73,8 +73,9 @@ import { exportDoc, exportProject } from '../services/export.service'
 import { clearRecovery, readRecovery, updateRecovery } from '../services/recovery.service'
 import { migrateWorkspace } from '../services/migration.service'
 import { logError } from '../services/log.service'
-import { applyProjectDocSummaryMaintenance, cancelDocSummaryMaintenance, cancelProjectDocSummaryMaintenance, initializeDocSummaryMaintenance, scheduleDocSummaryMaintenance } from '../services/doc-summary-maintenance.service'
-import { broadcast, getMainWindow } from '../window'
+import { applyProjectDocSummaryMaintenance, cancelDocSummaryMaintenance, cancelProjectDocSummaryMaintenance, initializeDocSummaryMaintenance, scheduleDocSummaryMaintenance, scheduleProjectRollupMaintenance } from '../services/doc-summary-maintenance.service'
+import { broadcast, getMainWindow, openSettingsWindow } from '../window'
+import { notifyWorkspaceChanged } from '../services/workspace-events.service'
 
 type Handler<K extends keyof IpcApi> = (req: IpcApi[K]['req']) => Promise<IpcApi[K]['res']> | IpcApi[K]['res']
 
@@ -90,6 +91,9 @@ function handle<K extends keyof IpcApi>(channel: K, fn: Handler<K>): void {
 }
 
 export function registerIpcHandlers(): void {
+  handle(IPC.settingsOpen, () => {
+    openSettingsWindow()
+  })
   // 配置
   handle(IPC.configGet, () => loadConfig())
   handle(IPC.configSet, async (patch) => {
@@ -98,6 +102,7 @@ export function registerIpcHandlers(): void {
       await initializeDocSummaryMaintenance()
     }
     broadcast(EVENTS.configChanged, next)
+    if (patch.workspaceDir !== undefined) notifyWorkspaceChanged({ reason: 'updated' })
     return next
   })
   handle(IPC.configChooseWorkspace, async () => {
@@ -122,34 +127,53 @@ export function registerIpcHandlers(): void {
     if (res.ok) {
       await initializeDocSummaryMaintenance()
       broadcast(EVENTS.configChanged, await loadConfig())
+      notifyWorkspaceChanged({ reason: 'updated' })
     }
     return res
   })
 
   // 项目
-  handle(IPC.projectCreate, (req) => createProject(req.name))
-  handle(IPC.projectRename, (req) => renameProject(req.projectId, req.name))
+  handle(IPC.projectCreate, async (req) => {
+    const project = await createProject(req.name)
+    notifyWorkspaceChanged({ projectId: project.id, entityType: 'project', entityId: project.id, reason: 'created' })
+    return project
+  })
+  handle(IPC.projectRename, async (req) => {
+    const project = await renameProject(req.projectId, req.name)
+    notifyWorkspaceChanged({ projectId: project.id, entityType: 'project', entityId: project.id, reason: 'updated' })
+    return project
+  })
   handle(IPC.projectSetSummaryAutoMaintenance, async (req) => {
     const project = await setProjectSummaryAutoMaintenance(req.projectId, req.enabled)
     await applyProjectDocSummaryMaintenance(req.projectId, req.enabled)
+    notifyWorkspaceChanged({ projectId: project.id, entityType: 'project', entityId: project.id, reason: 'updated' })
     return project
   })
   handle(IPC.projectDelete, async (id) => {
     cancelProjectDocSummaryMaintenance(id)
-    return deleteProject(id)
+    const result = await deleteProject(id)
+    notifyWorkspaceChanged({ projectId: id, entityType: 'project', entityId: id, reason: 'deleted' })
+    return result
   })
   handle(IPC.projectRestore, async (id) => {
     const project = await restoreProject(id)
     await applyProjectDocSummaryMaintenance(project.id, project.summaryAutoMaintenance === true)
+    notifyWorkspaceChanged({ projectId: project.id, entityType: 'project', entityId: project.id, reason: 'restored' })
     return project
   })
   handle(IPC.projectPurge, async (id) => {
     cancelProjectDocSummaryMaintenance(id)
-    return purgeProject(id)
+    const result = await purgeProject(id)
+    notifyWorkspaceChanged({ projectId: id, entityType: 'project', entityId: id, reason: 'purged' })
+    return result
   })
 
   // 文档
-  handle(IPC.docCreate, (req) => createDoc(req.projectId, req.title))
+  handle(IPC.docCreate, async (req) => {
+    const doc = await createDoc(req.projectId, req.title)
+    notifyWorkspaceChanged({ projectId: doc.projectId, entityType: 'doc', entityId: doc.id, reason: 'created' })
+    return doc
+  })
   handle(IPC.docRead, (id) => readDoc(id))
   handle(IPC.docSave, async (req) => {
     const doc = await findDocMeta(req.docId)
@@ -157,13 +181,17 @@ export function registerIpcHandlers(): void {
     if (doc) {
       queueVectorSourceSync(doc.projectId, doc.id, 'doc')
       await scheduleDocSummaryMaintenance(doc.projectId, doc.id)
+      notifyWorkspaceChanged({ projectId: doc.projectId, entityType: 'doc', entityId: doc.id, reason: 'updated' })
     }
     return result
   })
   handle(IPC.docRename, async (req) => {
     const doc = await findDocMeta(req.docId)
     const result = await renameDoc(req.docId, req.title)
-    if (doc) queueVectorSourceSync(doc.projectId, doc.id, 'doc')
+    if (doc) {
+      queueVectorSourceSync(doc.projectId, doc.id, 'doc')
+      notifyWorkspaceChanged({ projectId: doc.projectId, entityType: 'doc', entityId: doc.id, reason: 'updated' })
+    }
     return result
   })
   handle(IPC.docDelete, async (id) => {
@@ -172,6 +200,8 @@ export function registerIpcHandlers(): void {
     if (doc) {
       cancelDocSummaryMaintenance(doc.projectId, doc.id)
       queueVectorSourceRemoval(doc.projectId, doc.id, 'doc')
+      await scheduleProjectRollupMaintenance(doc.projectId)
+      notifyWorkspaceChanged({ projectId: doc.projectId, entityType: 'doc', entityId: doc.id, reason: 'deleted' })
     }
     return result
   })
@@ -181,6 +211,7 @@ export function registerIpcHandlers(): void {
     if (doc) {
       queueVectorSourceSync(doc.projectId, doc.id, 'doc')
       await scheduleDocSummaryMaintenance(doc.projectId, doc.id)
+      notifyWorkspaceChanged({ projectId: doc.projectId, entityType: 'doc', entityId: doc.id, reason: 'restored' })
     }
     return result
   })
@@ -190,59 +221,114 @@ export function registerIpcHandlers(): void {
     if (doc) {
       cancelDocSummaryMaintenance(doc.projectId, doc.id)
       queueVectorSourceRemoval(doc.projectId, doc.id, 'doc')
+      await scheduleProjectRollupMaintenance(doc.projectId)
+      notifyWorkspaceChanged({ projectId: doc.projectId, entityType: 'doc', entityId: doc.id, reason: 'purged' })
     }
     return result
   })
 
   // 对话
-  handle(IPC.chatCreate, (req) => createChat(req.projectId, req.kind, req.title, req.docId, req.contextRange, req.action))
+  handle(IPC.chatCreate, async (req) => {
+    const chat = await createChat(req.projectId, req.kind, req.title, req.docId, req.contextRange, req.action)
+    notifyWorkspaceChanged({ projectId: chat.projectId, entityType: 'chat', entityId: chat.id, reason: 'created' })
+    return chat
+  })
   handle(IPC.chatGet, (id) => getChat(id))
-  handle(IPC.chatRename, (req) => renameChat(req.chatId, req.title))
-  handle(IPC.chatAppend, (req) => appendMessage(req.chatId, req.message))
+  handle(IPC.chatRename, async (req) => {
+    const chat = await renameChat(req.chatId, req.title)
+    notifyWorkspaceChanged({ projectId: chat.projectId, entityType: 'chat', entityId: chat.id, reason: 'updated' })
+    return chat
+  })
+  handle(IPC.chatAppend, async (req) => {
+    const { chat } = await getChat(req.chatId)
+    const result = await appendMessage(req.chatId, req.message)
+    notifyWorkspaceChanged({ projectId: chat.projectId, entityType: 'chat', entityId: chat.id, reason: 'updated' })
+    return result
+  })
   handle(IPC.chatAttachResource, async (req) => {
     const result = await attachResourceSnapshot(req.chatId, req.projectId, req.source)
     if (req.source.mode === 'local' && result.resource?.id) {
       queueVectorSourceSync(req.projectId, result.resource.id, 'res')
+      notifyWorkspaceChanged({ projectId: req.projectId, entityType: 'resource', entityId: result.resource.id, reason: 'created' })
+    }
+    notifyWorkspaceChanged({ projectId: req.projectId, entityType: 'chat', entityId: req.chatId, reason: 'updated' })
+    return result
+  })
+  handle(IPC.chatDelete, async (id) => {
+    const { chat } = await getChat(id)
+    const result = await deleteChat(id)
+    notifyWorkspaceChanged({ projectId: chat.projectId, entityType: 'chat', entityId: chat.id, reason: 'deleted' })
+    return result
+  })
+  handle(IPC.chatRestore, async (id) => {
+    const chat = await restoreChat(id)
+    notifyWorkspaceChanged({ projectId: chat.projectId, entityType: 'chat', entityId: chat.id, reason: 'restored' })
+    return chat
+  })
+  handle(IPC.chatPurge, async (id) => {
+    const { chat } = await getChat(id)
+    const result = await purgeChat(id)
+    notifyWorkspaceChanged({ projectId: chat.projectId, entityType: 'chat', entityId: chat.id, reason: 'purged' })
+    return result
+  })
+  handle(IPC.chatSetContext, async (req) => {
+    const chat = await updateChatContext(req.chatId, req.contextRange)
+    notifyWorkspaceChanged({ projectId: chat.projectId, entityType: 'chat', entityId: chat.id, reason: 'updated' })
+    return chat
+  })
+  handle(IPC.chatPatch, async (req) => {
+    const chat = await updateChatMeta(req.chatId, req.patch)
+    notifyWorkspaceChanged({ projectId: chat.projectId, entityType: 'chat', entityId: chat.id, reason: 'updated' })
+    return chat
+  })
+  handle(IPC.chatGenerateTitle, async (chatId) => {
+    const result = await generateChatTitle(chatId)
+    if (result.ok) {
+      const { chat } = await getChat(chatId)
+      notifyWorkspaceChanged({ projectId: chat.projectId, entityType: 'chat', entityId: chat.id, reason: 'updated' })
     }
     return result
   })
-  handle(IPC.chatDelete, (id) => deleteChat(id))
-  handle(IPC.chatRestore, (id) => restoreChat(id))
-  handle(IPC.chatPurge, (id) => purgeChat(id))
-  handle(IPC.chatSetContext, (req) => updateChatContext(req.chatId, req.contextRange))
-  handle(IPC.chatPatch, (req) => updateChatMeta(req.chatId, req.patch))
-  handle(IPC.chatGenerateTitle, (chatId) => generateChatTitle(chatId))
 
   // 资源
   handle(IPC.resourceList, (projectId) => listResources(projectId))
   handle(IPC.resourceUpload, async (req) => {
     const result = await uploadResourceBytes(req.projectId, req.name, req.data, req.encodingHint)
     queueVectorSourceSync(req.projectId, result.id, 'res')
+    notifyWorkspaceChanged({ projectId: req.projectId, entityType: 'resource', entityId: result.id, reason: 'created' })
     return result
   })
   handle(IPC.resourceRead, (req) => readResource(req.projectId, req.resourceId))
   handle(IPC.resourceSaveText, async (req) => {
     const result = await saveResourceText(req.projectId, req.resourceId, req.content)
     queueVectorSourceSync(req.projectId, req.resourceId, 'res')
+    notifyWorkspaceChanged({ projectId: req.projectId, entityType: 'resource', entityId: req.resourceId, reason: 'updated' })
     return result
   })
   handle(IPC.resourceReplace, async (req) => {
     const result = await replaceResourceBytes(req.projectId, req.resourceId, req.data, req.encodingHint, req.sourceName)
     queueVectorSourceSync(req.projectId, req.resourceId, 'res')
+    notifyWorkspaceChanged({ projectId: req.projectId, entityType: 'resource', entityId: req.resourceId, reason: 'updated' })
     return result
   })
   handle(IPC.resourceImportExternal, async (req) => {
     const result = await importExternalResource(req.projectId, req.name, req.data, req.content, req.conflict)
     queueVectorSourceSync(req.projectId, result.id, 'res')
+    notifyWorkspaceChanged({ projectId: req.projectId, entityType: 'resource', entityId: result.id, reason: 'created' })
     return result
   })
   handle(IPC.resourceDelete, async (req) => {
     const result = await deleteResource(req.projectId, req.resourceId)
     queueVectorSourceRemoval(req.projectId, req.resourceId, 'res')
+    notifyWorkspaceChanged({ projectId: req.projectId, entityType: 'resource', entityId: req.resourceId, reason: 'deleted' })
     return result
   })
   handle(IPC.resourceDistill, (req) => distillResourceInWorker(req.projectId, req.resourceId, req.type, req.force))
-  handle(IPC.resourceUndistill, (req) => undistillResource(req.projectId, req.resourceId))
+  handle(IPC.resourceUndistill, async (req) => {
+    const result = await undistillResource(req.projectId, req.resourceId)
+    notifyWorkspaceChanged({ projectId: req.projectId, entityType: 'summary', entityId: req.resourceId, reason: 'updated' })
+    return result
+  })
   handle(IPC.fileOpenExternal, (path) => importExternalFile(path))
 
   // AI
@@ -281,7 +367,14 @@ export function registerIpcHandlers(): void {
   })
   handle(IPC.summaryGetResource, (req) => readResourceSummary(req.projectId, req.resourceId))
   handle(IPC.summaryListProject, (projectId) => listProjectSummaries(projectId))
-  handle(IPC.summaryRegenerateDoc, (req) => regenerateDocSummaryInWorker(req.docId, req.forceFull ?? false))
+  handle(IPC.summaryRegenerateDoc, async (req) => {
+    const result = await regenerateDocSummaryInWorker(req.docId, req.forceFull ?? false)
+    if (result.ok) {
+      const doc = await findDocMeta(req.docId)
+      if (doc) await scheduleProjectRollupMaintenance(doc.projectId, 0)
+    }
+    return result
+  })
   handle(IPC.summaryRegenerateChat, (chatId) => regenerateChatSummaryInWorker(chatId))
   handle(IPC.summaryQueueChat, (chatId) => {
     void queueChatSummaryInWorker(chatId)

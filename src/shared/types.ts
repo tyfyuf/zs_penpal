@@ -362,36 +362,30 @@ export interface DistillResult {
 }
 
 /** 摘要注入配置（按对话类型分别勾选，PRD 改进） */
+export interface SummaryInjectionLimits {
+  basic: number
+  dynamic: number
+}
+
 export interface SummaryInjectionConfig {
-  project: {
-    /** 项目内所有文档摘要 */
-    docSummaries: boolean
-    /** 项目内所有对话摘要 */
-    chatSummaries: boolean
-    /** 项目内所有资源摘要 */
-    resourceSummaries: boolean
+  project: SummaryInjectionLimits & {
+    docSummaries?: boolean
+    chatSummaries?: boolean
+    resourceSummaries?: boolean
   }
-  doc: {
-    /** 关联文档全文 */
+  doc: SummaryInjectionLimits & {
     fullText: boolean
-    /** 该文档其他对话摘要（不含当前对话） */
-    docChatSummaries: boolean
-    /** 项目内其他文档摘要 */
-    otherDocSummaries: boolean
-    /** 资源摘要 */
-    resourceSummaries: boolean
+    docChatSummaries?: boolean
+    otherDocSummaries?: boolean
+    resourceSummaries?: boolean
   }
-  context: {
-    /** 项目内所有文档摘要（含该文档） */
-    docSummaries: boolean
-    /** 该文档其他对话摘要（不含当前对话） */
-    docChatSummaries: boolean
-    /** 资源摘要 */
-    resourceSummaries: boolean
+  context: SummaryInjectionLimits & {
+    docSummaries?: boolean
+    docChatSummaries?: boolean
+    resourceSummaries?: boolean
   }
 }
 
-/** 摘要搜索结果（注入搜索框用） */
 export interface SummarySearchResult {
   key: string
   kind: 'doc' | 'chat' | 'res'
@@ -412,7 +406,7 @@ export interface DocRollup {
   overview: string
   /** 跨块状态变化（人物/世界设定），写"什么变了" */
   stateChanges: string[]
-  /** 因果链 / 伏笔账本 */
+  /** 摘要明确支持的跨文档因果关系 */
   causality: string[]
   schemaVersion: number
   /** 成员文档源指纹（任一变化 → STALE） */

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#183653"/>
+      <stop offset="1" stop-color="#0B1728"/>
+    </linearGradient>
+    <linearGradient id="bubble" x1="0" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#FFFDF8"/>
+      <stop offset="1" stop-color="#F1EBDD"/>
+    </linearGradient>
+    <linearGradient id="pen" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#E77962"/>
+      <stop offset="1" stop-color="#F5B07F"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="52" y="52" width="920" height="920" rx="246" fill="url(#bg)"/>
+  <path fill="url(#bubble)" d="M211 286c0-57 46-103 103-103h396c57 0 103 46 103 103v263c0 57-46 103-103 103H562l-61 88c-15 22-49 11-47-16l4-72H314c-57 0-103-46-103-103V286Z"/>
+  <g fill="#1B3851" opacity="0.58">
+    <circle cx="349" cy="409" r="18"/>
+    <circle cx="425" cy="409" r="18"/>
+    <circle cx="501" cy="409" r="18"/>
+  </g>
+
+  <!-- Revised A-1: a clean coral pen body and a warm nib; no navy insert inside the pen. -->
+  <path fill="url(#pen)" d="M335 694c43-137 137-282 300-438 26-25 66-25 92 1l35 35c26 26 26 66 1 92C600 544 453 653 335 694Z"/>
+  <path fill="#FFD39E" d="M335 694 390 557l72 72c-48 29-90 51-127 65Z"/>
+  <circle cx="615" cy="388" r="18" fill="#9A4D48" opacity="0.75"/>
+</svg>

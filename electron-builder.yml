@@ -1,5 +1,6 @@
 appId: com.vibewrite.app
 productName: Penpal
+icon: build/icon.ico
 afterPack: scripts/after-pack.cjs
 directories:
   buildResources: build
@@ -38,6 +39,11 @@ files:
   - '!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxcompiler.dll'
   - '!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxil.dll'
 extraResources:
+  # Runtime copies used by BrowserWindow on packaged builds.
+  - from: build/icon.ico
+    to: icon.ico
+  - from: build/icon.png
+    to: icon.png
   - from: models/bge-small-zh-onnx
     to: models/bge-small-zh-onnx
     filter:

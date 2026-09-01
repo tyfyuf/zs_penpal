@@ -13,6 +13,13 @@ import { initializeDocSummaryMaintenance, shutdownDocSummaryMaintenance } from '
 
 const ALLOWED_EXT = ['.txt', '.md', '.csv', '.doc', '.docx']
 
+// Keep development windows grouped under Penpal instead of Electron on Windows.
+// The existing app ID is retained for install/update compatibility.
+if (process.platform === 'win32') {
+  app.setName('Penpal')
+  app.setAppUserModelId('com.vibewrite.app')
+}
+
 // 全局错误落盘（供维护查阅）
 process.on('uncaughtException', (err) => {
   logError('main:uncaughtException', err.message, err.stack)

@@ -11,6 +11,14 @@ import { isShortDocForSummary, nonWhitespaceLength } from './summary-source'
 export const RELEVANCE_SAMPLE: Record<'doc' | 'chat' | 'res', number> = { doc: 10, chat: 10, res: 10 }
 export const PROJECT_RELEVANCE_SAMPLE: Record<'doc' | 'chat' | 'res', number> = { doc: 5, chat: 5, res: 5 }
 export const DYNAMIC_RELEVANCE_SAMPLE: Record<'doc' | 'chat' | 'res', number> = { doc: 10, chat: 10, res: 10 }
+
+function injectionLimits(chat: ChatMeta, cfg: AppConfig): { basic: number; dynamic: number } {
+  const limits = cfg.summaryInjection[chat.kind === 'project' ? 'project' : chat.kind === 'doc' ? 'doc' : 'context']
+  return {
+    basic: limits.basic ?? (chat.kind === 'project' ? PROJECT_RELEVANCE_SAMPLE.doc : RELEVANCE_SAMPLE.doc),
+    dynamic: limits.dynamic ?? DYNAMIC_RELEVANCE_SAMPLE.doc
+  }
+}
 export const DYNAMIC_LEARNING_START_ROUNDS = 3
 export const DYNAMIC_RELEVANCE_THRESHOLD = 10
 
@@ -275,11 +283,12 @@ async function loadCandidates(
 export async function selectDefaultKeys(
   chat: ChatMeta,
   applicable: string[],
-  tree?: ProjectTree
+  tree: ProjectTree | undefined,
+  cfg: AppConfig
 ): Promise<Set<string>> {
   const anchor = await buildAnchorEntities(chat)
   const candidates = await loadCandidates(chat, applicable, tree)
-  const limit = chat.kind === 'project' ? PROJECT_RELEVANCE_SAMPLE : RELEVANCE_SAMPLE
+  const limit = injectionLimits(chat, cfg).basic
   const scored = candidates.map((candidate) => {
     const overlap = [...candidate.terms.keys()].filter((term) => anchor.has(term)).length
     return { ...candidate, overlap }
@@ -289,7 +298,7 @@ export async function selectDefaultKeys(
     scored
       .filter((candidate) => candidate.kind === kind)
       .sort((a, b) => b.overlap - a.overlap || b.updatedAt.localeCompare(a.updatedAt))
-      .slice(0, limit[kind])
+      .slice(0, limit)
       .forEach((candidate) => result.add(candidate.key))
   }
   return result
@@ -304,7 +313,8 @@ export async function selectDynamicKeys(
   chat: ChatMeta,
   applicable: string[],
   tree: ProjectTree | undefined,
-  baseSelected: Set<string>
+  baseSelected: Set<string>,
+  cfg: AppConfig
 ): Promise<Set<string>> {
   const learning = chat.summaryLearning
   if (!learning || learning.completedRounds < DYNAMIC_LEARNING_START_ROUNDS) return new Set()
@@ -335,7 +345,7 @@ export async function selectDynamicKeys(
     scored
       .filter((candidate) => candidate.kind === kind)
       .sort((a, b) => b.score - a.score || b.updatedAt.localeCompare(a.updatedAt))
-      .slice(0, DYNAMIC_RELEVANCE_SAMPLE[kind])
+      .slice(0, injectionLimits(chat, cfg).dynamic)
       .forEach((candidate) => result.add(candidate.key))
   }
   return result
@@ -430,7 +440,7 @@ export function computeActiveKeys(
 
 export async function computeDefaultActive(chat: ChatMeta, tree: ProjectTree | undefined, cfg: AppConfig): Promise<string[]> {
   const applicable = collectApplicableKeys(chat, cfg, tree)
-  const selected = await selectDefaultKeys(chat, applicable, tree)
+  const selected = await selectDefaultKeys(chat, applicable, tree, cfg)
   if (applicable.includes('fulltext')) selected.add('fulltext')
   return [...selected]
 }

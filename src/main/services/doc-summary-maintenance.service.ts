@@ -3,7 +3,8 @@ import type { SummaryReadinessProgress } from '@shared/summary-job-protocol'
 import { isShortDocForSummary, isSourceStale, nonWhitespaceLength } from '../summary-source'
 import { analyzeTextIntegrity } from './text-decoding.service'
 import { buildSnapshot, listProjects, readDoc, readDocSummary } from './file.service'
-import { ensureDocSummaryInWorker } from './summary-job-manager'
+import { ensureDocSummaryInWorker, generateDocRollupsInWorker } from './summary-job-manager'
+import { projectDocRollupsNeedMaintenance } from './summary.service'
 import { loadConfig } from './config.service'
 import { logError } from './log.service'
 
@@ -17,6 +18,10 @@ let shuttingDown = false
 
 function timerKey(projectId: string, docId: string): string {
   return `${projectId}:${docId}`
+}
+
+function rollupTimerKey(projectId: string): string {
+  return `rollup:${projectId}`
 }
 
 async function projectAutoMaintenanceEnabled(projectId: string): Promise<boolean> {
@@ -82,6 +87,7 @@ async function runMaintenance(projectId: string, docId: string, retry = false): 
   const state = await currentSummary(projectId, docId)
   if (!state || !needsMaintenance(state.content, state.summary)) {
     retryAttempts.delete(key)
+    await scheduleProjectRollupMaintenance(projectId, 0)
     return
   }
   const remainingIdleDelay = idleDelayRemaining(state.updatedAt)
@@ -98,6 +104,7 @@ async function runMaintenance(projectId: string, docId: string, retry = false): 
   const latest = await currentSummary(projectId, docId)
   if (!latest || !needsMaintenance(latest.content, latest.summary)) {
     retryAttempts.delete(key)
+    await scheduleProjectRollupMaintenance(projectId, 0)
     return
   }
   const latestIdleDelay = idleDelayRemaining(latest.updatedAt)
@@ -113,6 +120,47 @@ async function runMaintenance(projectId: string, docId: string, retry = false): 
   setMaintenanceTimer(key, delay, () => runMaintenance(projectId, docId, true))
 }
 
+async function runRollupMaintenance(projectId: string, retry = false): Promise<void> {
+  const key = rollupTimerKey(projectId)
+  if (shuttingDown || !(await projectAutoMaintenanceEnabled(projectId))) {
+    retryAttempts.delete(key)
+    return
+  }
+  if (!(await projectDocRollupsNeedMaintenance(projectId))) {
+    retryAttempts.delete(key)
+    return
+  }
+
+  let result: { ok: boolean; error?: string }
+  try {
+    result = await generateDocRollupsInWorker(projectId)
+  } catch (error) {
+    result = { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+  if (result.ok || !(await projectDocRollupsNeedMaintenance(projectId))) {
+    retryAttempts.delete(key)
+    return
+  }
+
+  logError('summary:maintenance', `Document rollup maintenance failed projectId=${projectId}`, result.error ?? 'Unknown rollup error')
+  const attempt = retry ? (retryAttempts.get(key) ?? 0) + 1 : 0
+  retryAttempts.set(key, attempt)
+  const delay = RETRY_DELAYS_MS[attempt]
+  if (delay === undefined) return
+  setMaintenanceTimer(key, delay, () => runRollupMaintenance(projectId, true))
+}
+
+export async function scheduleProjectRollupMaintenance(
+  projectId: string,
+  delayMs = DOC_SUMMARY_IDLE_DELAY_MS
+): Promise<void> {
+  if (!(await projectAutoMaintenanceEnabled(projectId))) return
+  const key = rollupTimerKey(projectId)
+  clearTimer(key)
+  retryAttempts.delete(key)
+  setMaintenanceTimer(key, delayMs, () => runRollupMaintenance(projectId))
+}
+
 export async function scheduleDocSummaryMaintenance(
   projectId: string,
   docId: string,
@@ -123,6 +171,7 @@ export async function scheduleDocSummaryMaintenance(
   clearTimer(key)
   retryAttempts.delete(key)
   setMaintenanceTimer(key, delayMs, () => runMaintenance(projectId, docId))
+  await scheduleProjectRollupMaintenance(projectId, delayMs)
 }
 
 export async function scanProjectForDocSummaryMaintenance(projectId: string): Promise<void> {
@@ -130,11 +179,15 @@ export async function scanProjectForDocSummaryMaintenance(projectId: string): Pr
   if (!cfg.summaryEnabled || !(await projectAutoMaintenanceEnabled(projectId))) return
   const tree = (await buildSnapshot()).projects.find((item) => item.project.id === projectId)
   const now = Date.now()
+  let rollupDelay = 0
   for (const doc of tree?.docs ?? []) {
+    const delay = idleDelayRemaining(doc.updatedAt, now)
+    rollupDelay = Math.max(rollupDelay, delay)
     const state = await currentSummary(projectId, doc.id)
     if (!state || !needsMaintenance(state.content, state.summary)) continue
-    await scheduleDocSummaryMaintenance(projectId, doc.id, idleDelayRemaining(doc.updatedAt, now))
+    await scheduleDocSummaryMaintenance(projectId, doc.id, delay)
   }
+  await scheduleProjectRollupMaintenance(projectId, rollupDelay)
 }
 
 export function cancelDocSummaryMaintenance(projectId: string, docId: string): void {
@@ -145,7 +198,7 @@ export function cancelDocSummaryMaintenance(projectId: string, docId: string): v
 
 export function cancelProjectDocSummaryMaintenance(projectId: string): void {
   for (const key of [...timers.keys()]) {
-    if (!key.startsWith(`${projectId}:`)) continue
+    if (!key.startsWith(`${projectId}:`) && key !== rollupTimerKey(projectId)) continue
     clearTimer(key)
     retryAttempts.delete(key)
   }
@@ -218,6 +271,7 @@ export async function ensureProjectDocSummariesReady(
   }
 
   if (missing.length === 0) {
+    if (autoMaintenance) await scheduleProjectRollupMaintenance(projectId, 0)
     notify({ phase: 'ready', completed: 0, total: 0 })
     return []
   }
@@ -256,6 +310,7 @@ export async function ensureProjectDocSummariesReady(
         : `以下文档摘要生成失败：${failed.map((name) => `《${name}》`).join('、')}。请检查摘要模型与 API 设置后重试。`
     })
   } else {
+    if (autoMaintenance) await scheduleProjectRollupMaintenance(projectId, 0)
     notify({ phase: 'ready', completed, total: missing.length })
   }
   return failed

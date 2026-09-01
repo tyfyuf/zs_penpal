@@ -1,9 +1,10 @@
 import { create } from 'zustand'
 import type { AppConfig, ChatAction, ChatMeta, ContextRange, DocMeta, ExternalFileResult, ResourceMeta, WorkspaceSnapshot } from '@shared/types'
+import type { WorkspaceChangedPayload } from '@shared/ipc'
 import { api } from '../lib/api'
 import { useI18nStore } from '../i18n'
 
-export type TabKind = 'doc' | 'chat' | 'settings' | 'resource' | 'external-resource'
+export type TabKind = 'doc' | 'chat' | 'resource' | 'external-resource'
 
 export interface Tab {
   id: string
@@ -54,6 +55,27 @@ interface AppStore {
 }
 
 let configSub: (() => void) | null = null
+let workspaceChangeSub: (() => void) | null = null
+let workspacePollTimer: ReturnType<typeof setInterval> | null = null
+let workspaceRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let workspaceRefreshInFlight: Promise<void> | null = null
+let workspaceRefreshPending = false
+
+function isSummaryChange(payload: WorkspaceChangedPayload): boolean {
+  return payload.entityType === 'summary' || payload.reason.startsWith('summary-')
+}
+
+function scheduleWorkspaceRefresh(delay = 180): void {
+  if (workspaceRefreshInFlight || workspaceRefreshTimer) {
+    workspaceRefreshPending = true
+    return
+  }
+  workspaceRefreshTimer = setTimeout(() => {
+    workspaceRefreshTimer = null
+    workspaceRefreshPending = false
+    void useAppStore.getState().refreshWorkspace().catch(() => {})
+  }, delay)
+}
 
 export const useAppStore = create<AppStore>((set, get) => ({
   config: null,
@@ -77,6 +99,19 @@ export const useAppStore = create<AppStore>((set, get) => ({
     // 主进程侧配置变更（如工作目录迁移）→ 同步渲染层缓存
     if (configSub) configSub()
     configSub = api.on('config:changed', (cfg) => set({ config: cfg }))
+    if (workspaceChangeSub) workspaceChangeSub()
+    workspaceChangeSub = api.on('workspace:changed', (payload) => {
+      if (isSummaryChange(payload)) {
+        set((state) => ({ summaryRevision: state.summaryRevision + 1 }))
+        return
+      }
+      scheduleWorkspaceRefresh()
+    })
+    if (!workspacePollTimer) {
+      workspacePollTimer = setInterval(() => {
+        if (document.visibilityState === 'visible') scheduleWorkspaceRefresh(0)
+      }, 20000)
+    }
     set({ config, workspace, initialized: true })
   },
 
@@ -88,33 +123,45 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   async refreshWorkspace() {
-    const workspace = await api.invoke('workspace:get', undefined)
+    if (workspaceRefreshInFlight) return workspaceRefreshInFlight
+    workspaceRefreshInFlight = (async () => {
+      const workspace = await api.invoke('workspace:get', undefined)
 
-    // 关闭已被删除/归档/彻底删除的对象对应的标签页（PRD 改进：删除时关闭已打开标签）
-    const normalDocIds = new Set(workspace.projects.flatMap((p) => p.docs.map((d) => d.id)))
-    const normalChatIds = new Set(workspace.projects.flatMap((p) => p.chats.map((c) => c.id)))
-    const normalResourceIds = new Set(workspace.projects.flatMap((p) => p.resources.map((r) => r.id)))
+      // 关闭已被删除/归档/彻底删除的对象对应的标签页（PRD 改进：删除时关闭已打开标签）
+      const normalDocIds = new Set(workspace.projects.flatMap((p) => p.docs.map((d) => d.id)))
+      const normalChatIds = new Set(workspace.projects.flatMap((p) => p.chats.map((c) => c.id)))
+      const normalResourceIds = new Set(workspace.projects.flatMap((p) => p.resources.map((r) => r.id)))
 
-    const tabs = get().tabs.filter((t) => {
-      if (t.kind === 'doc' && t.refId) return normalDocIds.has(t.refId)
-      if (t.kind === 'chat' && t.refId) return normalChatIds.has(t.refId)
-      if (t.kind === 'resource' && t.refId) return normalResourceIds.has(t.refId)
-      return true // settings 标签保留
-    })
+      const tabs = get().tabs.filter((t) => {
+        if (t.kind === 'doc' && t.refId) return normalDocIds.has(t.refId)
+        if (t.kind === 'chat' && t.refId) return normalChatIds.has(t.refId)
+        if (t.kind === 'resource' && t.refId) return normalResourceIds.has(t.refId)
+        return true // settings 标签保留
+      })
 
-    let activeTabId = get().activeTabId
-    if (activeTabId && !tabs.some((t) => t.id === activeTabId)) {
-      activeTabId = tabs[tabs.length - 1]?.id ?? null
+      let activeTabId = get().activeTabId
+      if (activeTabId && !tabs.some((t) => t.id === activeTabId)) {
+        activeTabId = tabs[tabs.length - 1]?.id ?? null
+      }
+
+      // 清理已删除文档/资源的脏标记；外部临时标签使用标签 id 保留。
+      const dirty = { ...get().dirty }
+      const externalTabIds = new Set(tabs.filter((tab) => tab.kind === 'external-resource').map((tab) => tab.id))
+      for (const id of Object.keys(dirty)) {
+        if (!normalDocIds.has(id) && !normalResourceIds.has(id) && !externalTabIds.has(id)) delete dirty[id]
+      }
+
+      set({ workspace, tabs, activeTabId, dirty })
+    })()
+    try {
+      await workspaceRefreshInFlight
+    } finally {
+      workspaceRefreshInFlight = null
+      if (workspaceRefreshPending) {
+        workspaceRefreshPending = false
+        scheduleWorkspaceRefresh()
+      }
     }
-
-    // 清理已删除文档/资源的脏标记；外部临时标签使用标签 id 保留。
-    const dirty = { ...get().dirty }
-    const externalTabIds = new Set(tabs.filter((tab) => tab.kind === 'external-resource').map((tab) => tab.id))
-    for (const id of Object.keys(dirty)) {
-      if (!normalDocIds.has(id) && !normalResourceIds.has(id) && !externalTabIds.has(id)) delete dirty[id]
-    }
-
-    set({ workspace, tabs, activeTabId, dirty })
   },
 
   async updateConfig(patch) {
@@ -156,14 +203,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   openSettings() {
-    const { tabs } = get()
-    const existing = tabs.find((t) => t.kind === 'settings')
-    if (existing) {
-      set({ activeTabId: existing.id })
-      return
-    }
-    const tab: Tab = { id: 'settings', kind: 'settings', title: '设置' }
-    set({ tabs: [...tabs, tab], activeTabId: tab.id })
+    void api.invoke('settings:open', undefined)
   },
 
   openResource(projectId, resourceId, name) {

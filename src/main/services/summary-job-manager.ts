@@ -1,7 +1,7 @@
 ﻿import { utilityProcess, type UtilityProcess } from 'electron'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
-import { EVENTS } from '@shared/ipc'
+import { EVENTS, type WorkspaceChangeEntity } from '@shared/ipc'
 import type {
   MainToSummaryWorkerMessage,
   SummaryJobKey,
@@ -18,11 +18,19 @@ import type { AppConfig, DistillResult, DocSummary, ResourceDistillType } from '
 import { getUserDataDir } from '../paths'
 import { broadcast } from '../window'
 import { setSummaryGeneratingState } from './summary-state.service'
+import { notifyWorkspaceChanged } from './workspace-events.service'
 import type { ApiSettings } from './api-settings'
+
+interface SummaryJobContext {
+  projectId?: string
+  entityType?: WorkspaceChangeEntity
+  entityId?: string
+}
 
 interface ActiveJob<T = SummaryWorkerResult> {
   jobId: string
   key: SummaryJobKey
+  context: SummaryJobContext
   resolve: (result: T) => void
   reject: (error: Error) => void
 }
@@ -35,7 +43,7 @@ let runtimeUserDataDir = ''
 let shuttingDown = false
 let restartCount = 0
 const active = new Map<string, ActiveJob>()
-const activeByKey = new Map<string, { kind: SummaryWorkerTask['kind']; promise: Promise<SummaryWorkerResult> }>()
+const activeByKey = new Map<string, { task: SummaryWorkerTask; promise: Promise<SummaryWorkerResult> }>()
 const latestPhaseByJobId = new Map<string, SummaryProgress['phase']>()
 let queuedCount = 0
 
@@ -61,24 +69,25 @@ function progressWithJob(progress: SummaryProgress): void {
   broadcast(EVENTS.summaryProgress, progress)
 }
 
-function markStarted(key: SummaryJobKey, jobId: string): void {
+function markStarted(key: SummaryJobKey, jobId: string, context: SummaryJobContext): void {
   setSummaryGeneratingState(key, true)
-  broadcast(EVENTS.summaryStatus, { key, generating: true })
+  broadcast(EVENTS.summaryStatus, { key, generating: true, ...context })
   latestPhaseByJobId.set(jobId, 'queued')
   broadcast(EVENTS.summaryProgress, { jobId, key, phase: 'queued', completed: 0, total: 1 })
 }
 
-function markFinished(key: SummaryJobKey, jobId: string, phase: 'complete' | 'failed' | 'cancelled'): void {
+function markFinished(key: SummaryJobKey, jobId: string, phase: 'complete' | 'failed' | 'cancelled', context: SummaryJobContext): void {
   latestPhaseByJobId.set(jobId, phase)
   setSummaryGeneratingState(key, false)
   broadcast(EVENTS.summaryProgress, { jobId, key, phase, completed: phase === 'complete' ? 1 : 0, total: 1 })
-  broadcast(EVENTS.summaryStatus, { key, generating: false })
+  broadcast(EVENTS.summaryStatus, { key, generating: false, ...context })
+  notifyWorkspaceChanged({ ...context, reason: phase === 'complete' ? 'summary-completed' : 'summary-failed' })
   latestPhaseByJobId.delete(jobId)
 }
 
 function rejectAll(error: Error): void {
   for (const job of active.values()) {
-    markFinished(job.key, job.jobId, 'failed')
+    markFinished(job.key, job.jobId, 'failed', job.context)
     latestPhaseByJobId.delete(job.jobId)
     job.reject(error)
   }
@@ -119,13 +128,13 @@ function onMessage(message: SummaryWorkerToMainMessage, source: UtilityProcess):
     const result = message.result
     const isExplicitFailure = Boolean(result && typeof result === 'object' && 'ok' in result && (result as { ok?: unknown }).ok === false)
     const phase = isExplicitFailure || latestPhaseByJobId.get(job.jobId) === 'failed' ? 'failed' : 'complete'
-    markFinished(job.key, job.jobId, phase)
+    markFinished(job.key, job.jobId, phase, job.context)
     job.resolve(result)
   } else if (message.type === 'cancelled') {
-    markFinished(job.key, job.jobId, 'cancelled')
+    markFinished(job.key, job.jobId, 'cancelled', job.context)
     job.reject(workerError('摘要任务已取消'))
   } else {
-    markFinished(job.key, job.jobId, 'failed')
+    markFinished(job.key, job.jobId, 'failed', job.context)
     job.reject(workerError(message.error.message, message.error.name))
   }
 }
@@ -219,6 +228,19 @@ async function makeJob(key: SummaryJobKey, task: SummaryWorkerTask): Promise<Sum
   }
 }
 
+function contextForTask(key: SummaryJobKey, task: SummaryWorkerTask): SummaryJobContext {
+  const [kind, id] = key.split(':', 2)
+  const entityType: WorkspaceChangeEntity | undefined = kind === 'doc' || kind === 'chat' || kind === 'res' || kind === 'rollup'
+    ? (kind === 'res' ? 'resource' : kind)
+    : undefined
+  const projectId = 'projectId' in task ? task.projectId : undefined
+  return {
+    projectId,
+    entityType,
+    entityId: kind === 'rollup' ? projectId ?? id : id
+  }
+}
+
 function createSummaryJobPromise(
   key: SummaryJobKey,
   task: SummaryWorkerTask,
@@ -236,9 +258,9 @@ function createSummaryJobPromise(
       const job = await makeJob(key, task)
       queuedCount--
       promoted = true
-      active.set(job.jobId, { jobId: job.jobId, key, resolve: () => {}, reject: () => {} })
+      active.set(job.jobId, { jobId: job.jobId, key, context: contextForTask(key, task), resolve: () => {}, reject: () => {} })
       broadcastQueueStatus()
-      markStarted(key, job.jobId)
+      markStarted(key, job.jobId, contextForTask(key, task))
       return await new Promise<SummaryWorkerResult>((resolve, reject) => {
         const current = active.get(job.jobId)
         if (current) {
@@ -249,7 +271,7 @@ function createSummaryJobPromise(
           post({ type: 'start', protocolVersion: SUMMARY_WORKER_PROTOCOL_VERSION, job })
         } catch (error) {
           active.delete(job.jobId)
-          markFinished(key, job.jobId, 'failed')
+          markFinished(key, job.jobId, 'failed', contextForTask(key, task))
           broadcastQueueStatus()
           reject(error as Error)
         }
@@ -265,11 +287,19 @@ function createSummaryJobPromise(
 }
 
 function trackSummaryJob(key: SummaryJobKey, task: SummaryWorkerTask, promise: Promise<SummaryWorkerResult>): Promise<SummaryWorkerResult> {
-  activeByKey.set(key, { kind: task.kind, promise })
+  activeByKey.set(key, { task, promise })
   void promise.catch(() => {}).finally(() => {
     if (activeByKey.get(key)?.promise === promise) activeByKey.delete(key)
   })
   return promise
+}
+
+function canJoinSummaryJob(existing: SummaryWorkerTask, requested: SummaryWorkerTask): boolean {
+  if (existing.kind !== requested.kind) return false
+  if (existing.kind === 'regenerate-rollup' && requested.kind === 'regenerate-rollup') {
+    return existing.rollupId === requested.rollupId
+  }
+  return true
 }
 
 export function runSummaryJob<T extends SummaryWorkerResult>(key: SummaryJobKey, task: SummaryWorkerTask): Promise<T> {
@@ -277,7 +307,7 @@ export function runSummaryJob<T extends SummaryWorkerResult>(key: SummaryJobKey,
   if (!existing) {
     return trackSummaryJob(key, task, createSummaryJobPromise(key, task)) as Promise<T>
   }
-  if (existing.kind === task.kind) return existing.promise as Promise<T>
+  if (canJoinSummaryJob(existing.task, task)) return existing.promise as Promise<T>
 
   // Different operations for the same source must remain serialized. Keep the
   // chained promise in activeByKey immediately, so a third request joins the
@@ -317,7 +347,7 @@ export function generateDocRollupsInWorker(projectId: string): Promise<{ ok: boo
 }
 
 export function regenerateDocRollupInWorker(projectId: string, rollupId: string): Promise<{ ok: boolean; error?: string }> {
-  return runSummaryJob<{ ok: boolean; error?: string }>(`rollup:${projectId}:${rollupId}`, { kind: 'regenerate-rollup', projectId, rollupId })
+  return runSummaryJob<{ ok: boolean; error?: string }>(`rollup:${projectId}`, { kind: 'regenerate-rollup', projectId, rollupId })
 }
 
 export function retryPendingSummariesInWorker(): Promise<void> {

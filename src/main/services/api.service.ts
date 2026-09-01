@@ -36,6 +36,7 @@ import {
   buildResourceSummaryBlock,
   buildRollupBlock,
   buildRollupCatalogBlock,
+  getUsableDocRollups,
 } from './summary.service'
 import { ensureDocSummaryInWorker } from './summary-job-manager'
 import { ensureProjectDocSummariesReady, type SummaryReadinessUpdate } from './doc-summary-maintenance.service'
@@ -56,7 +57,6 @@ import {
   getChat,
   readChatSummary,
   readDoc,
-  readDocRollups,
   readDocSummary,
   readResource,
   readResourceSummary,
@@ -1178,6 +1178,53 @@ async function buildRegenerateGuidance(
   return `${intro}\n\n${blocks.join('\n\n')}`
 }
 
+function truncatePlanningText(text: string, maxChars = 2600): string {
+  const normalized = text.replace(/\s+/gu, ' ').trim()
+  return normalized.length > maxChars ? `${normalized.slice(0, maxChars)}…` : normalized
+}
+
+function buildPlanningConversation(history: ChatMessage[], currentMessageId: string, lang: 'zh' | 'en'): string {
+  const conversation = history.filter((message) => message.role === 'user' || message.role === 'assistant')
+  let currentIndex = -1
+  for (let index = conversation.length - 1; index >= 0; index -= 1) {
+    const message = conversation[index]
+    if (message.role === 'user' && (message.id === currentMessageId || currentIndex < 0)) {
+      currentIndex = index
+      if (message.id === currentMessageId) break
+    }
+  }
+  const rounds: { user: ChatMessage; assistant: ChatMessage }[] = []
+  for (let index = 0; index < currentIndex; index += 1) {
+    const user = conversation[index]
+    const assistant = conversation[index + 1]
+    if (user?.role !== 'user' || assistant?.role !== 'assistant') continue
+    rounds.push({ user, assistant })
+    index += 1
+  }
+  const selected = rounds.slice(-3)
+  const en = lang === 'en'
+  const lines = selected.map((round, index) => en
+    ? `[Completed turn ${index + 1}]\nUser: ${truncatePlanningText(round.user.content)}\nAssistant: ${truncatePlanningText(round.assistant.content)}`
+    : `【已完成第 ${index + 1} 轮】\n用户：${truncatePlanningText(round.user.content)}\n助手：${truncatePlanningText(round.assistant.content)}`)
+  const current = conversation[currentIndex]
+  if (current?.role === 'user') {
+    lines.push(en
+      ? `[Current unanswered request]\nUser: ${truncatePlanningText(current.content)}`
+      : `【当前尚未回答的请求】\n用户：${truncatePlanningText(current.content)}`)
+  }
+  return lines.join('\n\n')
+}
+
+type MessageBuildParts = {
+  systemMsgs: ChatCompletionMessageParam[]
+  highPriorityAuxMsgs: ChatCompletionMessageParam[]
+  resourceMsgs: ChatCompletionMessageParam[]
+  rollupMsgs: ChatCompletionMessageParam[]
+  historyMsgs: ChatCompletionMessageParam[]
+  tailMsgs: ChatCompletionMessageParam[]
+  memory: MemoryContext
+}
+
 async function buildMessages(
   req: StreamRequest,
   chat: ChatMeta,
@@ -1185,7 +1232,7 @@ async function buildMessages(
   appendUser: boolean,
   replayReasoning: boolean,
   ensureSummaries?: () => Promise<string[]>
-): Promise<{ messages: ChatCompletionMessageParam[]; memory: MemoryContext }> {
+): Promise<MessageBuildParts> {
   const cfg = await loadConfig()
   const settings = await loadApiSettings()
   const failedDocSummaries = await (ensureSummaries ?? (() => ensureProjectDocSummariesReady(chat.projectId)))()
@@ -1198,8 +1245,8 @@ async function buildMessages(
   }
   const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
   const applicable = collectApplicableKeys(chat, cfg, tree)
-  const defaultSelected = await selectDefaultKeys(chat, applicable, tree)
-  const dynamicSelected = await selectDynamicKeys(chat, applicable, tree, defaultSelected)
+  const defaultSelected = await selectDefaultKeys(chat, applicable, tree, cfg)
+  const dynamicSelected = await selectDynamicKeys(chat, applicable, tree, defaultSelected, cfg)
   const activeKeys = computeActiveKeys(chat, applicable, defaultSelected, dynamicSelected)
   const lang = cfg.language ?? 'zh'
   const en = lang === 'en'
@@ -1217,7 +1264,6 @@ async function buildMessages(
     ? req.userMessageId
     : [...history].reverse().find((message) => message.role === 'user' && message.attachments?.length)?.id ?? req.userMessageId
 
-  // 关联文档上下文（切片 或 全文）
   let docContent: string | null = null
   let compareWrittenContinuation = false
   if (chat.kind === 'context' && chat.docId && req.contextRange && projectDocs.has(chat.docId)) {
@@ -1227,32 +1273,27 @@ async function buildMessages(
       docContent = content
       const slice = sliceContext(docContent, req.contextRange)
       const title = projectDocs.get(contextDocId)?.title ?? contextDocId
-      // A long selected/core or following excerpt is already-written material
-      // that the plot role should compare against its own projected branches.
       const hasLongSelectedText = req.contextRange.selectionFrom !== undefined && req.contextRange.selectionTo !== undefined && req.contextRange.selectionTo > req.contextRange.selectionFrom && slice.coreText.trim().length >= 500
       const hasLongFollowingText = slice.afterText.trim().length >= 500
       compareWrittenContinuation = chat.action === 'plot' && (hasLongSelectedText || hasLongFollowingText)
       systemMsgs.push({ role: 'system', content: buildContextBlock(slice, { id: contextDocId, title }, lang) })
     }
   } else if (chat.kind === 'doc' && chat.docId && projectDocs.has(chat.docId)) {
-    // 文档级对话：读取全文用于触发摘要检测（PRD 7.2），并按配置注入全文
     const content = (await readDoc(chat.docId)).content
     if (!analyzeTextIntegrity(content).suspicious) {
       docContent = content
       if (cfg.summaryInjection.doc.fullText && activeKeys.has('fulltext')) {
         const title = projectDocs.get(chat.docId)?.title ?? chat.docId
         const label = en
-          ? `\u3010Full text of linked document\u3011\nSource document: ${title} (ID: ${chat.docId})`
-          : `\u3010\u5173\u8054\u6587\u6863\u5168\u6587\u3011\n\u6765\u6e90\u6587\u6863\uff1a${title}\uff08ID\uff1a${chat.docId}\uff09`
+          ? `[Full text of linked document]\nSource document: ${title} (ID: ${chat.docId})`
+          : `【关联文档全文】\n来源文档：《${title}》（ID：${chat.docId}）`
         systemMsgs.push({ role: 'system', content: `${label}\n${docContent}` })
       }
     }
   }
 
-  // 重新生成引导（扩大范围/补充摘要）
   if (chat.kind === 'context') {
     const rolePrompt = buildContextActionPrompt(chat.action, lang, compareWrittenContinuation)
-    // Keep the role contract before document content and preserve context-budget trimming.
     systemMsgs.splice(1, 0, { role: 'system', content: rolePrompt })
   }
 
@@ -1261,7 +1302,6 @@ async function buildMessages(
     if (guidance) systemMsgs.push({ role: 'system', content: guidance })
   }
 
-  // 摘要注入：文档摘要 > 资源快照 > 对话摘要 > 资源摘要（按优先级排列）
   const { docMsgs, chatMsgs, resourceMsgs, items } = await injectSummaries(chat, docContent, tree, activeKeys)
 
   const snapshotMsgs: ChatCompletionMessageParam[] = []
@@ -1270,14 +1310,13 @@ async function buildMessages(
     const snap = await readSnapshot(chat.projectId, chat.id, sid)
     if (snap && !analyzeTextIntegrity(snap.content).suspicious) {
       const heading = en
-        ? `【Message attachment: uploaded resource】\nFile name: ${snap.name}\nFile identity ID: ${sid}\nAttachment message ID: ${attachmentMessageId}\nAttachment source: ${attachmentSource}\nThe following is the content of this resource file:`
-        : `【消息附件：用户上传资源文件】\n文件名称：《${snap.name}》\n文件身份 ID：${sid}\n附件来源：${attachmentSource === 'current_user_message_attachment' ? '当前用户消息附件' : '历史消息附件'}\n以下为该资源文件内容：`
-      const ending = en ? '\n[End of attached resource file]' : '\n【资源文件结束】'
+        ? `[Message attachment: uploaded resource]\nFile name: ${snap.name}\nFile identity ID: ${sid}\nAttachment message ID: ${attachmentMessageId}\nAttachment source: ${attachmentSource}\nThe following is the content of this resource file:`
+        : `【消息附件：已上传资源】\n文件名称：《${snap.name}》\n文件身份 ID：${sid}\n附件消息 ID：${attachmentMessageId}\n附件来源：${attachmentSource === 'current_user_message_attachment' ? '当前用户消息附件' : '历史消息附件'}\n以下是该资源文件的内容：`
+      const ending = en ? '\n[End of attached resource file]' : '\n【已上传资源文件结束】'
       snapshotMsgs.push({ role: 'system', content: `${heading}\n${snap.content}${ending}` })
     }
   }
 
-  // 附加文档：读当前内容一次性注入；与全文注入去重（同文档已全文注入则跳过）
   const fullTextDocIds = new Set<string>()
   if (chat.kind === 'doc' && chat.docId && cfg.summaryInjection.doc.fullText && activeKeys.has('fulltext')) {
     fullTextDocIds.add(chat.docId)
@@ -1291,8 +1330,8 @@ async function buildMessages(
       const { content } = await readDoc(docId)
       if (analyzeTextIntegrity(content).suspicious) continue
       const heading = en
-        ? `【Message attachment: project writing document】\nDocument name: ${projectDoc.title}\nDocument identity ID: ${docId}\nAttachment message ID: ${attachmentMessageId}\nAttachment source: ${attachmentSource}\nThe following is the full text of this document:`
-        : `【消息附件：项目写作文档】\n文档名称：《${projectDoc.title}》\n文档身份 ID：${docId}\n附件来源：${attachmentSource === 'current_user_message_attachment' ? '当前用户消息附件' : '历史消息附件'}\n以下为该文档全文：`
+        ? `[Message attachment: project writing document]\nDocument name: ${projectDoc.title}\nDocument identity ID: ${docId}\nAttachment message ID: ${attachmentMessageId}\nAttachment source: ${attachmentSource}\nThe following is the full text of this document:`
+        : `【消息附件：项目写作文档】\n文档名称：《${projectDoc.title}》\n文档身份 ID：${docId}\n附件消息 ID：${attachmentMessageId}\n附件来源：${attachmentSource === 'current_user_message_attachment' ? '当前用户消息附件' : '历史消息附件'}\n以下为该文档全文：`
       const ending = en ? '\n[End of attached project document]' : '\n【项目写作文档结束】'
       snapshotMsgs.push({ role: 'system', content: `${heading}\n${content}${ending}` })
     } catch {
@@ -1300,9 +1339,6 @@ async function buildMessages(
     }
   }
 
-  const auxMsgs: ChatCompletionMessageParam[] = [...docMsgs, ...snapshotMsgs, ...chatMsgs, ...resourceMsgs]
-
-  // 历史
   const historyMsgs: ChatCompletionMessageParam[] = history
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .map((m) => ({
@@ -1324,18 +1360,32 @@ async function buildMessages(
       }]
     : []
 
-  const messages = applyBudget(systemMsgs, auxMsgs, historyMsgs, tailMsgs, settings.model, settings.contextLimit)
-  const memory: MemoryContext = { small: items, rollups: [], vector: [] }
-  return { messages, memory }
+  const rollupMsgs: ChatCompletionMessageParam[] = []
+  const rollupItems: MemoryContextItem[] = []
+  let rollupReason = ''
+  if (!req.regenerate && cfg.summaryEnabled) {
+    try {
+      const rollups = await getUsableDocRollups(chat.projectId)
+      const plan = await planMemory(settings, rollups, buildPlanningConversation(history, req.userMessageId, lang))
+      rollupMsgs.push(...plan.extraMsgs)
+      rollupItems.push(...plan.rollupItems)
+      rollupReason = plan.reason
+    } catch {
+      // Rollup planning is optional; a failed planner must not block the answer.
+    }
+  }
+
+  return {
+    systemMsgs,
+    highPriorityAuxMsgs: [...docMsgs, ...snapshotMsgs, ...chatMsgs],
+    resourceMsgs,
+    rollupMsgs,
+    historyMsgs,
+    tailMsgs,
+    memory: { small: items, rollups: rollupItems, vector: [], ...(rollupReason ? { reason: rollupReason } : {}) }
+  }
 }
 
-// ---------------------------------------------------------------------------
-// 流式请求
-// ---------------------------------------------------------------------------
-
-/**
- * 任何异常都必须广播 stream:done（带 error），保证渲染层不会卡在“输入中”。
- */
 async function learnConversationRelevance(
   chatId: string,
   history: ChatMessage[],
@@ -1450,32 +1500,24 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
   }
   const prepareMessages = async (replay: boolean): Promise<{ messages: ChatCompletionMessageParam[]; memory: MemoryContext }> => {
     const built = await buildMessages(req, chat, historyForPrompt, !req.regenerate, replay, ensureSummaries)
-  // C-layer retrieval starts in the host. It never depends on summary settings,
+    const auxMsgs = [...built.highPriorityAuxMsgs, ...built.rollupMsgs, ...built.resourceMsgs]
+    let finalMessages = applyBudget(
+      built.systemMsgs,
+      auxMsgs,
+      built.historyMsgs,
+      built.tailMsgs,
+      settings.model,
+      settings.contextLimit
+    )
+
+    // C-layer retrieval starts in the host. It never depends on summary settings,
     // regenerate mode, or whether a model follows a planning prompt.
-      let finalMessages = built.messages
     if (shouldAutoRetrieve(req.userText)) {
       const automatic = await retrieveProjectOriginals(chat.projectId, req.userText, settings.language, 'automatic')
       finalMessages = insertIntoSystemPrefix(finalMessages, automatic.messages)
       appendVectorAttempt(built.memory, automatic.attempt, automatic.items)
     } else {
       built.memory.vectorTrace = { attempted: false, outcome: 'skipped', hitCount: 0, attempts: [] }
-    }
-
-    // B-layer planning only expands rollups. Original-source retrieval is handled
-    // independently by the host and the bounded search tool loop.
-    if (!req.regenerate) {
-      const cfg = await loadConfig()
-      if (cfg.summaryEnabled) {
-        const rollups = await readDocRollups(chat.projectId)
-        try {
-          const plan = await planMemory(settings, built.messages, rollups)
-          finalMessages = insertIntoSystemPrefix(finalMessages, plan.extraMsgs)
-          built.memory.rollups.push(...plan.rollupItems)
-          if (plan.reason) built.memory.reason = plan.reason
-        } catch {
-          // Rollup planning failure must not discard host retrieval or block the answer.
-        }
-      }
     }
 
     finalMessages = insertIntoSystemPrefix(finalMessages, [{
@@ -1650,8 +1692,8 @@ function parseRollupPlan(raw: string): { needs: string[]; reason: string } | nul
 
 async function planMemory(
   settings: ApiSettings,
-  messages: ChatCompletionMessageParam[],
-  rollups: DocRollup[]
+  rollups: DocRollup[],
+  planningConversation: string
 ): Promise<{
   extraMsgs: ChatCompletionMessageParam[]
   rollupItems: MemoryContextItem[]
@@ -1660,17 +1702,15 @@ async function planMemory(
   if (rollups.length === 0) return { extraMsgs: [], rollupItems: [], reason: '' }
   const en = settings.language === 'en'
   const catalog = buildRollupCatalogBlock(rollups, settings.language)
-  const latestUser = [...messages].reverse().find((message) => message.role === 'user')
-  const userText = typeof latestUser?.content === 'string' ? latestUser.content : ''
   const instruction = en
-    ? 'Select document rollups only when they add useful broader context for the current request. Output JSON only: {"needs":["id"],"reason":"short reason"}. Use at most 5 valid ids; use an empty array when no rollup is needed.'
-    : '\u53ea\u5728\u5f53\u524d\u8bf7\u6c42\u9700\u8981\u66f4\u5e7f\u7684\u6587\u6863\u80cc\u666f\u65f6\u9009\u62e9\u5927\u6458\u8981\u3002\u4ec5\u8f93\u51fa JSON\uff1a{"needs":["id"],"reason":"\u7b80\u77ed\u7406\u7531"}\u3002needs \u6700\u591a 5 \u4e2a\u4e14\u5fc5\u987b\u662f\u76ee\u5f55\u4e2d\u7684 id\uff1b\u4e0d\u9700\u8981\u65f6\u8f93\u51fa\u7a7a\u6570\u7ec4\u3002'
+    ? 'The conversation excerpt below belongs only to the current chat window. Use its last 3 completed user-assistant turns plus the current unanswered request to learn the active topic. Select document rollups only when they add high-value broader context. Output JSON only: {"needs":["id"],"reason":"short reason"}. Use at most 5 valid catalog ids; use an empty array when none is strongly relevant.'
+    : '下面的对话摘录仅属于当前对话窗口。请结合最近 3 个已完成的用户—助手回合和当前尚未回答的请求，判断当前主题。仅在大摘要能提供高价值背景时选择它们。只输出 JSON：{"needs":["id"],"reason":"简短理由"}。最多选择 5 个目录中的有效 id；如果没有摘要高度相关，请输出空数组。'
   const decision = await executeStructuredTask({
     task: 'memory_rollup_plan',
     settings,
     messages: [
       { role: 'system', content: instruction },
-      { role: 'user', content: `${catalog}\n\n${en ? 'Current request' : '\u5f53\u524d\u8bf7\u6c42'}:\n${userText}` }
+      { role: 'user', content: `${catalog}\n\n${en ? 'Current-chat conversation excerpt' : '当前对话窗口摘录'}：\n${planningConversation}` }
     ],
     outputTokens: 300,
     compactOutputTokens: 220,

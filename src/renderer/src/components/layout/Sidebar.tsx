@@ -100,6 +100,7 @@ export default function Sidebar(): JSX.Element {
   const tabs = useAppStore((s) => s.tabs)
   const activeTabId = useAppStore((s) => s.activeTabId)
   const refresh = useAppStore((s) => s.refreshWorkspace)
+  const summaryRevision = useAppStore((s) => s.summaryRevision)
   const openDoc = useAppStore((s) => s.openDoc)
   const openChat = useAppStore((s) => s.openChat)
   const openSettings = useAppStore((s) => s.openSettings)
@@ -166,7 +167,7 @@ export default function Sidebar(): JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [workspace.projects])
+  }, [summaryRevision, workspace.projects])
 
   useEffect(() => {
     const off = api.on('summary:status', (payload) => {

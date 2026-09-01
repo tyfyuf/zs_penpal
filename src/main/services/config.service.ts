@@ -3,9 +3,9 @@ import { configPath } from '../paths'
 import { atomicWriteJson, readJson } from '../util'
 
 const DEFAULT_INJECTION: SummaryInjectionConfig = {
-  project: { docSummaries: true, chatSummaries: true, resourceSummaries: true },
-  doc: { fullText: true, docChatSummaries: true, otherDocSummaries: true, resourceSummaries: true },
-  context: { docSummaries: true, docChatSummaries: true, resourceSummaries: true }
+  project: { basic: 5, dynamic: 10, docSummaries: true, chatSummaries: true, resourceSummaries: true },
+  doc: { basic: 10, dynamic: 10, fullText: true, docChatSummaries: true, otherDocSummaries: true, resourceSummaries: true },
+  context: { basic: 10, dynamic: 10, docSummaries: true, docChatSummaries: true, resourceSummaries: true }
 }
 
 const DEFAULT_CONFIG: Omit<AppConfig, 'workspaceDir'> = {
@@ -22,11 +22,45 @@ const DEFAULT_CONFIG: Omit<AppConfig, 'workspaceDir'> = {
 
 let cache: AppConfig | null = null
 
+function validLimit(value: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : fallback
+  return Math.max(min, Math.min(max, n))
+}
+
 function mergeInjection(stored?: Partial<SummaryInjectionConfig>): SummaryInjectionConfig {
+  const source = stored as Record<string, any> | undefined
+  const project = source?.project ?? {}
+  const doc = source?.doc ?? {}
+  const context = source?.context ?? {}
   return {
-    project: { ...DEFAULT_INJECTION.project, ...(stored?.project ?? {}) },
-    doc: { ...DEFAULT_INJECTION.doc, ...(stored?.doc ?? {}) },
-    context: { ...DEFAULT_INJECTION.context, ...(stored?.context ?? {}) }
+    project: {
+      ...DEFAULT_INJECTION.project,
+      ...project,
+      basic: validLimit(project.basic, DEFAULT_INJECTION.project.basic, 5, 10),
+      dynamic: validLimit(project.dynamic, DEFAULT_INJECTION.project.dynamic, 10, 20),
+      docSummaries: project.docSummaries !== false,
+      chatSummaries: project.chatSummaries !== false,
+      resourceSummaries: project.resourceSummaries !== false
+    },
+    doc: {
+      ...DEFAULT_INJECTION.doc,
+      ...doc,
+      basic: validLimit(doc.basic, DEFAULT_INJECTION.doc.basic, 10, 20),
+      dynamic: validLimit(doc.dynamic, DEFAULT_INJECTION.doc.dynamic, 10, 20),
+      fullText: doc.fullText !== false,
+      docChatSummaries: doc.docChatSummaries !== false,
+      otherDocSummaries: doc.otherDocSummaries !== false,
+      resourceSummaries: doc.resourceSummaries !== false
+    },
+    context: {
+      ...DEFAULT_INJECTION.context,
+      ...context,
+      basic: validLimit(context.basic, DEFAULT_INJECTION.context.basic, 10, 20),
+      dynamic: validLimit(context.dynamic, DEFAULT_INJECTION.context.dynamic, 10, 20),
+      docSummaries: context.docSummaries !== false,
+      docChatSummaries: context.docChatSummaries !== false,
+      resourceSummaries: context.resourceSummaries !== false
+    }
   }
 }
 

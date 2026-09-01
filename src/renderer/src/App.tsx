@@ -9,6 +9,7 @@ import SetupScreen from './components/SetupScreen'
 import ToastHost from './components/common/ToastHost'
 import DialogHost from './components/common/DialogHost'
 import Modal from './components/common/Modal'
+import SettingsPane from './components/settings/SettingsPane'
 import { useT } from './i18n'
 
 export default function App(): JSX.Element {
@@ -17,11 +18,12 @@ export default function App(): JSX.Element {
   const config = useAppStore((s) => s.config)
   const init = useAppStore((s) => s.init)
   const [recovery, setRecovery] = useState<RecoveryState | null>(null)
+  const isSettingsWindow = window.location.hash === '#settings'
 
   // 窗口标题跟随语言
   useEffect(() => {
-    document.title = t('app.title')
-  }, [t])
+    document.title = isSettingsWindow ? t('settings.title') : t('app.title')
+  }, [isSettingsWindow, t])
 
   useEffect(() => {
     void init()
@@ -29,7 +31,7 @@ export default function App(): JSX.Element {
 
   // 异常退出恢复检测（PRD 1.6 / 9.23）
   useEffect(() => {
-    if (!initialized) return
+    if (!initialized || isSettingsWindow) return
     void api.invoke('recovery:check', undefined).then((r) => {
       if (r) setRecovery(r)
     })
@@ -37,6 +39,7 @@ export default function App(): JSX.Element {
 
   // 单实例文件传递（PRD 1.5 / 9.15）
   useEffect(() => {
+    if (isSettingsWindow) return undefined
     const off = api.on('open-external-file', (path) => {
       void handleExternalFile(path)
     })
@@ -45,6 +48,7 @@ export default function App(): JSX.Element {
 
   // 退出前落盘未保存的编辑器内容（主进程 flush 握手）
   useEffect(() => {
+    if (isSettingsWindow) return undefined
     const off = api.on('app:flush', () => {
       void flushAll().then(() => api.send('app:flushed'))
     })
@@ -82,6 +86,18 @@ export default function App(): JSX.Element {
 
   if (!initialized) {
     return <div className="flex h-full items-center justify-center text-sm" style={{ color: 'var(--muted)' }}>{t('app.loading')}</div>
+  }
+
+  if (isSettingsWindow) {
+    return (
+      <>
+        <div className="h-full" style={{ background: 'var(--bg)' }}>
+          <SettingsPane />
+        </div>
+        <ToastHost />
+        <DialogHost />
+      </>
+    )
   }
 
   return (

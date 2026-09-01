@@ -150,6 +150,8 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   const [contextPanelDefaultCollapsed, setContextPanelDefaultCollapsed] = useState(true)
   const initialScrollDoneRef = useRef(false)
   const hiddenContentChangedRef = useRef(false)
+  /** Tracks active -> inactive transitions because chat panes stay mounted while tabs switch. */
+  const wasActiveRef = useRef(isActive)
 
   const config = useAppStore((s) => s.config)
   const workspace = useAppStore((s) => s.workspace)
@@ -343,9 +345,20 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
     }
   }, [chatId])
 
+  // Chat panes remain mounted in AppLayout, so unmount cleanup alone does not run when the user leaves a chat.
+  // Queue the same incremental/missing-summary check on every active -> inactive transition instead.
+  useEffect(() => {
+    const wasActive = wasActiveRef.current
+    wasActiveRef.current = isActive
+    if (wasActive && !isActive) {
+      void api.invoke('summary:queueChat', chatId).catch(() => {})
+    }
+  }, [chatId, isActive])
+
   useEffect(() => {
     return () => {
-      void api.invoke('summary:queueChat', chatId)
+      // Unmount remains the fallback for closing a chat tab or leaving the app.
+      void api.invoke('summary:queueChat', chatId).catch(() => {})
       setStreamingChat(chatId, false)
       if (rangeSaveTimer.current) {
         clearTimeout(rangeSaveTimer.current)

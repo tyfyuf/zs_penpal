@@ -3,7 +3,6 @@ import Sidebar from './Sidebar'
 import Tabs from './Tabs'
 import EditorPane from '../editor/EditorPane'
 import ChatPane from '../chat/ChatPane'
-import SettingsPane from '../settings/SettingsPane'
 import ResourceViewer from '../ResourceViewer'
 import ExternalResourceViewer from '../ExternalResourceViewer'
 
@@ -11,8 +10,6 @@ function renderActiveTab(tab: Tab): JSX.Element | null {
   switch (tab.kind) {
     case 'doc':
       return <EditorPane key={tab.id} tab={tab} />
-    case 'settings':
-      return <SettingsPane />
     case 'resource':
       return <ResourceViewer key={tab.id} tab={tab} />
     case 'external-resource':

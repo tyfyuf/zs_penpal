@@ -91,11 +91,13 @@ export const EVENTS = {
   summaryStatus: 'summary:status',
   summaryProgress: 'summary:progress',
   summaryQueue: 'summary:queue',
-  summaryReadiness: 'summary:readiness'
+  summaryReadiness: 'summary:readiness',
+  workspaceChanged: 'workspace:changed'
 } as const
 
 /** 娓叉煋杩涚▼ 鈫?涓昏繘绋嬬殑 invoke 閫氶亾 */
 export const IPC = {
+  settingsOpen: 'settings:open',
   configGet: 'config:get',
   configSet: 'config:set',
   configChooseWorkspace: 'config:choose-workspace',
@@ -177,6 +179,7 @@ export const IPC = {
 
 /** 鎵€鏈?invoke 閫氶亾瀵瑰簲鐨勮姹?鍝嶅簲绫诲瀷鏄犲皠 */
 export interface IpcApi {
+  [IPC.settingsOpen]: { req: void; res: void }
   [IPC.configGet]: { req: void; res: AppConfig }
   [IPC.configSet]: { req: Partial<AppConfig>; res: AppConfig }
   [IPC.configChooseWorkspace]: { req: void; res: string | null }
@@ -299,6 +302,27 @@ export interface IpcApi {
 export type IpcChannel = keyof IpcApi
 
 /** 浜嬩欢杞借嵎绫诲瀷 */
+export type WorkspaceChangeEntity = 'project' | 'doc' | 'chat' | 'resource' | 'summary' | 'rollup'
+export type WorkspaceChangeReason =
+  | 'created'
+  | 'updated'
+  | 'deleted'
+  | 'restored'
+  | 'purged'
+  | 'summary-started'
+  | 'summary-completed'
+  | 'summary-failed'
+  | 'summary-expired'
+
+export interface WorkspaceChangedPayload {
+  projectId?: string
+  entityType?: WorkspaceChangeEntity
+  entityId?: string
+  reason: WorkspaceChangeReason
+  revision: number
+  timestamp: string
+}
+
 export interface EventPayloads {
   [EVENTS.openExternalFile]: string
   [EVENTS.streamChunk]: { chatId: string; requestId: string; delta: string; reasoningDelta?: string }
@@ -307,10 +331,11 @@ export interface EventPayloads {
   [EVENTS.gitInstallProgress]: { level: number; message: string }
   [EVENTS.configChanged]: AppConfig
   [EVENTS.appFlush]: void
-  [EVENTS.summaryStatus]: { key: string; generating: boolean }
+  [EVENTS.summaryStatus]: { key: string; generating: boolean; projectId?: string; entityType?: WorkspaceChangeEntity; entityId?: string }
   [EVENTS.summaryProgress]: SummaryProgress
   [EVENTS.summaryQueue]: SummaryQueueStatus
   [EVENTS.summaryReadiness]: SummaryReadinessProgress
+  [EVENTS.workspaceChanged]: WorkspaceChangedPayload
 }
 
 export type EventChannel = keyof EventPayloads

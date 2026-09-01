@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { History, RefreshCw } from 'lucide-react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { History, RefreshCw, Search } from 'lucide-react'
 import type { DocRollup, DocRollupOverview, GitCommitInfo, UsageSnapshot, VectorIndexStatus } from '@shared/types'
 import { useAppStore } from '../../store/app.store'
 import { api } from '../../lib/api'
@@ -8,6 +8,17 @@ import { confirmDialog } from '../../store/dialog.store'
 import { useI18nStore, useT, type Locale } from '../../i18n'
 import UsageCharts from './UsageCharts'
 import Modal from '../common/Modal'
+
+
+type SettingsSection =
+  | 'language'
+  | 'work'
+  | 'api'
+  | 'memory'
+  | 'archive'
+  | 'trash'
+  | 'version'
+  | 'usage'
 
 export default function SettingsPane(): JSX.Element {
   const t = useT()
@@ -40,6 +51,11 @@ export default function SettingsPane(): JSX.Element {
   const [vectorStatuses, setVectorStatuses] = useState<Record<string, VectorIndexStatus>>({})
   const [vectorBusy, setVectorBusy] = useState(false)
   const [vectorBusyKey, setVectorBusyKey] = useState<string | null>(null)
+  const [activeSection, setActiveSection] = useState<SettingsSection>((localStorage.getItem('settings-section') as SettingsSection) ?? 'language')
+  const [rollupSearch, setRollupSearch] = useState('')
+  const [vectorSearch, setVectorSearch] = useState('')
+  const [archiveSearch, setArchiveSearch] = useState('')
+  const [trashSearch, setTrashSearch] = useState('')
 
   useEffect(() => {
     void api.invoke('crypto:hasApiKey', undefined).then(setHasKey)
@@ -267,21 +283,63 @@ export default function SettingsPane(): JSX.Element {
 
   const inj = config.summaryInjection
 
-  function patchInj(group: 'project' | 'doc' | 'context', key: string, value: boolean): void {
-    void updateConfig({
-      summaryInjection: {
-        ...inj,
-        [group]: { ...inj[group], [key]: value }
-      }
-    })
+  function selectSection(section: SettingsSection): void {
+    setActiveSection(section)
+    localStorage.setItem('settings-section', section)
   }
 
-  return (
-    <div className="h-full overflow-y-auto p-6">
-      <h2 className="mb-4 text-lg font-semibold">{t('settings.title')}</h2>
+  function patchInj(group: 'project' | 'doc' | 'context', key: 'basic' | 'dynamic' | 'fullText', value: number | boolean): void {
+    void updateConfig({ summaryInjection: { ...inj, [group]: { ...inj[group], [key]: value } } })
+  }
 
-      <div className="space-y-6">
-        <Section title={t('settings.language')}>
+  const summaryWarning = useMemo(() => {
+    const estimate = (group: { basic: number; dynamic: number }): number => (group.basic + group.dynamic) * 3 * 180
+    return Math.max(estimate(inj.project), estimate(inj.doc), estimate(inj.context)) > Math.max(2000, config.contextLimit * 0.2)
+  }, [config.contextLimit, inj])
+
+  const searchMatch = (value: string, query: string): boolean => value.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
+  const archiveQuery = archiveSearch.trim()
+  const trashQuery = trashSearch.trim()
+  const matchingTrashedProjects = workspace.trashedProjects.filter((project) => !trashQuery || searchMatch(project.name, trashQuery))
+  const archivedChatGroups = workspace.projects
+    .map((project) => ({
+      project,
+      chats: project.archivedChats.filter((chat) => !archiveQuery || searchMatch(project.project.name, archiveQuery) || searchMatch(chat.title, archiveQuery))
+    }))
+    .filter(({ chats }) => chats.length > 0)
+  const trashDocGroups = workspace.projects
+    .map((project) => ({
+      project,
+      docs: project.trashedDocs.filter((doc) => !trashQuery || searchMatch(project.project.name, trashQuery) || searchMatch(doc.title, trashQuery))
+    }))
+    .filter(({ docs }) => docs.length > 0)
+  const hasArchivedChatMatches = archivedChatGroups.length > 0
+  const hasTrashMatches = matchingTrashedProjects.length > 0 || trashDocGroups.length > 0
+
+  return (
+    <div className="flex h-full overflow-hidden">
+      <aside className="w-48 shrink-0 border-r p-3" style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}>
+        <h2 className="mb-3 px-2 text-base font-semibold">{t('settings.title')}</h2>
+        <nav className="space-y-1">
+          {([
+            ['language', t('settings.language')],
+            ['work', t('settings.workspace')],
+            ['api', t('settings.api')],
+            ['memory', t('settings.memory')],
+            ['archive', t('settings.archive')],
+            ['trash', t('settings.trash')],
+            ['version', t('settings.version')],
+            ['usage', t('settings.usage')]
+          ] as [SettingsSection, string][]).map(([section, label]) => (
+            <button key={section} className={`w-full rounded-lg px-3 py-2 text-left text-sm ${activeSection === section ? 'btn-primary' : ''}`} onClick={() => selectSection(section)}>
+              {label}
+            </button>
+          ))}
+        </nav>
+      </aside>
+      <main className="min-w-0 flex-1 overflow-y-auto p-6">
+        <div className="space-y-6">
+        {activeSection === 'language' && (        <Section title={t('settings.language')}>
           <div className="flex gap-2">
             <button
               className={`btn ${config.language === 'zh' ? 'btn-primary' : ''}`}
@@ -296,18 +354,18 @@ export default function SettingsPane(): JSX.Element {
               {t('settings.languageEn')}
             </button>
           </div>
-        </Section>
+        </Section> )}
 
-        <Section title={t('settings.workspace')}>
+        {activeSection === 'work' && (        <Section title={t('settings.workspace')}>
           <div className="text-sm" style={{ color: 'var(--muted)' }}>
             {config.workspaceDir || t('settings.workspaceUnset')}
           </div>
           <button className="btn mt-2" onClick={() => void migrate()}>
             {t('settings.migrate')}
           </button>
-        </Section>
+        </Section> )}
 
-        <Section title={t('settings.api')}>
+        {activeSection === 'api' && (        <Section title={t('settings.api')}>
           <div className="space-y-3">
             <Field label={t('settings.apiBase')}>
               <input className="input" value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" />
@@ -373,18 +431,18 @@ export default function SettingsPane(): JSX.Element {
               </button>
             </div>
           </div>
-        </Section>
+        </Section> )}
 
-        <Section title={t('settings.autosave')}>
+        {activeSection === 'work' && (        <Section title={t('settings.autosave')}>
           <Field label={t('settings.autosaveInterval')}>
             <input className="input !w-40" type="number" min={1} max={120} value={autosave} onChange={(e) => setAutosave(Number(e.target.value) || 5)} />
           </Field>
           <button className="btn mt-2" onClick={() => void updateConfig({ autosaveIntervalMs: autosave * 1000 }).then(() => toast.success(t('settings.saved')))}>
             {t('settings.save')}
           </button>
-        </Section>
+        </Section> )}
 
-        <Section title={t('settings.summary')}>
+        {activeSection === 'memory' && (        <Section title={t('settings.summary')}>
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -396,215 +454,220 @@ export default function SettingsPane(): JSX.Element {
 
           {config.summaryEnabled && (
             <div className="mt-4 space-y-4">
-              <InjGroup title={t('settings.injProject')}>
-                <InjCheck label={t('settings.injProjDocs')} checked={inj.project.docSummaries} onChange={(v) => patchInj('project', 'docSummaries', v)} />
-                <InjCheck label={t('settings.injProjChats')} checked={inj.project.chatSummaries} onChange={(v) => patchInj('project', 'chatSummaries', v)} />
-                <InjCheck label={t('settings.injProjRes')} checked={inj.project.resourceSummaries} onChange={(v) => patchInj('project', 'resourceSummaries', v)} />
-              </InjGroup>
-
-              <InjGroup title={t('settings.injDoc')}>
-                <InjCheck label={t('settings.injDocFull')} checked={inj.doc.fullText} onChange={(v) => patchInj('doc', 'fullText', v)} />
-                <InjCheck label={t('settings.injDocChats')} checked={inj.doc.docChatSummaries} onChange={(v) => patchInj('doc', 'docChatSummaries', v)} />
-                <InjCheck label={t('settings.injDocOthers')} checked={inj.doc.otherDocSummaries} onChange={(v) => patchInj('doc', 'otherDocSummaries', v)} />
-                <InjCheck label={t('settings.injDocRes')} checked={inj.doc.resourceSummaries} onChange={(v) => patchInj('doc', 'resourceSummaries', v)} />
-              </InjGroup>
-
-              <InjGroup title={t('settings.injContext')}>
-                <InjCheck label={t('settings.injCtxDocs')} checked={inj.context.docSummaries} onChange={(v) => patchInj('context', 'docSummaries', v)} />
-                <InjCheck label={t('settings.injCtxChats')} checked={inj.context.docChatSummaries} onChange={(v) => patchInj('context', 'docChatSummaries', v)} />
-                <InjCheck label={t('settings.injCtxRes')} checked={inj.context.resourceSummaries} onChange={(v) => patchInj('context', 'resourceSummaries', v)} />
-              </InjGroup>
+              <LimitGroup title={t('settings.injProject')} basicLabel={t('settings.summaryBasic')} dynamicLabel={t('settings.summaryDynamic')} basic={inj.project.basic} dynamic={inj.project.dynamic} minBasic={5} maxBasic={10} minDynamic={10} maxDynamic={20} onChange={(key, value) => patchInj('project', key, value)} />
+              <LimitGroup title={t('settings.injDoc')} basicLabel={t('settings.summaryBasic')} dynamicLabel={t('settings.summaryDynamic')} basic={inj.doc.basic} dynamic={inj.doc.dynamic} minBasic={10} maxBasic={20} minDynamic={10} maxDynamic={20} onChange={(key, value) => patchInj('doc', key, value)} />
+              <LimitGroup title={t('settings.injContext')} basicLabel={t('settings.summaryBasic')} dynamicLabel={t('settings.summaryDynamic')} basic={inj.context.basic} dynamic={inj.context.dynamic} minBasic={10} maxBasic={20} minDynamic={10} maxDynamic={20} onChange={(key, value) => patchInj('context', key, value)} />
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={inj.doc.fullText} onChange={(e) => patchInj('doc', 'fullText', e.target.checked)} />
+                {t('settings.injDocFull')}
+              </label>
+              {summaryWarning && <div className="rounded-lg border px-3 py-2 text-xs" style={{ color: 'var(--warn)', borderColor: 'var(--warn)', background: 'var(--accent-soft)' }}>{t('settings.summaryInjectionWarning')}</div>}
             </div>
           )}
-        </Section>
+        </Section> )}
 
-        <Section title={t('settings.rollups', { n: 10 })}>
-          <div className="space-y-3">
-            {workspace.projects.length === 0 && (
-              <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.rollupsEmpty')}</div>
-            )}
-            {workspace.projects.map((p) => {
-              const ov = rollups[p.project.id]
-              const docs = ov?.totalDocs ?? 0
-              const need = docs >= (ov?.threshold ?? 50)
-              return (
-                <div key={p.project.id} className="rounded border p-2" style={{ borderColor: 'var(--border)' }}>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium">{p.project.name}</span>
-                    <span className="text-xs" style={{ color: 'var(--muted)' }}>
-                      {t('settings.rollupsDocCount', { n: docs })} · {t('settings.rollupsThreshold', { n: ov?.threshold ?? 50, b: ov?.batchSize ?? 10 })}
-                    </span>
-                    <span className="flex-1" />
-                    <button className="btn !py-1 text-xs" disabled={rollupBusy || !need} onClick={() => void generateRollups(p.project.id)}>
-                      {t('settings.rollupsGenerate')}
-                    </button>
-                  </div>
-                  {ov && ov.rollups.length > 0 && (
-                    <div className="mt-2 space-y-1">
-                      {ov.rollups.map((r) => (
-                        <div key={r.id} className="flex items-center gap-2 text-xs">
-                          <span
-                            className="h-1.5 w-1.5 rounded-full"
-                            style={{ background: r.stale ? 'var(--warn)' : 'var(--ok)' }}
-                          />
-                          <span className="w-14">{t('settings.rollupsRange', { n: r.rangeLabel })}</span>
-                          <span style={{ color: 'var(--muted)' }}>{t('settings.rollupsDocs', { n: r.docCount })}</span>
-                          {r.stale && <span style={{ color: 'var(--warn)' }}>· {t('summary.stale')}</span>}
-                          <span className="flex-1" />
-                          <button className="btn !py-0.5 text-xs" onClick={() => void previewRollup(p.project.id, r.id, r.rangeLabel)}>
-                            {t('summary.preview')}
-                          </button>
-                          <button className="btn !py-0.5 text-xs" disabled={rollupBusy} onClick={() => void regenRollup(p.project.id, r.id)}>
-                            <RefreshCw size={12} />
-                          </button>
+        {activeSection === 'memory' && (
+          <Section title={t('settings.rollups', { n: 10 })}>
+            <div className="space-y-3">
+              <SearchBox value={rollupSearch} onChange={setRollupSearch} placeholder={t('settings.searchEntries')} />
+              {workspace.projects.length === 0 && (
+                <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.rollupsEmpty')}</div>
+              )}
+              <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+                {workspace.projects.map((p) => {
+                  const ov = rollups[p.project.id]
+                  if (rollupSearch.trim() && !searchMatch(p.project.name, rollupSearch) && !(ov?.rollups ?? []).some((r) => searchMatch(r.rangeLabel, rollupSearch))) return null
+                  const docs = ov?.totalDocs ?? 0
+                  const need = docs >= (ov?.threshold ?? 50)
+                  return (
+                    <div key={p.project.id} className="rounded border p-2" style={{ borderColor: 'var(--border)' }}>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">{p.project.name}</span>
+                        <span className="text-xs" style={{ color: 'var(--muted)' }}>
+                          {t('settings.rollupsDocCount', { n: docs })} ? {t('settings.rollupsThreshold', { n: ov?.threshold ?? 50, b: ov?.batchSize ?? 10 })}
+                        </span>
+                        <span className="flex-1" />
+                        <button className="btn !py-1 text-xs" disabled={rollupBusy || !need} onClick={() => void generateRollups(p.project.id)}>
+                          {t('settings.rollupsGenerate')}
+                        </button>
+                      </div>
+                      {ov && ov.rollups.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {ov.rollups.filter((r) => !rollupSearch.trim() || searchMatch(p.project.name, rollupSearch) || searchMatch(r.rangeLabel, rollupSearch)).map((r) => (
+                            <div key={r.id} className="flex items-center gap-2 text-xs">
+                              <span className="h-1.5 w-1.5 rounded-full" style={{ background: r.stale ? 'var(--warn)' : 'var(--ok)' }} />
+                              <span className="w-14">{t('settings.rollupsRange', { n: r.rangeLabel })}</span>
+                              <span style={{ color: 'var(--muted)' }}>{t('settings.rollupsDocs', { n: r.docCount })}</span>
+                              {r.stale && <span style={{ color: 'var(--warn)' }}>? {t('summary.stale')}</span>}
+                              <span className="flex-1" />
+                              <button className="btn !py-0.5 text-xs" onClick={() => void previewRollup(p.project.id, r.id, r.rangeLabel)}>{t('summary.preview')}</button>
+                              <button className="btn !py-0.5 text-xs" disabled={rollupBusy} onClick={() => void regenRollup(p.project.id, r.id)}><RefreshCw size={12} /></button>
+                            </div>
+                          ))}
                         </div>
-                      ))}
+                      )}
                     </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        </Section>
+                  )
+                })}
+              </div>
+            </div>
+          </Section>
+        )}
 
-        <Section title={t('settings.vectorIndex')}>
-          <div className="space-y-3">
-            {workspace.projects.length === 0 && (
-              <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.vectorIndexEmpty')}</div>
-            )}
-            {workspace.projects.map((p) => {
-              const status = vectorStatuses[p.project.id]
-              return (
-                <div key={p.project.id} className="rounded border p-2" style={{ borderColor: 'var(--border)' }}>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium">{p.project.name}</span>
-                    <span className="text-xs" style={{ color: 'var(--muted)' }}>
-                      {status ? `${t('settings.vectorIndexChunks', { n: status.chunkCount })} · ${status.embedModel ?? t('settings.vectorIndexNotBuilt')}` : t('summary.loading')}
-                    </span>
-                    <span className="flex-1" />
-                    <button className="btn !py-1 text-xs" disabled={vectorBusy} onClick={() => void buildVectors(p.project.id)}>
-                      <RefreshCw size={12} />
-                      {vectorBusy ? t('settings.vectorIndexBuilding') : t('settings.vectorIndexBuild')}
-                    </button>
-                  </div>
-                  {status?.indexExists && status.updatedAt && (
-                    <div className="mt-1 text-[11px]" style={{ color: 'var(--muted)' }}>
-                      {t('settings.vectorIndexUpdated', { date: new Date(status.updatedAt).toLocaleString() })}
+        {activeSection === 'memory' && (
+          <Section title={t('settings.vectorIndex')}>
+            <div className="space-y-3">
+              <SearchBox value={vectorSearch} onChange={setVectorSearch} placeholder={t('settings.searchEntries')} />
+              {workspace.projects.length === 0 && (
+                <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.vectorIndexEmpty')}</div>
+              )}
+              <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+                {workspace.projects.map((p) => {
+                  const status = vectorStatuses[p.project.id]
+                  if (vectorSearch.trim() && !searchMatch(p.project.name, vectorSearch) && !(status?.files ?? []).some((f) => searchMatch(f.title, vectorSearch))) return null
+                  return (
+                    <div key={p.project.id} className="rounded border p-2" style={{ borderColor: 'var(--border)' }}>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">{p.project.name}</span>
+                        <span className="text-xs" style={{ color: 'var(--muted)' }}>
+                          {status ? `${t('settings.vectorIndexChunks', { n: status.chunkCount })} ? ${status.embedModel ?? t('settings.vectorIndexNotBuilt')}` : t('summary.loading')}
+                        </span>
+                        <span className="flex-1" />
+                        <button className="btn !py-1 text-xs" disabled={vectorBusy} onClick={() => void buildVectors(p.project.id)}>
+                          <RefreshCw size={12} />
+                          {vectorBusy ? t('settings.vectorIndexBuilding') : t('settings.vectorIndexBuild')}
+                        </button>
+                      </div>
+                      {status?.indexExists && status.updatedAt && (
+                        <div className="mt-1 text-[11px]" style={{ color: 'var(--muted)' }}>
+                          {t('settings.vectorIndexUpdated', { date: new Date(status.updatedAt).toLocaleString() })}
+                        </div>
+                      )}
+                      {status && status.files.length > 0 ? (
+                        <div className="mt-2 space-y-1">
+                          {status.files.filter((file) => !vectorSearch.trim() || searchMatch(p.project.name, vectorSearch) || searchMatch(file.title, vectorSearch)).map((file) => {
+                            const color = file.status === 'indexed'
+                              ? 'var(--ok)'
+                              : file.status === 'stale' || file.status === 'encoding-error'
+                                ? 'var(--warn)'
+                                : 'var(--muted)'
+                            const label = file.status === 'indexed'
+                              ? t('settings.vectorIndexIndexed')
+                              : file.status === 'stale'
+                                ? t('settings.vectorIndexStale')
+                                : file.status === 'encoding-error'
+                                  ? t('settings.vectorIndexEncodingError')
+                                  : t('settings.vectorIndexNotBuilt')
+                            const fileKey = `${p.project.id}:${file.kind}:${file.id}`
+                            const canRebuild = file.status !== 'encoding-error'
+                            const fileAction = file.status === 'indexed'
+                              ? t('settings.vectorIndexRebuildFile')
+                              : file.status === 'stale'
+                                ? t('settings.vectorIndexUpdateFile')
+                                : t('settings.vectorIndexBuildFile')
+                            return (
+                              <div key={`${file.kind}:${file.id}`} className="flex items-center gap-2 text-xs">
+                                <span className="h-1.5 w-1.5 rounded-full" style={{ background: color }} />
+                                <span className="min-w-0 flex-1 truncate">{file.title}</span>
+                                <span style={{ color }}>{label}</span>
+                                <span style={{ color: 'var(--muted)' }}>{t('settings.vectorIndexFileChunks', { n: file.chunkCount })}</span>
+                                <button
+                                  className="btn !py-0.5 text-[11px]"
+                                  disabled={vectorBusy || !canRebuild}
+                                  title={file.status === 'encoding-error' ? t('settings.vectorIndexEncodingRepairFirst') : fileAction}
+                                  onClick={() => void rebuildVectorFile(p.project.id, file)}
+                                >
+                                  <RefreshCw size={11} />
+                                  {vectorBusyKey === fileKey ? t('settings.vectorIndexBuilding') : fileAction}
+                                </button>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      ) : status ? (
+                        <div className="mt-2 text-xs" style={{ color: 'var(--muted)' }}>{t('settings.vectorIndexNoFiles')}</div>
+                      ) : null}
                     </div>
-                  )}
-                  {status && status.files.length > 0 ? (
-                    <div className="mt-2 space-y-1">
-                      {status.files.map((file) => {
-                        const color = file.status === 'indexed'
-                          ? 'var(--ok)'
-                          : file.status === 'stale' || file.status === 'encoding-error'
-                            ? 'var(--warn)'
-                            : 'var(--muted)'
-                        const label = file.status === 'indexed'
-                          ? t('settings.vectorIndexIndexed')
-                          : file.status === 'stale'
-                            ? t('settings.vectorIndexStale')
-                            : file.status === 'encoding-error'
-                              ? t('settings.vectorIndexEncodingError')
-                              : t('settings.vectorIndexNotBuilt')
-                         const fileKey = `${p.project.id}:${file.kind}:${file.id}`
-                         const canRebuild = file.status !== 'encoding-error'
-                         const fileAction = file.status === 'indexed'
-                           ? t('settings.vectorIndexRebuildFile')
-                           : file.status === 'stale'
-                             ? t('settings.vectorIndexUpdateFile')
-                             : t('settings.vectorIndexBuildFile')
-                         return (
-                           <div key={`${file.kind}:${file.id}`} className="flex items-center gap-2 text-xs">
-                             <span className="h-1.5 w-1.5 rounded-full" style={{ background: color }} />
-                             <span className="min-w-0 flex-1 truncate">{file.title}</span>
-                             <span style={{ color }}>{label}</span>
-                             <span style={{ color: 'var(--muted)' }}>{t('settings.vectorIndexFileChunks', { n: file.chunkCount })}</span>
-                             <button
-                               className="btn !py-0.5 text-[11px]"
-                               disabled={vectorBusy || !canRebuild}
-                               title={file.status === 'encoding-error' ? t('settings.vectorIndexEncodingRepairFirst') : fileAction}
-                               onClick={() => void rebuildVectorFile(p.project.id, file)}
-                             >
-                               <RefreshCw size={11} />
-                               {vectorBusyKey === fileKey ? t('settings.vectorIndexBuilding') : fileAction}
-                             </button>
-                           </div>
-                         )
-                      })}
-                    </div>
-                  ) : status ? (
-                    <div className="mt-2 text-xs" style={{ color: 'var(--muted)' }}>{t('settings.vectorIndexNoFiles')}</div>
-                  ) : null}
-                </div>
-              )
-            })}
-          </div>
-        </Section>
+                  )
+                })}
+              </div>
+            </div>
+          </Section>
+        )}
 
-        <Section title={t('settings.archive')}>
-          <div className="space-y-3">
-            {workspace.trashedProjects.length > 0 && (
-              <div>
-                <div className="mb-1 text-xs font-semibold" style={{ color: 'var(--muted)' }}>{t('settings.projTrash')}</div>
-                {workspace.trashedProjects.map((p) => (
-                  <div key={p.id} className="flex items-center gap-2 py-0.5 text-sm">
-                    <span className="min-w-0 flex-1 truncate">{p.name}</span>
-                    <button className="btn !py-0.5 text-xs" onClick={async () => { await api.invoke('project:restore', p.id); await refresh() }}>{t('settings.restore')}</button>
-                    <button
-                      className="btn !py-0.5 text-xs"
-                      onClick={async () => {
-                        if (!(await confirmDialog(t('sidebar.confirmPurgeProject')))) return
-                        await api.invoke('project:purge', p.id)
-                        await refresh()
-                      }}
-                    >
-                      {t('settings.purge')}
-                    </button>
+        {activeSection === 'archive' && (
+          <Section title={t('settings.archive')}>
+            <div className="space-y-3">
+              <SearchBox value={archiveSearch} onChange={setArchiveSearch} placeholder={t('settings.searchEntries')} />
+              <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+                {archivedChatGroups.map(({ project, chats }) => (
+                  <div key={project.project.id} className="rounded-lg border p-3" style={{ borderColor: 'var(--border)' }}>
+                    <div className="mb-1 text-xs font-medium" style={{ color: 'var(--muted)' }}>{project.project.name}</div>
+                    {chats.map((chat) => (
+                      <div key={chat.id} className="flex items-center gap-2 py-0.5 text-sm">
+                        <span className="min-w-0 flex-1 truncate">{chat.title}</span>
+                        <button className="btn !py-0.5 text-xs" onClick={async () => { await api.invoke('chat:restore', chat.id); await refresh() }}>{t('settings.restore')}</button>
+                        <button className="btn !py-0.5 text-xs" onClick={async () => { if (!(await confirmDialog(t('sidebar.confirmPurgeChat')))) return; await api.invoke('chat:purge', chat.id); await refresh() }}>{t('settings.purge')}</button>
+                      </div>
+                    ))}
                   </div>
                 ))}
+                {!hasArchivedChatMatches && (
+                  <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.archivedChatsEmpty')}</div>
+                )}
               </div>
-            )}
-            {workspace.projects.map((p) => {
-              const hasArchive = p.archivedChats.length > 0 || p.trashedDocs.length > 0
-              if (!hasArchive) return null
-              return (
-                <div key={p.project.id} className="rounded border p-2" style={{ borderColor: 'var(--border)' }}>
-                  <div className="text-sm font-medium">{p.project.name}</div>
-                  {p.archivedChats.length > 0 && (
-                    <div className="mt-1">
-                      <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.archivedChats')}</div>
-                      {p.archivedChats.map((c) => (
-                        <div key={c.id} className="flex items-center gap-2 py-0.5 text-sm">
-                          <span className="min-w-0 flex-1 truncate">{c.title}</span>
-                          <button className="btn !py-0.5 text-xs" onClick={async () => { await api.invoke('chat:restore', c.id); await refresh() }}>{t('settings.restore')}</button>
-                          <button className="btn !py-0.5 text-xs" onClick={async () => { if (!(await confirmDialog(t('sidebar.confirmPurgeChat')))) return; await api.invoke('chat:purge', c.id); await refresh() }}>{t('settings.purge')}</button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {p.trashedDocs.length > 0 && (
-                    <div className="mt-1">
-                      <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.trashedDocs')}</div>
-                      {p.trashedDocs.map((doc) => (
-                        <div key={doc.id} className="flex items-center gap-2 py-0.5 text-sm">
-                          <span className="min-w-0 flex-1 truncate">{doc.title}</span>
-                          <button className="btn !py-0.5 text-xs" onClick={async () => { await api.invoke('doc:restore', doc.id); await refresh() }}>{t('settings.restore')}</button>
-                          <button className="btn !py-0.5 text-xs" onClick={async () => { if (!(await confirmDialog(t('sidebar.confirmPurgeDoc')))) return; await api.invoke('doc:purge', doc.id); await refresh() }}>{t('settings.purge')}</button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-            {workspace.trashedProjects.length === 0 && !workspace.projects.some((p) => p.archivedChats.length > 0 || p.trashedDocs.length > 0) && (
-              <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.archiveEmpty')}</div>
-            )}
-          </div>
-        </Section>
+            </div>
+          </Section>
+        )}
 
-        <Section title={t('settings.version')}>
+        {activeSection === 'trash' && (
+          <Section title={t('settings.trash')}>
+            <div className="space-y-3">
+              <SearchBox value={trashSearch} onChange={setTrashSearch} placeholder={t('settings.searchEntries')} />
+              <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+                {matchingTrashedProjects.length > 0 && (
+                  <div className="rounded-lg border p-3" style={{ borderColor: 'var(--border)' }}>
+                    <div className="mb-1 text-xs font-medium" style={{ color: 'var(--muted)' }}>{t('settings.projTrash')}</div>
+                    {matchingTrashedProjects.map((project) => (
+                      <div key={project.id} className="flex items-center gap-2 py-0.5 text-sm">
+                        <span className="min-w-0 flex-1 truncate">{project.name}</span>
+                        <button className="btn !py-0.5 text-xs" onClick={async () => { await api.invoke('project:restore', project.id); await refresh() }}>{t('settings.restore')}</button>
+                        <button
+                          className="btn !py-0.5 text-xs"
+                          onClick={async () => {
+                            if (!(await confirmDialog(t('sidebar.confirmPurgeProject')))) return
+                            await api.invoke('project:purge', project.id)
+                            await refresh()
+                          }}
+                        >
+                          {t('settings.purge')}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {trashDocGroups.map(({ project, docs }) => (
+                  <div key={project.project.id} className="rounded-lg border p-3" style={{ borderColor: 'var(--border)' }}>
+                    <div className="mb-1 text-xs font-medium" style={{ color: 'var(--muted)' }}>{project.project.name}</div>
+                    <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.trashedDocs')}</div>
+                    {docs.map((doc) => (
+                      <div key={doc.id} className="flex items-center gap-2 py-0.5 text-sm">
+                        <span className="min-w-0 flex-1 truncate">{doc.title}</span>
+                        <button className="btn !py-0.5 text-xs" onClick={async () => { await api.invoke('doc:restore', doc.id); await refresh() }}>{t('settings.restore')}</button>
+                        <button className="btn !py-0.5 text-xs" onClick={async () => { if (!(await confirmDialog(t('sidebar.confirmPurgeDoc')))) return; await api.invoke('doc:purge', doc.id); await refresh() }}>{t('settings.purge')}</button>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+                {!hasTrashMatches && (
+                  <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.trashEmpty')}</div>
+                )}
+              </div>
+            </div>
+          </Section>
+        )}
+
+        {activeSection === 'version' && (        <Section title={t('settings.version')}>
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -652,12 +715,13 @@ export default function SettingsPane(): JSX.Element {
               </button>
             </div>
           )}
-        </Section>
+        </Section> )}
 
-        <Section title={t('settings.usage')}>
+        {activeSection === 'usage' && (        <Section title={t('settings.usage')}>
           {usage ? <UsageCharts snapshot={usage} /> : <div className="text-sm" style={{ color: 'var(--muted)' }}>{t('summary.loading')}</div>}
-        </Section>
-      </div>
+        </Section> )}
+        </div>
+      </main>
 
       {showHistory && (
         <Modal
@@ -720,7 +784,107 @@ export default function SettingsPane(): JSX.Element {
   )
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }): JSX.Element {
+
+function SearchBox({
+  value,
+  onChange,
+  placeholder
+}: {
+  value: string
+  onChange: (value: string) => void
+  placeholder: string
+}): JSX.Element {
+  return (
+    <div className="relative">
+      <Search size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2" style={{ color: 'var(--muted)' }} />
+      <input
+        className="input" style={{ paddingLeft: 32 }}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        aria-label={placeholder}
+      />
+    </div>
+  )
+}
+
+function LimitGroup({
+  title,
+  basicLabel,
+  dynamicLabel,
+  basic,
+  dynamic,
+  minBasic,
+  maxBasic,
+  minDynamic,
+  maxDynamic,
+  onChange
+}: {
+  title: string
+  basicLabel: string
+  dynamicLabel: string
+  basic: number
+  dynamic: number
+  minBasic: number
+  maxBasic: number
+  minDynamic: number
+  maxDynamic: number
+  onChange: (key: 'basic' | 'dynamic', value: number) => void
+}): JSX.Element {
+  const update = (key: 'basic' | 'dynamic', value: number, min: number, max: number): void => {
+    const next = Number.isFinite(value) ? Math.round(value) : min
+    onChange(key, Math.max(min, Math.min(max, next)))
+  }
+  return (
+    <div className="rounded-lg border p-3" style={{ borderColor: 'var(--border)' }}>
+      <div className="mb-3 text-sm font-medium">{title}</div>
+      <div className="space-y-3">
+        <LimitRow label={basicLabel} value={basic} min={minBasic} max={maxBasic} onChange={(value) => update('basic', value, minBasic, maxBasic)} />
+        <LimitRow label={dynamicLabel} value={dynamic} min={minDynamic} max={maxDynamic} onChange={(value) => update('dynamic', value, minDynamic, maxDynamic)} />
+      </div>
+    </div>
+  )
+}
+
+function LimitRow({
+  label,
+  value,
+  min,
+  max,
+  onChange
+}: {
+  label: string
+  value: number
+  min: number
+  max: number
+  onChange: (value: number) => void
+}): JSX.Element {
+  return (
+    <div className="grid grid-cols-[7rem_minmax(0,1fr)_4.5rem] items-center gap-3 text-sm">
+      <span>{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={1}
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+        aria-label={label}
+      />
+      <input
+        className="input !py-1 text-center"
+        type="number"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+        aria-label={`${label}??`}
+      />
+    </div>
+  )
+}
+
+function Section({ title, children }: { title: string; children: ReactNode }): JSX.Element {
   return (
     <div className="rounded-xl border p-4" style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}>
       <div className="mb-3 text-sm font-semibold">{title}</div>
@@ -729,7 +893,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }): JSX.Element {
+function Field({ label, children }: { label: string; children: ReactNode }): JSX.Element {
   return (
     <div>
       <div className="mb-1 text-xs" style={{ color: 'var(--muted)' }}>
@@ -740,7 +904,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-function InjGroup({ title, children }: { title: string; children: React.ReactNode }): JSX.Element {
+function InjGroup({ title, children }: { title: string; children: ReactNode }): JSX.Element {
   return (
     <div>
       <div className="mb-1 text-xs font-semibold" style={{ color: 'var(--muted)' }}>
@@ -763,5 +927,5 @@ function InjCheck({ label, checked, onChange }: { label: string; checked: boolea
 function formatRollup(r: DocRollup): string {
   const changes = (Array.isArray(r.stateChanges) ? r.stateChanges : []).map((s) => `- ${s}`).join('\n')
   const causal = (Array.isArray(r.causality) ? r.causality : []).map((s) => `- ${s}`).join('\n')
-  return `总览：${r.overview || '（无）'}\n\n状态变化：\n${changes || '（无）'}\n\n因果/伏笔：\n${causal || '（无）'}`
+  return `总览：${r.overview || '（无）'}\n\n状态变化：\n${changes || '（无）'}\n\n跨文档因果关系：\n${causal || '（无）'}`
 }

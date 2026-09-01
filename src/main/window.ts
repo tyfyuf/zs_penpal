@@ -1,8 +1,31 @@
-import { BrowserWindow, shell } from 'electron'
-import { join } from 'path'
+import { app, BrowserWindow, shell } from 'electron'
+import { existsSync } from 'fs'
+import { join, resolve } from 'path'
 import { getConfigCached } from './services/config.service'
 
 let mainWindow: BrowserWindow | null = null
+let settingsWindow: BrowserWindow | null = null
+
+/**
+ * Resolve the branded window icon in both development and packaged builds.
+ * electron-builder's buildResources directory is not part of app.asar, so
+ * packaged builds receive the runtime copies through extraResources.
+ */
+function getWindowIconPath(): string | undefined {
+  const fileName = process.platform === 'win32' ? 'icon.ico' : 'icon.png'
+  const candidates = [
+    // Packaged build: electron-builder copies the icon to resources/.
+    join(process.resourcesPath, fileName),
+    // Development build: __dirname points at out/main after electron-vite build.
+    resolve(__dirname, '../../build', fileName),
+    join(process.cwd(), 'build', fileName),
+    join(app.getAppPath(), 'build', fileName)
+  ]
+
+  return candidates.find((candidate) => existsSync(candidate))
+}
+
+const windowIconPath = getWindowIconPath()
 
 function windowTitle(): string {
   try {
@@ -21,6 +44,7 @@ export function createMainWindow(): BrowserWindow {
     show: false,
     autoHideMenuBar: true,
     title: windowTitle(),
+    ...(windowIconPath ? { icon: windowIconPath } : {}),
     backgroundColor: '#0b0f14',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -30,9 +54,14 @@ export function createMainWindow(): BrowserWindow {
     }
   })
 
+  if (windowIconPath && process.platform === 'win32') {
+    mainWindow.setIcon(windowIconPath)
+  }
+
   mainWindow.on('ready-to-show', () => mainWindow?.show())
   mainWindow.on('closed', () => {
     mainWindow = null
+    closeSettingsWindow()
   })
 
   // 外部链接交给系统浏览器
@@ -56,7 +85,63 @@ export function getMainWindow(): BrowserWindow | null {
 
 /** 主进程 → 渲染进程事件推送 */
 export function broadcast(channel: string, payload: unknown): void {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(channel, payload)
+  for (const win of [mainWindow, settingsWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
   }
+}
+
+
+export function openSettingsWindow(): BrowserWindow {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.show()
+    settingsWindow.focus()
+    return settingsWindow
+  }
+
+  settingsWindow = new BrowserWindow({
+    width: 980,
+    height: 720,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    center: true,
+    show: false,
+    autoHideMenuBar: true,
+    title: '\u8bbe\u7f6e - Penpal',
+    ...(windowIconPath ? { icon: windowIconPath } : {}),
+    backgroundColor: '#0b0f14',
+    parent: mainWindow ?? undefined,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  })
+
+  if (windowIconPath && process.platform === 'win32') {
+    settingsWindow.setIcon(windowIconPath)
+  }
+
+  settingsWindow.on('ready-to-show', () => settingsWindow?.show())
+  settingsWindow.on('closed', () => {
+    settingsWindow = null
+  })
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    void settingsWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}#settings`)
+  } else {
+    void settingsWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash: 'settings' })
+  }
+
+  return settingsWindow
+}
+
+export function closeSettingsWindow(): void {
+  if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close()
+  settingsWindow = null
+}
+
+export function getSettingsWindow(): BrowserWindow | null {
+  return settingsWindow
 }

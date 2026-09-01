@@ -822,7 +822,10 @@ export async function writeDocSummary(projectId: string, docId: string, summary:
 /** 璇诲彇瀵硅瘽鎽樿锛涙棫鏍煎紡锛堝崟鏍囩鐗堬級瑙嗕负鏃犳憳瑕侊紝瑙﹀彂閲嶆柊鐢熸垚 */
 export async function readChatSummary(projectId: string, chatId: string): Promise<ChatSummary | null> {
   const s = await readJson<ChatSummary>(chatSummaryPath(projectId, chatId))
-  if (!s || !Array.isArray(s.items)) return null
+  // A chat summary is incremental data, so an old single-list format or a
+  // partially written file must be rebuilt rather than silently reused.
+  if (!s || !Array.isArray(s.items) || !Array.isArray(s.compacted)) return null
+  if (typeof s.lastMessageId !== 'string' || !Number.isInteger(s.messageCount) || s.messageCount < 0) return null
   return s
 }
 

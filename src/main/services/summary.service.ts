@@ -935,6 +935,35 @@ function enqueue<T>(task: () => Promise<T>): Promise<T> {
   return run
 }
 
+function isChatSummaryComplete(
+  existing: ChatSummary,
+  turns: { id: string; role: string; content: string }[],
+  tailStart: number,
+  needCompact: boolean
+): boolean {
+  const tail = turns.slice(tailStart)
+  if (existing.items.length !== tail.length) return false
+  const itemsById = new Map(existing.items.map((item) => [item.messageId, item]))
+  for (const turn of tail) {
+    const item = itemsById.get(turn.id)
+    const role = turn.role === 'user' ? 'user' : 'assistant'
+    if (!item || item.role !== role || typeof item.summary !== 'string' || item.summary.trim().length === 0) return false
+  }
+
+  const intervals = [...existing.compacted].sort((a, b) => a.startIndex - b.startIndex)
+  const expectedEnd = tailStart - 1
+  if (!needCompact) return intervals.length === 0
+  if (expectedEnd < 0) return intervals.length === 0
+  let cursor = 0
+  for (const interval of intervals) {
+    if (!Number.isInteger(interval.startIndex) || !Number.isInteger(interval.endIndex)
+      || interval.startIndex !== cursor || interval.endIndex < interval.startIndex
+      || typeof interval.summary !== 'string' || interval.summary.trim().length === 0) return false
+    cursor = interval.endIndex + 1
+  }
+  return cursor === expectedEnd + 1
+}
+
 async function generateChatSummary(chatId: string, force = false): Promise<void> {
   const cfg = await loadApiSettings()
   if (!cfg.apiKey) throw new Error('未配置 API Key')
@@ -945,21 +974,22 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
 
   const lastMessageId = turns[turns.length - 1].id
   const messageCount = turns.length
+  const tailStart = Math.max(0, turns.length - CHAT_TAIL_WINDOW)
+  const dialogueTokens = estimateInputTokens(
+    turns.map((m) => m.content).join('\n'),
+    cfg.model
+  )
+  const needCompact = turns.length > CHAT_COMPACT_THRESHOLD || dialogueTokens > inputBudget(cfg) * 0.6
   const existing = await readChatSummary(chat.projectId, chatId)
-  // 变化检测：无变化则不调用（手动重新生成时强制跳过）
-  if (!force && existing && existing.lastMessageId === lastMessageId && existing.messageCount === messageCount) return
+  // ???????????? ID?????????????????????
+  // ????/???????????????????????????????
+  if (!force && existing && existing.lastMessageId === lastMessageId && existing.messageCount === messageCount && isChatSummaryComplete(existing, turns, tailStart, needCompact)) return
 
   const key = `chat:${chatId}`
   markGenerating(key)
   let succeeded = false
   try {
     // Keep the latest CHAT_TAIL_WINDOW turns verbatim; compact older turns only when needed.
-    const tailStart = Math.max(0, turns.length - CHAT_TAIL_WINDOW)
-    const dialogueTokens = estimateInputTokens(
-      turns.map((m) => m.content).join('\n'),
-      cfg.model
-    )
-    const needCompact = turns.length > CHAT_COMPACT_THRESHOLD || dialogueTokens > inputBudget(cfg) * 0.6
     const prev = force ? [] : Array.isArray(existing?.compacted) ? existing.compacted : []
     const kept = prev.filter((iv) => iv.endIndex < tailStart)
     const lastCovered = kept.reduce((m, iv) => Math.max(m, iv.endIndex), -1)
@@ -1474,23 +1504,44 @@ export async function searchProjectSummaries(projectId: string, query: string): 
 // ---------------------------------------------------------------------------
 // 大摘要（rollup）：写作文档 > ROLLUP_THRESHOLD 时，按创建时间每 ROLLUP_BATCH 个聚合成整体摘要。
 // 基于成员文档摘要生成（非全文，省 token）；成员摘要指纹任一变化 → STALE。
-// ---------------------------------------------------------------------------
-
 export const ROLLUP_THRESHOLD = 50
 export const ROLLUP_BATCH = 10
+export const DOC_ROLLUP_SCHEMA_VERSION = 3
+
+type RollupReadyDoc = {
+  id: string
+  title: string
+  createdAt: string
+  summary: DocSummary
+}
+
+type RollupGroup = {
+  id: string
+  rangeLabel: string
+  docs: RollupReadyDoc[]
+}
+
+type RollupProjectState = {
+  stored: DocRollup[]
+  groups: RollupGroup[]
+  stale: Set<string>
+  readyDocCount: number
+  summarizableDocCount: number
+  pendingSummaryCount: number
+}
 
 function rollupPrompt(lang: Lang): string {
   return lang === 'en'
-    ? `You are a story continuity editor. Below are summaries of several documents in chronological order. Distill the cross-document memory and output EXACTLY ONE JSON object (no code fences, no prose):
-- "overview": the overall arc of this block, one paragraph, at most 300 words
-- "stateChanges": key changes in character/world state (array of strings, each at most 80 words) — write WHAT CHANGED
-- "causality": cross-document cause-effect and foreshadowing ledger (array of strings, each at most 80 words) — write what was planted / how it advanced / whether it resolved
-Leave a field empty ([] or "") when absent — DO NOT invent. All content in English. Output valid JSON only.`
-    : `你是故事连续性编辑。下面是按时间顺序排列的若干文档摘要。请提炼这些文档跨块的总体记忆，输出恰好一个 JSON 对象（不要输出 JSON 以外的任何内容，不要用代码块包裹）：
-- "overview"：这段剧情的总体走向，一段话，不超过 300 字
-- "stateChanges"：人物状态/世界设定的关键变化，字符串数组，每条不超过 80 字——写"什么变了"
-- "causality"：跨篇因果链与伏笔账本，字符串数组，每条不超过 80 字——写"埋了什么/如何推进/是否回收"
-信息不足的字段留空数组或空字符串，禁止编造。只输出合法 JSON。`
+    ? `You are a story continuity editor. Below are verified summaries of several documents in chronological order. Distill only cross-document memory and output EXACTLY ONE JSON object (no code fences, no prose):
+- "overview": the overall arc of this block, one concise paragraph, at most 300 words
+- "stateChanges": key changes in character/world state across documents (array of strings, each at most 80 words); write WHAT CHANGED
+- "causality": only explicitly supported cross-document cause-and-effect links (array of strings, each at most 80 words)
+Do not extract foreshadowing, predict future events, infer unsupported links, or invent facts. Leave a field empty ([] or "") when absent. All content in English. Output valid JSON only.`
+    : `你是一名故事连续性编辑。下面是按时间顺序排列的多份已验证文档摘要。只提炼跨文档记忆，并且严格输出一个 JSON 对象（不要代码围栏，不要额外解释）：
+- "overview"：这一组文档的整体发展，用一个简洁段落概括，最多 300 字
+- "stateChanges"：文档之间人物/世界状态的关键变化（字符串数组，每项最多 80 字），只写“发生了什么变化”
+- "causality"：仅写原文摘要明确支持的跨文档因果关系（字符串数组，每项最多 80 字）
+禁止提取伏笔、预测未来、推断摘要未明确支持的关系或编造事实。没有内容时使用空数组或空字符串。只输出有效 JSON。`
 }
 
 function validRollup(parsed: unknown, compact = false): { overview: string; stateChanges: string[]; causality: string[] } | null {
@@ -1503,9 +1554,85 @@ function validRollup(parsed: unknown, compact = false): { overview: string; stat
   return result.overview ? result : null
 }
 
+function sameIdList(left: ReadonlyArray<string> | undefined, right: ReadonlyArray<string>): boolean {
+  return Array.isArray(left) && left.length === right.length && left.every((id, index) => id === right[index])
+}
+
+async function inspectDocRollupProject(projectId: string): Promise<RollupProjectState> {
+  const tree = (await buildSnapshot()).projects.find((p) => p.project.id === projectId)
+  const docs = [...(tree?.docs ?? [])].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  const states = await Promise.all(docs.map(async (doc) => {
+    try {
+      const [{ content }, summary] = await Promise.all([readDoc(doc.id), readDocSummary(projectId, doc.id)])
+      const summarizable = !analyzeTextIntegrity(content).suspicious
+        && nonWhitespaceLength(content) > 0
+        && !isShortDocForSummary(content)
+      const ready = summarizable
+        && !!summary
+        && summary.generation.state === 'complete'
+        && !isSourceStale(summary, content)
+      return { doc, summarizable, ready, summary: ready ? summary : null }
+    } catch {
+      return { doc, summarizable: false, ready: false, summary: null }
+    }
+  }))
+  const readyDocs: RollupReadyDoc[] = states
+    .filter((state): state is typeof state & { ready: true; summary: DocSummary } => state.ready && !!state.summary)
+    .map((state) => ({ id: state.doc.id, title: state.doc.title, createdAt: state.doc.createdAt, summary: state.summary }))
+  const summarizableDocCount = states.filter((state) => state.summarizable).length
+  const pendingSummaryCount = states.filter((state) => state.summarizable && !state.ready).length
+  const groups: RollupGroup[] = readyDocs.length >= ROLLUP_THRESHOLD
+    ? Array.from({ length: Math.ceil(readyDocs.length / ROLLUP_BATCH) }, (_, index) => {
+        const start = index * ROLLUP_BATCH
+        const groupDocs = readyDocs.slice(start, start + ROLLUP_BATCH)
+        const rangeLabel = `${start + 1}-${start + groupDocs.length}`
+        return { id: `${projectId}:${rangeLabel}`, rangeLabel, docs: groupDocs }
+      })
+    : []
+  const stored = await readDocRollups(projectId)
+  const currentById = new Map(groups.map((group) => [group.id, group]))
+  const stale = new Set<string>()
+  for (const rollup of stored) {
+    const group = currentById.get(rollup.id)
+    const fingerprints = group
+      ? Object.fromEntries(group.docs.map((doc) => [doc.id, doc.summary.sourceFingerprint || '']))
+      : {}
+    const valid = !!group
+      && rollup.schemaVersion === DOC_ROLLUP_SCHEMA_VERSION
+      && !!rollup.overview
+      && sameIdList(rollup.docIds, group.docs.map((doc) => doc.id))
+      && Object.keys(fingerprints).length === Object.keys(rollup.sourceFingerprints ?? {}).length
+      && Object.entries(fingerprints).every(([docId, fingerprint]) => rollup.sourceFingerprints?.[docId] === fingerprint)
+    if (!valid) stale.add(rollup.id)
+  }
+  for (const group of groups) {
+    if (!stored.some((rollup) => rollup.id === group.id && !stale.has(rollup.id))) stale.add(group.id)
+  }
+  return {
+    stored,
+    groups,
+    stale,
+    readyDocCount: readyDocs.length,
+    summarizableDocCount,
+    pendingSummaryCount
+  }
+}
+
+export async function getUsableDocRollups(projectId: string): Promise<DocRollup[]> {
+  const state = await inspectDocRollupProject(projectId)
+  if (state.pendingSummaryCount > 0) return []
+  const usable = new Set(state.groups.map((group) => group.id))
+  return state.stored.filter((rollup) => usable.has(rollup.id) && !state.stale.has(rollup.id))
+}
+
+export async function projectDocRollupsNeedMaintenance(projectId: string): Promise<boolean> {
+  const state = await inspectDocRollupProject(projectId)
+  return state.pendingSummaryCount === 0 && state.stale.size > 0
+}
+
 async function buildRollupForChunk(
   projectId: string,
-  docs: { id: string }[],
+  docs: RollupReadyDoc[],
   rangeLabel: string,
   settings: ApiSettings,
   existingRollup: DocRollup | undefined,
@@ -1515,16 +1642,20 @@ async function buildRollupForChunk(
   const summaries: DocSummary[] = []
   for (const d of docs) {
     const summary = await readDocSummary(projectId, d.id)
-    if (summary) {
+    if (summary && summary.generation.state === 'complete') {
       summaries.push(summary)
       fingerprints[d.id] = summary.sourceFingerprint || ''
     }
   }
   if (summaries.length !== docs.length) return null
 
-  if (!force && existingRollup && existingRollup.overview) {
-    const unchanged = Object.entries(fingerprints).every(([docId, fingerprint]) => existingRollup.sourceFingerprints[docId] === fingerprint)
-    if (unchanged) return existingRollup
+  if (!force && existingRollup
+    && existingRollup.schemaVersion === DOC_ROLLUP_SCHEMA_VERSION
+    && sameIdList(existingRollup.docIds, docs.map((doc) => doc.id))
+    && existingRollup.overview
+    && Object.keys(fingerprints).length === Object.keys(existingRollup.sourceFingerprints ?? {}).length
+    && Object.entries(fingerprints).every(([docId, fingerprint]) => existingRollup.sourceFingerprints?.[docId] === fingerprint)) {
+    return existingRollup
   }
 
   const content = summaries.map((summary, index) => `[#${index + 1}]\n${storyBlock(summary, settings.language)}`).join('\n\n')
@@ -1545,42 +1676,37 @@ async function buildRollupForChunk(
     return {
       id: `${projectId}:${rangeLabel}`, projectId, docIds: docs.map((d) => d.id), rangeLabel,
       overview: parsed.overview, stateChanges: parsed.stateChanges, causality: parsed.causality,
-      schemaVersion: SUMMARY_SCHEMA_VERSION, sourceFingerprints: fingerprints, updatedAt: nowIso()
-    } as DocRollup
+      schemaVersion: DOC_ROLLUP_SCHEMA_VERSION, sourceFingerprints: fingerprints, updatedAt: nowIso()
+    }
   } catch (err) {
     logError('summary:rollup', `Rollup generation failed projectId=${projectId} range=${rangeLabel}`, (err as Error).message)
     return null
   }
 }
 
-/** 生成/刷新项目大摘要（增量：成员未变的块复用） */
+/** 生成或重建项目中的大摘要 */
 export async function generateDocRollups(projectId: string, progressKey?: string): Promise<{ ok: boolean; error?: string }> {
   const cfg = await loadConfig()
-  if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未开启' }
-  const settings = await loadApiSettings()
-  if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }
-  const tree = (await buildSnapshot()).projects.find((p) => p.project.id === projectId)
-  if (!tree) return { ok: false, error: '项目不存在' }
-
-  const docs = [...tree.docs].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-  if (docs.length < ROLLUP_THRESHOLD) {
-    await writeDocRollups(projectId, [])
+  if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未启用' }
+  const state = await inspectDocRollupProject(projectId)
+  if (state.summarizableDocCount < ROLLUP_THRESHOLD) {
+    if (state.stored.length > 0) await writeDocRollups(projectId, [])
     return { ok: true }
   }
+  if (state.pendingSummaryCount > 0) return { ok: false, error: '部分写作文档的小摘要尚未完成，暂不能生成大摘要' }
+  if (state.groups.length === 0) return { ok: true }
+  const settings = await loadApiSettings()
+  if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }
 
-  const existing = await readDocRollups(projectId)
+  const existingById = new Map(state.stored.map((rollup) => [rollup.id, rollup]))
   const rollups: DocRollup[] = []
-  const totalBatches = Math.ceil(docs.length / ROLLUP_BATCH)
-  if (progressKey) reportSummaryProgress(progressKey, 'merging', 0, totalBatches)
+  if (progressKey) reportSummaryProgress(progressKey, 'merging', 0, state.groups.length)
   try {
-    for (let i = 0; i < docs.length; i += ROLLUP_BATCH) {
-      const group = docs.slice(i, i + ROLLUP_BATCH)
-      const rangeLabel = `${i + 1}-${Math.min(i + ROLLUP_BATCH, docs.length)}`
-      const existingRollup = existing.find((r) => r.rangeLabel === rangeLabel && r.docIds.length === group.length)
-      const rollup = await buildRollupForChunk(projectId, group, rangeLabel, settings, existingRollup, false)
-      if (!rollup) return { ok: false, error: `Rollup generation incomplete for group ${rangeLabel}` }
+    for (const group of state.groups) {
+      const rollup = await buildRollupForChunk(projectId, group.docs, group.rangeLabel, settings, existingById.get(group.id), false)
+      if (!rollup) return { ok: false, error: `Rollup generation incomplete for group ${group.rangeLabel}` }
       rollups.push(rollup)
-      if (progressKey) reportSummaryProgress(progressKey, 'merging', rollups.length, totalBatches, `Rollup ${rollups.length}/${totalBatches}`)
+      if (progressKey) reportSummaryProgress(progressKey, 'merging', rollups.length, state.groups.length, `Rollup ${rollups.length}/${state.groups.length}`)
     }
     if (progressKey) reportSummaryProgress(progressKey, 'writing', 0, 1)
     await writeDocRollups(projectId, rollups)
@@ -1595,14 +1721,16 @@ export async function generateDocRollups(projectId: string, progressKey?: string
 export async function regenerateDocRollup(projectId: string, rollupId: string, progressKey?: string): Promise<{ ok: boolean; error?: string }> {
   const settings = await loadApiSettings()
   if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }
-  const existing = await readDocRollups(projectId)
-  const target = existing.find((r) => r.id === rollupId)
-  if (!target) return { ok: false, error: '大摘要不存在' }
-  const tree = (await buildSnapshot()).projects.find((p) => p.project.id === projectId)
-  const docs = (tree?.docs ?? []).filter((d) => target.docIds.includes(d.id))
-  const rollup = await buildRollupForChunk(projectId, docs, target.rangeLabel, settings, target, true)
+  const state = await inspectDocRollupProject(projectId)
+  if (state.pendingSummaryCount > 0) return { ok: false, error: '部分写作文档的小摘要尚未完成，暂不能重建大摘要' }
+  const group = state.groups.find((candidate) => candidate.id === rollupId)
+  if (!group) return { ok: false, error: '大摘要不存在或对应的文档分组已变化' }
+  const existing = state.stored.find((rollup) => rollup.id === rollupId)
+  const rollup = await buildRollupForChunk(projectId, group.docs, group.rangeLabel, settings, existing, true)
   if (!rollup) return { ok: false, error: '生成失败：成员文档摘要不完整' }
-  const next = existing.map((r) => (r.id === rollupId ? rollup : r))
+  const next = state.stored.some((item) => item.id === rollupId)
+    ? state.stored.map((item) => (item.id === rollupId ? rollup : item))
+    : [...state.stored, rollup]
   await writeDocRollups(projectId, next)
   return { ok: true }
 }
@@ -1613,29 +1741,18 @@ export async function getDocRollup(projectId: string, rollupId: string): Promise
   return rollups.find((r) => r.id === rollupId) ?? null
 }
 
-/** 大摘要概览（设置页），含 STALE 检测 */
+/** 大摘要概览（设置页展示），含 STALE 检测 */
 export async function listDocRollups(projectId: string): Promise<DocRollupOverview> {
-  const tree = (await buildSnapshot()).projects.find((p) => p.project.id === projectId)
-  const totalDocs = tree?.docs.length ?? 0
-  const rollups = await readDocRollups(projectId)
-  const items = await Promise.all(
-    rollups.map(async (r) => {
-      let stale = false
-      for (const docId of r.docIds) {
-        const s = await readDocSummary(projectId, docId)
-        if (!s) {
-          stale = true
-          break
-        }
-        if ((s.sourceFingerprint || '') !== (r.sourceFingerprints[docId] ?? '')) {
-          stale = true
-          break
-        }
-      }
-      return { id: r.id, rangeLabel: r.rangeLabel, docCount: r.docIds.length, updatedAt: r.updatedAt, stale, generating: false }
-    })
-  )
-  return { rollups: items, totalDocs, threshold: ROLLUP_THRESHOLD, batchSize: ROLLUP_BATCH }
+  const state = await inspectDocRollupProject(projectId)
+  const items = state.stored.map((rollup) => ({
+    id: rollup.id,
+    rangeLabel: rollup.rangeLabel,
+    docCount: rollup.docIds.length,
+    updatedAt: rollup.updatedAt,
+    stale: state.stale.has(rollup.id),
+    generating: false
+  }))
+  return { rollups: items, totalDocs: state.summarizableDocCount, threshold: ROLLUP_THRESHOLD, batchSize: ROLLUP_BATCH }
 }
 
 // ---------------------------------------------------------------------------
@@ -1764,9 +1881,9 @@ export function buildRollupBlock(r: DocRollup, lang: Lang = 'zh'): string {
   const changes = (Array.isArray(r.stateChanges) ? r.stateChanges : []).map((s) => `- ${s}`).join('\n')
   const causal = (Array.isArray(r.causality) ? r.causality : []).map((s) => `- ${s}`).join('\n')
   if (en) {
-    return `【Rollup: docs ${r.rangeLabel}】\nOverview: ${r.overview || none}\nState changes:\n${changes || none}\nCausality/foreshadowing:\n${causal || none}`
+    return `【Rollup: docs ${r.rangeLabel}】\nOverview: ${r.overview || none}\nState changes:\n${changes || none}\nCross-document causality:\n${causal || none}`
   }
-  return `【大摘要：第 ${r.rangeLabel} 篇】\n总览：${r.overview || none}\n状态变化：\n${changes || none}\n因果/伏笔：\n${causal || none}`
+  return `【大摘要：第 ${r.rangeLabel} 篇】\n总览：${r.overview || none}\n状态变化：\n${changes || none}\n跨文档因果关系：\n${causal || none}`
 }
 
 /** 大摘要目录（供 B 两段式记忆菜单第一遍决策用） */
