@@ -39,7 +39,7 @@ import {
 import { atomicWriteJson, nowIso, readJson } from '../util'
 import { join } from 'path'
 import { getUserDataDir } from '../paths'
-import { computeSourceInfo, isSourceStale, SUMMARY_SCHEMA_VERSION } from '../summary-source'
+import { computeSourceInfo, isShortDocForSummary, isSourceStale, nonWhitespaceLength, SUMMARY_SCHEMA_VERSION } from '../summary-source'
 import { computeDefaultActive } from '../summary-relevance'
 import { logError } from './log.service'
 import { executeStructuredTask } from './structured-generation.service'
@@ -819,11 +819,18 @@ export function estimateChangedChars(prev: string, curr: string): number {
   return changed + Math.abs(prev.length - curr.length)
 }
 
-async function generateDocSummary(projectId: string, docId: string, content: string, cfg: ApiSettings, progressKey?: string): Promise<DocSummary> {
+async function generateDocSummary(
+  projectId: string,
+  docId: string,
+  content: string,
+  cfg: ApiSettings,
+  progressKey?: string,
+  previous?: DocSummary | null
+): Promise<DocSummary> {
   assertTextIntegrity(analyzeTextIntegrity(content), '\u6587\u6863')
   void projectId
   void docId
-  const result = await generateHierarchicalSummary('story', content, cfg, undefined, undefined, progressKey)
+  const result = await generateHierarchicalSummary('story', content, cfg, previous, undefined, progressKey)
   return {
     ...(result.summary as StorySummary),
     ...computeSourceInfo(content),
@@ -844,62 +851,54 @@ export async function ensureDocSummary(projectId: string, docId: string, current
   const settings = await loadApiSettings()
   if (!settings.apiKey) return null
 
-  const existing = await readDocSummary(projectId, docId)
-  if (!existing) {
-    const key = `doc:${docId}`
-    markGenerating(key)
-    let succeeded = false
-    try {
-      reportSummaryProgress(key, 'reading', 1, 1)
-      const summary = await generateDocSummary(projectId, docId, currentContent, settings, key)
-      reportSummaryProgress(key, 'writing', 0, 1)
-      await writeDocSummary(projectId, docId, summary)
-      reportSummaryProgress(key, 'writing', 1, 1)
-      succeeded = true
-      return summary
-    } catch (err) {
-      logError('summary:doc', `文档摘要生成失败 docId=${docId}`, (err as Error).message)
-      return null
-    } finally {
-      markDone(key, succeeded)
-    }
+  let content = currentContent
+  try {
+    content = (await readDoc(docId)).content
+  } catch {
+    // Fall back to the content captured by the caller.
   }
+  if (nonWhitespaceLength(content) === 0 || isShortDocForSummary(content)) return null
 
-  if (!isSourceStale(existing, currentContent)) return existing
+  const existing = await readDocSummary(projectId, docId)
+  const needsGeneration = !existing || isSourceStale(existing, content) || existing.generation.state === 'incomplete'
+  if (!needsGeneration) return existing
 
   const key = `doc:${docId}`
   markGenerating(key)
   let succeeded = false
   try {
     reportSummaryProgress(key, 'reading', 1, 1)
-    const summary = await generateDocSummary(projectId, docId, currentContent, settings, key)
+    const summary = await generateDocSummary(projectId, docId, content, settings, key, existing)
     reportSummaryProgress(key, 'writing', 0, 1)
     await writeDocSummary(projectId, docId, summary)
     reportSummaryProgress(key, 'writing', 1, 1)
     succeeded = true
     return summary
   } catch (err) {
-    logError('summary:doc', `文档摘要生成失败 docId=${docId}`, (err as Error).message)
+    logError('summary:doc', `自动生成文档摘要失败 docId=${docId}`, (err as Error).message)
     return existing
   } finally {
     markDone(key, succeeded)
   }
 }
 
-/** 手动重新生成文档摘要（摘要区入口） */
-export async function regenerateDocSummary(docId: string): Promise<{ ok: boolean; error?: string }> {
+/** Manually rebuild a document summary. Normal rebuilds reuse unchanged chunks. */
+export async function regenerateDocSummary(docId: string, forceFull = false): Promise<{ ok: boolean; error?: string }> {
   const key = `doc:${docId}`
   markGenerating(key)
   let succeeded = false
   try {
     const cfg = await loadConfig()
-    if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未开启' }
+    if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能已关闭' }
     const settings = await loadApiSettings()
     if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }
     reportSummaryProgress(key, 'reading', 0, 1)
     const { doc, content } = await readDoc(docId)
     reportSummaryProgress(key, 'reading', 1, 1)
-    const summary = await generateDocSummary(doc.projectId, docId, content, settings, key)
+    if (nonWhitespaceLength(content) === 0) return { ok: false, error: '文档内容为空，无法生成摘要' }
+    if (isShortDocForSummary(content)) return { ok: false, error: '短文档无需生成摘要，将按全文候选参与注入' }
+    const previous = forceFull ? null : await readDocSummary(doc.projectId, docId)
+    const summary = await generateDocSummary(doc.projectId, docId, content, settings, key, previous)
     reportSummaryProgress(key, 'writing', 0, 1)
     await writeDocSummary(doc.projectId, docId, summary)
     reportSummaryProgress(key, 'writing', 1, 1)
@@ -912,8 +911,6 @@ export async function regenerateDocSummary(docId: string): Promise<{ ok: boolean
   }
 }
 
-// ---------------------------------------------------------------------------
-// 对话摘要（逐条 + 变化检测）
 // ---------------------------------------------------------------------------
 
 let queue: Promise<unknown> = Promise.resolve()
@@ -1341,13 +1338,30 @@ export async function listProjectSummaries(projectId: string): Promise<ProjectSu
 
   const docs = await Promise.all(
     tree.docs.map(async (d) => {
-      const s = await readDocSummary(projectId, d.id)
+      const [{ content }, storedSummary] = await Promise.all([readDoc(d.id), readDocSummary(projectId, d.id)])
+      const length = nonWhitespaceLength(content)
+      const short = isShortDocForSummary(content)
+      const summary = length === 0 || short ? null : storedSummary
+      const status = length === 0
+        ? 'empty' as const
+        : short
+          ? 'short' as const
+          : !summary
+            ? 'missing' as const
+            : summary.generation.state === 'incomplete'
+              ? 'incomplete' as const
+              : isSourceStale(summary, content)
+                ? 'stale' as const
+                : 'fresh' as const
       return {
         docId: d.id,
         title: d.title,
-        hasSummary: !!s,
-        updatedAt: s?.updatedAt,
-        generating: isSummaryGenerating(`doc:${d.id}`)
+        hasSummary: !!summary,
+        updatedAt: summary?.updatedAt,
+        generating: isSummaryGenerating(`doc:${d.id}`),
+        status,
+        completedChunks: summary?.generation.completedChunks,
+        totalChunks: summary?.generation.totalChunks
       }
     })
   )
@@ -1677,7 +1691,12 @@ function displaySourceTitle(title: string, fallback: string): string {
   return normalized || fallback
 }
 
-export function buildDocSummaryBlock(s: DocSummary, source: SummarySource, lang: Lang = 'zh'): string {
+export function buildDocSummaryBlock(
+  s: DocSummary,
+  source: SummarySource,
+  lang: Lang = 'zh',
+  status: 'fresh' | 'stale' | 'incomplete' = 'fresh'
+): string {
   const title = displaySourceTitle(source.title, source.id)
   const head = lang === 'en' ? '\u3010Document verified memory\u3011' : '\u3010\u6587\u6863\u5df2\u9a8c\u8bc1\u8bb0\u5fc6\u3011'
   const sourceLine = lang === 'en'
@@ -1686,9 +1705,18 @@ export function buildDocSummaryBlock(s: DocSummary, source: SummarySource, lang:
   const rule = lang === 'en'
     ? 'This is verified reference material from the named document, not conversation history. Only source-verified facts are included; consult the original text when details are missing.'
     : '\u4ee5\u4e0b\u662f\u6307\u5b9a\u6587\u6863\u7684\u5df2\u9a8c\u8bc1\u53c2\u8003\u8d44\u6599\uff0c\u4e0d\u662f\u5f53\u524d\u5bf9\u8bdd\u5386\u53f2\u3002\u4ec5\u5305\u542b\u5df2\u5728\u539f\u6587\u4e2d\u9a8c\u8bc1\u7684\u9ad8\u4ef7\u503c\u4e8b\u5b9e\uff1b\u7f3a\u5931\u7ec6\u8282\u65f6\u5e94\u4ee5\u539f\u6587\u4e3a\u51c6\u3002'
+  const stateNote = status === 'stale'
+    ? (lang === 'en'
+      ? 'Status: OUTDATED. The source changed after this summary was generated, so some details may no longer be current.'
+      : '\u72b6\u6001\uff1a\u5f85\u66f4\u65b0\u3002\u8be5\u6458\u8981\u751f\u6210\u540e\u539f\u6587\u53c8\u53d1\u751f\u4e86\u53d8\u5316\uff0c\u90e8\u5206\u4fe1\u606f\u53ef\u80fd\u4e0d\u662f\u6700\u65b0\u7248\u672c\u3002')
+    : status === 'incomplete'
+      ? (lang === 'en'
+        ? 'Status: INCOMPLETE. This summary covers only part of the source; do not assume omitted content does not exist.'
+        : '\u72b6\u6001\uff1a\u4e0d\u5b8c\u6574\u3002\u8be5\u6458\u8981\u53ea\u8986\u76d6\u4e86\u90e8\u5206\u539f\u6587\uff0c\u4e0d\u8981\u5047\u8bbe\u672a\u8986\u76d6\u5185\u5bb9\u4e0d\u5b58\u5728\u3002')
+      : ''
   return `${head}
 ${sourceLine}
-${rule}
+${rule}${stateNote ? `\n${stateNote}` : ''}
 ${knowledgeBlock(s.knowledge, lang)}`
 }
 

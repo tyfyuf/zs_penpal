@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import {
+  Activity,
   Archive,
   ChevronDown,
   ChevronRight,
@@ -400,6 +401,16 @@ export default function Sidebar(): JSX.Element {
     await refresh()
   }
 
+  async function toggleProjectSummaryMaintenance(projectId: string, enabled: boolean): Promise<void> {
+    try {
+      await api.invoke('project:setSummaryAutoMaintenance', { projectId, enabled })
+      await refresh()
+      toast.success(t(enabled ? 'sidebar.summaryMaintenanceEnabled' : 'sidebar.summaryMaintenanceDisabled'))
+    } catch (err) {
+      toast.error((err as Error).message)
+    }
+  }
+
   async function renameDoc(doc: DocMeta): Promise<void> {
     const title = await promptName(t('sidebar.renameDocPrompt'), doc.title)
     if (!title) return
@@ -664,6 +675,12 @@ export default function Sidebar(): JSX.Element {
                 <span className="min-w-0 flex-1 truncate text-sm font-medium" title={p.project.name}>
                   {p.project.name}
                 </span>
+                <IconButton
+                  icon={<Activity size={12} />}
+                  title={t(p.project.summaryAutoMaintenance ? 'sidebar.disableSummaryMaintenance' : 'sidebar.enableSummaryMaintenance')}
+                  onClick={() => void toggleProjectSummaryMaintenance(p.project.id, !p.project.summaryAutoMaintenance)}
+                  active={p.project.summaryAutoMaintenance === true}
+                />
                 <div className="hidden gap-0.5 group-hover:flex">
                   <IconButton icon={<FileText size={12} />} title={t('sidebar.newDoc')} onClick={() => void createDoc(p.project.id)} />
                   <IconButton icon={<MessageSquare size={12} />} title={t('sidebar.newProjChat')} onClick={() => void createChat(p.project.id)} />
@@ -863,11 +880,11 @@ export default function Sidebar(): JSX.Element {
   )
 }
 
-function IconButton({ icon, title, onClick, disabled }: { icon: JSX.Element; title: string; onClick: () => void; disabled?: boolean }): JSX.Element {
+function IconButton({ icon, title, onClick, disabled, active = false }: { icon: JSX.Element; title: string; onClick: () => void; disabled?: boolean; active?: boolean }): JSX.Element {
   return (
     <button
       className="rounded p-0.5 hover:opacity-70 disabled:opacity-40 disabled:hover:opacity-40"
-      style={{ color: 'var(--muted)' }}
+      style={{ color: active ? 'var(--accent)' : 'var(--muted)', background: active ? 'var(--accent-soft)' : undefined }}
       title={title}
       disabled={disabled}
       onClick={(e) => {

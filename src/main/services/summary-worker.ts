@@ -56,7 +56,7 @@ async function execute(job: SummaryWorkerJob): Promise<SummaryWorkerResult> {
       case 'ensure-doc':
         return await ensureDocSummary(job.task.projectId, job.task.docId, job.task.currentContent)
       case 'regenerate-doc':
-        return await regenerateDocSummary(job.task.docId)
+        return await regenerateDocSummary(job.task.docId, job.task.forceFull ?? false)
       case 'queue-chat':
         await queueChatSummary(job.task.chatId, job.task.force ?? false)
         return undefined

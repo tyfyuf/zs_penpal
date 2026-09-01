@@ -38,6 +38,8 @@ import {
   buildRollupCatalogBlock,
 } from './summary.service'
 import { ensureDocSummaryInWorker } from './summary-job-manager'
+import { ensureProjectDocSummariesReady, type SummaryReadinessUpdate } from './doc-summary-maintenance.service'
+import { isShortDocForSummary, isSourceStale, nonWhitespaceLength } from '../summary-source'
 import { logChatCompatibilityEvent, logToolProtocolEvent } from './log.service'
 import { recordUsage } from './usage.service'
 import { executeStructuredTask } from './structured-generation.service'
@@ -999,19 +1001,33 @@ async function injectSummaries(
   }
   for (const docId of docIds) {
     if (!activeKeys.has(`doc:${docId}`)) continue
-    let summary: DocSummary | null = null
-    if (kind === 'context' && docId === chat.docId && docContent !== null) {
-      summary = await ensureDocSummaryInWorker(projectId, docId, docContent)
-    } else {
-      summary = await readDocSummary(projectId, docId)
+    const title = tree.docs.find((d) => d.id === docId)?.title ?? docId
+    let content: string | null = null
+    try {
+      content = docId === chat.docId && docContent !== null ? docContent : (await readDoc(docId)).content
+    } catch {
+      // A stored summary remains usable if the source is temporarily unreadable.
     }
-    if (summary) {
-      const title = tree.docs.find((d) => d.id === docId)?.title ?? docId
-      docMsgs.push({ role: 'system', content: buildDocSummaryBlock(summary, { id: docId, title }, lang) })
-      items.push({ kind: 'doc', key: `doc:${docId}`, title })
-    }
-  }
 
+    if (content !== null) {
+      if (nonWhitespaceLength(content) === 0) continue
+      if (isShortDocForSummary(content)) {
+        const heading = lang === 'en'
+          ? `【Short document full text】\nSource document: ${title} (ID: ${docId})\nThis document is shorter than the summary threshold, so its full text is supplied as reference material.`
+          : `【短文档全文】\n来源文档：${title}（ID：${docId}）\n该文档短于摘要阈值，因此直接提供全文作为参考资料。`
+        docMsgs.push({ role: 'system', content: `${heading}\n${content}` })
+        items.push({ kind: 'doc', key: `doc:${docId}`, title })
+        continue
+      }
+    }
+
+    const summary = await readDocSummary(projectId, docId)
+    if (!summary) continue
+    let status: 'fresh' | 'stale' | 'incomplete' = summary.generation.state === 'incomplete' ? 'incomplete' : 'fresh'
+    if (content !== null && status === 'fresh' && isSourceStale(summary, content)) status = 'stale'
+    docMsgs.push({ role: 'system', content: buildDocSummaryBlock(summary, { id: docId, title }, lang, status) })
+    items.push({ kind: 'doc', key: `doc:${docId}`, title })
+  }
   // 对话摘要
   let chatIds: string[] = []
   if (kind === 'project' && inj.project.chatSummaries) {
@@ -1167,10 +1183,19 @@ async function buildMessages(
   chat: ChatMeta,
   history: ChatMessage[],
   appendUser: boolean,
-  replayReasoning: boolean
+  replayReasoning: boolean,
+  ensureSummaries?: () => Promise<string[]>
 ): Promise<{ messages: ChatCompletionMessageParam[]; memory: MemoryContext }> {
   const cfg = await loadConfig()
   const settings = await loadApiSettings()
+  const failedDocSummaries = await (ensureSummaries ?? (() => ensureProjectDocSummariesReady(chat.projectId)))()
+  if (failedDocSummaries.length > 0) {
+    const names = failedDocSummaries.slice(0, 5).map((name) => `《${name}》`).join('、')
+    const more = failedDocSummaries.length > 5 ? `等 ${failedDocSummaries.length} 个文档` : ''
+    throw new Error(cfg.language === 'en'
+      ? `Document summaries could not be generated for: ${failedDocSummaries.slice(0, 5).join(', ')}${failedDocSummaries.length > 5 ? ` and ${failedDocSummaries.length - 5} more` : ''}. Check the summary model and API settings, then retry.`
+      : `以下文档摘要生成失败：${names}${more ? `、${more}` : ''}。请检查摘要模型与 API 设置后重试。`)
+  }
   const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
   const applicable = collectApplicableKeys(chat, cfg, tree)
   const defaultSelected = await selectDefaultKeys(chat, applicable, tree)
@@ -1214,9 +1239,6 @@ async function buildMessages(
     const content = (await readDoc(chat.docId)).content
     if (!analyzeTextIntegrity(content).suspicious) {
       docContent = content
-      if (cfg.summaryEnabled) {
-        await ensureDocSummaryInWorker(chat.projectId, chat.docId, docContent)
-      }
       if (cfg.summaryInjection.doc.fullText && activeKeys.has('fulltext')) {
         const title = projectDocs.get(chat.docId)?.title ?? chat.docId
         const label = en
@@ -1413,8 +1435,21 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
 
   let compatibility = await loadModelCapabilityProfile(settings)
   let replayReasoning = compatibility.reasoningReplay
+  let summaryReadinessPromise: Promise<string[]> | null = null
+  const ensureSummaries = (): Promise<string[]> => {
+    if (!summaryReadinessPromise) {
+      summaryReadinessPromise = ensureProjectDocSummariesReady(chat.projectId, (progress: SummaryReadinessUpdate) => {
+        broadcast(EVENTS.summaryReadiness, {
+          requestId: req.requestId,
+          chatId: chat.id,
+          ...progress
+        })
+      })
+    }
+    return summaryReadinessPromise
+  }
   const prepareMessages = async (replay: boolean): Promise<{ messages: ChatCompletionMessageParam[]; memory: MemoryContext }> => {
-    const built = await buildMessages(req, chat, historyForPrompt, !req.regenerate, replay)
+    const built = await buildMessages(req, chat, historyForPrompt, !req.regenerate, replay, ensureSummaries)
   // C-layer retrieval starts in the host. It never depends on summary settings,
     // regenerate mode, or whether a model follows a planning prompt.
       let finalMessages = built.messages

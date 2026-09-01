@@ -37,6 +37,8 @@ export interface ProjectMeta {
   createdAt: string
   updatedAt: string
   status: ProjectStatus
+  /** Whether writing-document summaries in this project are maintained after edits. */
+  summaryAutoMaintenance?: boolean
 }
 
 export interface DocCenteredParagraph {
@@ -505,7 +507,16 @@ export interface ConsistencyIssue {
 
 /** 摘要区（左侧栏）展示的项目摘要概览 */
 export interface ProjectSummariesOverview {
-  docs: { docId: string; title: string; hasSummary: boolean; updatedAt?: string; generating: boolean }[]
+  docs: {
+    docId: string
+    title: string
+    hasSummary: boolean
+    updatedAt?: string
+    generating: boolean
+    status: 'empty' | 'short' | 'missing' | 'fresh' | 'stale' | 'incomplete'
+    completedChunks?: number
+    totalChunks?: number
+  }[]
   chats: {
     chatId: string
     title: string

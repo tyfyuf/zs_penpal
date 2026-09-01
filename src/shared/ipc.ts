@@ -1,7 +1,7 @@
 ﻿// IPC 濂戠害锛歝hannel 鍚嶇О涓?request/response 绫诲瀷銆?
 // main 杩涚▼閫氳繃 ipcMain.handle 娉ㄥ唽锛宺enderer 閫氳繃 preload 鏆撮湶鐨勭被鍨嬪寲 API 璋冪敤銆?
 
-import type { SummaryProgress } from './summary-job-protocol'
+import type { SummaryProgress, SummaryQueueStatus, SummaryReadinessProgress } from './summary-job-protocol'
 
 import type {
   AppConfig,
@@ -89,7 +89,9 @@ export const EVENTS = {
   configChanged: 'config:changed',
   appFlush: 'app:flush',
   summaryStatus: 'summary:status',
-  summaryProgress: 'summary:progress'
+  summaryProgress: 'summary:progress',
+  summaryQueue: 'summary:queue',
+  summaryReadiness: 'summary:readiness'
 } as const
 
 /** 娓叉煋杩涚▼ 鈫?涓昏繘绋嬬殑 invoke 閫氶亾 */
@@ -101,6 +103,7 @@ export const IPC = {
   workspaceMigrate: 'workspace:migrate',
   projectCreate: 'project:create',
   projectRename: 'project:rename',
+  projectSetSummaryAutoMaintenance: 'project:setSummaryAutoMaintenance',
   projectDelete: 'project:delete',
   projectRestore: 'project:restore',
   projectPurge: 'project:purge',
@@ -181,6 +184,7 @@ export interface IpcApi {
   [IPC.workspaceMigrate]: { req: string; res: { ok: boolean; error?: string } }
   [IPC.projectCreate]: { req: ProjectCreateInput; res: ProjectMeta }
   [IPC.projectRename]: { req: { projectId: string; name: string }; res: ProjectMeta }
+  [IPC.projectSetSummaryAutoMaintenance]: { req: { projectId: string; enabled: boolean }; res: ProjectMeta }
   [IPC.projectDelete]: { req: string; res: void }
   [IPC.projectRestore]: { req: string; res: ProjectMeta }
   [IPC.projectPurge]: { req: string; res: void }
@@ -262,7 +266,7 @@ export interface IpcApi {
   [IPC.summaryGetChat]: { req: string; res: ChatSummary | null }
   [IPC.summaryGetResource]: { req: { projectId: string; resourceId: string }; res: ResourceSummary | null }
   [IPC.summaryListProject]: { req: string; res: ProjectSummariesOverview }
-  [IPC.summaryRegenerateDoc]: { req: string; res: { ok: boolean; error?: string } }
+  [IPC.summaryRegenerateDoc]: { req: { docId: string; forceFull?: boolean }; res: { ok: boolean; error?: string } }
   [IPC.summaryRegenerateChat]: { req: string; res: { ok: boolean; error?: string } }
   [IPC.summaryQueueChat]: { req: string; res: void }
   [IPC.summaryDefaultActive]: { req: string; res: string[] }
@@ -305,6 +309,8 @@ export interface EventPayloads {
   [EVENTS.appFlush]: void
   [EVENTS.summaryStatus]: { key: string; generating: boolean }
   [EVENTS.summaryProgress]: SummaryProgress
+  [EVENTS.summaryQueue]: SummaryQueueStatus
+  [EVENTS.summaryReadiness]: SummaryReadinessProgress
 }
 
 export type EventChannel = keyof EventPayloads

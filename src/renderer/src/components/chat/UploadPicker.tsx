@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { FileText, Upload } from 'lucide-react'
 import type { UploadResult } from '@shared/types'
 import { RESOURCE_FILE_ACCEPT, isSupportedResourceFile } from '@shared/resource-formats'
@@ -20,6 +20,11 @@ export default function UploadPicker({ chatId, projectId, onAttached, onClose }:
   const t = useT()
   const resources = useAppStore((s) => s.workspace.projects.find((p) => p.project.id === projectId)?.resources ?? [])
   const fileInput = useRef<HTMLInputElement>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const normalizedQuery = searchQuery.trim().toLocaleLowerCase()
+  const filteredResources = normalizedQuery
+    ? resources.filter((resource) => resource.name.toLocaleLowerCase().includes(normalizedQuery))
+    : resources
 
   async function attachResource(resourceId: string): Promise<void> {
     try {
@@ -75,13 +80,24 @@ export default function UploadPicker({ chatId, projectId, onAttached, onClose }:
       <div className="mb-1 text-xs" style={{ color: 'var(--muted)' }}>
         {t('upload.fromResources')}
       </div>
+      <input
+        className="input mb-2"
+        placeholder={t('upload.searchResources')}
+        value={searchQuery}
+        onChange={(e) => setSearchQuery(e.target.value)}
+      />
       <div className="max-h-64 overflow-y-auto rounded-lg border" style={{ borderColor: 'var(--border)' }}>
         {resources.length === 0 && (
           <div className="px-3 py-4 text-center text-xs" style={{ color: 'var(--muted)' }}>
             {t('upload.empty')}
           </div>
         )}
-        {resources.map((r) => (
+        {resources.length > 0 && filteredResources.length === 0 && (
+          <div className="px-3 py-4 text-center text-xs" style={{ color: 'var(--muted)' }}>
+            {t('upload.noMatchingResources')}
+          </div>
+        )}
+        {filteredResources.map((r) => (
           <button
             key={r.id}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-[var(--panel3)]"

@@ -175,6 +175,10 @@ export async function renameProject(projectId: string, name: string): Promise<Pr
   return mutateProject(projectId, { name })
 }
 
+export async function setProjectSummaryAutoMaintenance(projectId: string, enabled: boolean): Promise<ProjectMeta> {
+  return mutateProject(projectId, { summaryAutoMaintenance: enabled })
+}
+
 export async function deleteProject(projectId: string): Promise<void> {
   await mutateProject(projectId, { status: 'trash' })
 }

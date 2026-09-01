@@ -27,6 +27,27 @@ export interface SummaryProgress {
   detail?: string
 }
 
+export interface SummaryQueueStatus {
+  active: number
+  queued: number
+  total: number
+}
+
+export type SummaryReadinessPhase = 'checking' | 'generating' | 'ready' | 'failed'
+
+/** Aggregated progress for summaries required before a chat request can call the LLM. */
+export interface SummaryReadinessProgress {
+  requestId: string
+  chatId: string
+  phase: SummaryReadinessPhase
+  completed: number
+  total: number
+  currentTitle?: string
+  currentKey?: string
+  error?: string
+}
+
+
 export interface SummaryWorkerRuntimeConfig {
   userDataDir: string
 }
@@ -42,7 +63,7 @@ export interface SummaryWorkerApiSettings {
 
 export type SummaryWorkerTask =
   | { kind: 'ensure-doc'; projectId: string; docId: string; currentContent: string }
-  | { kind: 'regenerate-doc'; docId: string }
+  | { kind: 'regenerate-doc'; docId: string; forceFull?: boolean }
   | { kind: 'queue-chat'; chatId: string; force?: boolean }
   | { kind: 'regenerate-chat'; chatId: string }
   | { kind: 'distill-resource'; projectId: string; resourceId: string; type: ResourceDistillType; force?: boolean }

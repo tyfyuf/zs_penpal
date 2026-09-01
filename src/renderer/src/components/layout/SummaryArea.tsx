@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { ChevronDown, ChevronRight, Eye, FlaskConical, RefreshCw, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Eye, FlaskConical, RefreshCcw, RefreshCw, Trash2 } from 'lucide-react'
 import type { ChatSummary, ConsistencyIssue, DocSummary, ProjectSummariesOverview, ResourceDistillType, ResourceSummary } from '@shared/types'
-import type { SummaryProgress } from '@shared/summary-job-protocol'
+import type { SummaryProgress, SummaryQueueStatus } from '@shared/summary-job-protocol'
 import { chatText, resourceText, storyText } from '../../lib/summaryPreview'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
+import { confirmDialog } from '../../store/dialog.store'
 import { useAppStore } from '../../store/app.store'
 import { useT } from '../../i18n'
 import { runDistill, runUndistill } from '../../lib/summaryActions'
@@ -14,6 +15,7 @@ type SummarySectionKey = 'docs' | 'chats' | 'resources'
 type SummarySectionState = Record<SummarySectionKey, boolean>
 
 const SUMMARY_SECTION_STORAGE_PREFIX = 'vibewrite.summary.sections:'
+const CONSISTENCY_STORAGE_PREFIX = 'vibewrite.summary.consistency:'
 
 function readSummarySectionState(projectId: string): SummarySectionState {
   const defaults: SummarySectionState = { docs: true, chats: true, resources: true }
@@ -88,7 +90,15 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
   const [busy, setBusy] = useState(false)
   const [issues, setIssues] = useState<ConsistencyIssue[]>([])
   const [progressByJobId, setProgressByJobId] = useState<Record<string, SummaryProgress>>({})
+  const [queueStatus, setQueueStatus] = useState<SummaryQueueStatus | null>(null)
   const [sectionOpen, setSectionOpen] = useState<SummarySectionState>(() => readSummarySectionState(projectId))
+  const [consistencyOpen, setConsistencyOpen] = useState(() => {
+    try {
+      return localStorage.getItem(`${CONSISTENCY_STORAGE_PREFIX}${projectId}`) !== 'false'
+    } catch {
+      return true
+    }
+  })
   const summaryRevision = useAppStore((s) => s.summaryRevision)
 
   useEffect(() => {
@@ -98,6 +108,23 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
       // Ignore storage failures; section toggles remain functional for this session.
     }
   }, [projectId, sectionOpen])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(`${CONSISTENCY_STORAGE_PREFIX}${projectId}`, String(consistencyOpen))
+    } catch {
+      // Ignore storage failures; the toggle remains functional for this session.
+    }
+  }, [projectId, consistencyOpen])
+
+  useEffect(() => {
+    setSectionOpen(readSummarySectionState(projectId))
+    try {
+      setConsistencyOpen(localStorage.getItem(`${CONSISTENCY_STORAGE_PREFIX}${projectId}`) !== 'false')
+    } catch {
+      setConsistencyOpen(true)
+    }
+  }, [projectId])
 
   const toggleSection = (key: SummarySectionKey): void => {
     setSectionOpen((current) => ({ ...current, [key]: !current[key] }))
@@ -119,6 +146,13 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
   useEffect(() => {
     setProgressByJobId({})
   }, [projectId])
+
+  useEffect(() => {
+    const off = api.on('summary:queue', (next) => {
+      setQueueStatus(next)
+    })
+    return off
+  }, [])
 
   // Summary status events refresh the list and unlock completed items.
   useEffect(() => {
@@ -176,10 +210,11 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
     }
   }
 
-  async function regenDoc(docId: string): Promise<void> {
+  async function regenDoc(docId: string, forceFull = false): Promise<void> {
+    if (forceFull && !(await confirmDialog(t('summary.confirmFullRegenerate')))) return
     setBusy(true)
     try {
-      const res = await api.invoke('summary:regenerateDoc', docId)
+      const res = await api.invoke('summary:regenerateDoc', { docId, forceFull })
       if (res.ok) {
         toast.success(t('summary.docRegenerated'))
         useAppStore.getState().bumpSummary()
@@ -240,6 +275,7 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
   }
   const visibleProgress = Object.values(progressByJobId).filter((progress) => visibleKeys.has(progress.key) && progress.key !== 'chat:retry-pending')
   const activeProgress = visibleProgress.filter((progress) => !isTerminalProgress(progress))
+  const runningTaskCount = queueStatus?.total ?? activeProgress.length
   const progressTitle = (key: string): string => {
     const [kind, id] = key.split(':', 2)
     if (kind === 'doc') return overview.docs.find((item) => item.docId === id)?.title ?? t('summary.docTask')
@@ -255,10 +291,10 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
 
   return (
     <div className="space-y-2 px-4 pb-2">
-      {visibleProgress.length > 0 && (
+      {(visibleProgress.length > 0 || runningTaskCount > 0) && (
         <div className="rounded border px-2 py-1.5 text-[11px]" style={{ borderColor: 'var(--border)', color: 'var(--muted)' }}>
           <div className="mb-1 font-medium" style={{ color: 'var(--text)' }}>
-            {activeProgress.length > 0 ? t('summary.progress.tasksRunning', { count: activeProgress.length }) : t('summary.progress.tasksRecent')}
+            {runningTaskCount > 0 ? t('summary.progress.tasksRunning', { count: runningTaskCount }) : t('summary.progress.tasksRecent')}
           </div>
           <div className="space-y-2">
             {visibleProgress.map((progress) => (
@@ -272,15 +308,19 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
       )}
 
       {issues.length > 0 && (
-        <>
-          <div className="text-[11px] font-medium" style={{ color: 'var(--muted)' }}>{t('summary.secConsistency')}</div>
+        <SummarySection
+          label={t('summary.secConsistency')}
+          open={consistencyOpen}
+          onToggle={() => setConsistencyOpen((open) => !open)}
+          ariaLabel={t(consistencyOpen ? 'summary.collapseSection' : 'summary.expandSection', { section: t('summary.secConsistency') })}
+        >
           {issues.map((iss, idx) => (
             <div key={idx} className="flex items-start gap-1 text-[11px]" style={{ color: iss.severity === 'error' ? 'var(--danger)' : 'var(--warn)' }}>
               <span>{iss.severity === 'error' ? '?' : '!'}</span>
               <span className="min-w-0 flex-1 break-words">{iss.message}</span>
             </div>
           ))}
-        </>
+        </SummarySection>
       )}
 
       <SummarySection
@@ -293,17 +333,31 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
         {overview.docs.map((d) => {
           const progress = progressByKeyObject[`doc:${d.docId}`]
           const failed = progress?.phase === 'failed'
+          const statusText = d.status === 'empty'
+            ? t('summary.docStatusEmpty')
+            : d.status === 'short'
+              ? t('summary.docStatusShort')
+              : d.status === 'missing'
+                ? t('summary.docStatusMissing')
+                : d.status === 'stale'
+                  ? t('summary.docStatusStale')
+                  : d.status === 'incomplete'
+                    ? t('summary.docStatusIncomplete', { completed: d.completedChunks ?? 0, total: d.totalChunks ?? 0 })
+                    : ''
+          const warn = d.status === 'stale' || d.status === 'incomplete'
           return (
             <div key={d.docId} className="flex items-start gap-1 text-[12px]">
-              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: d.generating ? 'var(--warn)' : failed ? 'var(--danger)' : d.hasSummary ? 'var(--ok)' : 'var(--border)' }} />
+              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: d.generating ? 'var(--warn)' : failed ? 'var(--danger)' : warn ? 'var(--warn)' : d.status === 'fresh' ? 'var(--ok)' : d.status === 'short' ? 'var(--accent)' : 'var(--border)' }} />
               <span className="min-w-0 flex-1" title={d.title}>
                 <span className="block truncate">{d.title}</span>
                 {d.generating && <span className="text-[10px]" style={{ color: 'var(--warn)' }}>{t('summary.generating')}</span>}
                 {!d.generating && failed && <span className="text-[10px]" style={{ color: 'var(--danger)' }}>{t('summary.progress.failed')}</span>}
+                {!d.generating && !failed && statusText && <span className="text-[10px]" style={{ color: warn ? 'var(--warn)' : 'var(--muted)' }}>{statusText}</span>}
                 <MiniProgress progress={progress} t={t} />
               </span>
               {!d.generating && d.hasSummary && <IconBtn icon={<Eye size={12} />} title={t('summary.preview')} onClick={() => void previewDoc(d.docId)} />}
-              {!d.generating && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.regenerate')} disabled={busy} onClick={() => void regenDoc(d.docId)} />}
+              {!d.generating && d.status !== 'empty' && d.status !== 'short' && <IconBtn icon={<RefreshCw size={12} />} title={t('summary.regenerate')} disabled={busy} onClick={() => void regenDoc(d.docId)} />}
+              {!d.generating && d.hasSummary && <IconBtn icon={<RefreshCcw size={12} />} title={t('summary.fullRegenerate')} disabled={busy} onClick={() => void regenDoc(d.docId, true)} />}
             </div>
           )
         })}

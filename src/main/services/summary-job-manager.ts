@@ -35,8 +35,14 @@ let runtimeUserDataDir = ''
 let shuttingDown = false
 let restartCount = 0
 const active = new Map<string, ActiveJob>()
-const activeByKey = new Map<string, Promise<SummaryWorkerResult>>()
+const activeByKey = new Map<string, { kind: SummaryWorkerTask['kind']; promise: Promise<SummaryWorkerResult> }>()
 const latestPhaseByJobId = new Map<string, SummaryProgress['phase']>()
+let queuedCount = 0
+
+function broadcastQueueStatus(): void {
+  const activeCount = active.size
+  broadcast(EVENTS.summaryQueue, { active: activeCount, queued: queuedCount, total: activeCount + queuedCount })
+}
 
 function workerError(message: string, name?: string): Error {
   const error = new Error(message)
@@ -78,6 +84,7 @@ function rejectAll(error: Error): void {
   }
   active.clear()
   activeByKey.clear()
+  broadcastQueueStatus()
 }
 
 function onMessage(message: SummaryWorkerToMainMessage, source: UtilityProcess): void {
@@ -107,7 +114,7 @@ function onMessage(message: SummaryWorkerToMainMessage, source: UtilityProcess):
   const job = active.get(message.jobId)
   if (!job) return
   active.delete(message.jobId)
-  activeByKey.delete(job.key)
+  broadcastQueueStatus()
   if (message.type === 'completed') {
     const result = message.result
     const isExplicitFailure = Boolean(result && typeof result === 'object' && 'ok' in result && (result as { ok?: unknown }).ok === false)
@@ -212,38 +219,85 @@ async function makeJob(key: SummaryJobKey, task: SummaryWorkerTask): Promise<Sum
   }
 }
 
+function createSummaryJobPromise(
+  key: SummaryJobKey,
+  task: SummaryWorkerTask,
+  alreadyTracked = false
+): Promise<SummaryWorkerResult> {
+  if (!alreadyTracked) {
+    queuedCount++
+    broadcastQueueStatus()
+  }
+  let promoted = false
+  const promise = (async (): Promise<SummaryWorkerResult> => {
+    try {
+            if (shuttingDown) throw new Error('应用正在退出，无法启动摘要任务')
+      await startWorker()
+      const job = await makeJob(key, task)
+      queuedCount--
+      promoted = true
+      active.set(job.jobId, { jobId: job.jobId, key, resolve: () => {}, reject: () => {} })
+      broadcastQueueStatus()
+      markStarted(key, job.jobId)
+      return await new Promise<SummaryWorkerResult>((resolve, reject) => {
+        const current = active.get(job.jobId)
+        if (current) {
+          current.resolve = resolve
+          current.reject = reject
+        }
+        try {
+          post({ type: 'start', protocolVersion: SUMMARY_WORKER_PROTOCOL_VERSION, job })
+        } catch (error) {
+          active.delete(job.jobId)
+          markFinished(key, job.jobId, 'failed')
+          broadcastQueueStatus()
+          reject(error as Error)
+        }
+      })
+    } finally {
+      if (!promoted) {
+        queuedCount--
+        broadcastQueueStatus()
+      }
+    }
+  })()
+  return promise
+}
+
+function trackSummaryJob(key: SummaryJobKey, task: SummaryWorkerTask, promise: Promise<SummaryWorkerResult>): Promise<SummaryWorkerResult> {
+  activeByKey.set(key, { kind: task.kind, promise })
+  void promise.catch(() => {}).finally(() => {
+    if (activeByKey.get(key)?.promise === promise) activeByKey.delete(key)
+  })
+  return promise
+}
+
 export function runSummaryJob<T extends SummaryWorkerResult>(key: SummaryJobKey, task: SummaryWorkerTask): Promise<T> {
   const existing = activeByKey.get(key)
-  if (existing) return existing as Promise<T>
-  const promise = (async (): Promise<SummaryWorkerResult> => {
-    if (shuttingDown) throw new Error('应用正在退出，无法启动摘要任务')
-    await startWorker()
-    const job = await makeJob(key, task)
-    markStarted(key, job.jobId)
-    return await new Promise<SummaryWorkerResult>((resolve, reject) => {
-      active.set(job.jobId, { jobId: job.jobId, key, resolve, reject })
-      try {
-        post({ type: 'start', protocolVersion: SUMMARY_WORKER_PROTOCOL_VERSION, job })
-      } catch (error) {
-        active.delete(job.jobId)
-        markFinished(key, job.jobId, 'failed')
-        reject(error as Error)
-      }
-    })
-  })()
-  activeByKey.set(key, promise)
-  void promise.catch(() => {}).finally(() => {
-    if (activeByKey.get(key) === promise) activeByKey.delete(key)
-  })
-  return promise as Promise<T>
+  if (!existing) {
+    return trackSummaryJob(key, task, createSummaryJobPromise(key, task)) as Promise<T>
+  }
+  if (existing.kind === task.kind) return existing.promise as Promise<T>
+
+  // Different operations for the same source must remain serialized. Keep the
+  // chained promise in activeByKey immediately, so a third request joins the
+  // tail instead of starting a second operation concurrently after the first
+  // one completes.
+  queuedCount++
+  broadcastQueueStatus()
+  const chained = existing.promise.then(
+    () => trackSummaryJob(key, task, createSummaryJobPromise(key, task, true)),
+    () => trackSummaryJob(key, task, createSummaryJobPromise(key, task, true))
+  )
+  return trackSummaryJob(key, task, chained) as Promise<T>
 }
 
 export function ensureDocSummaryInWorker(projectId: string, docId: string, currentContent: string): Promise<DocSummary | null> {
   return runSummaryJob<DocSummary | null>(`doc:${docId}`, { kind: 'ensure-doc', projectId, docId, currentContent })
 }
 
-export function regenerateDocSummaryInWorker(docId: string): Promise<{ ok: boolean; error?: string }> {
-  return runSummaryJob<{ ok: boolean; error?: string }>(`doc:${docId}`, { kind: 'regenerate-doc', docId })
+export function regenerateDocSummaryInWorker(docId: string, forceFull = false): Promise<{ ok: boolean; error?: string }> {
+  return runSummaryJob<{ ok: boolean; error?: string }>(`doc:${docId}`, { kind: 'regenerate-doc', docId, forceFull })
 }
 
 export function queueChatSummaryInWorker(chatId: string, force = false): Promise<void> {

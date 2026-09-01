@@ -10,6 +10,7 @@ import type { SummarySourceInfo } from '@shared/types'
 // ---------------------------------------------------------------------------
 
 export const SUMMARY_SCHEMA_VERSION = 2
+export const MIN_DOC_SUMMARY_NON_WHITESPACE = 300
 
 /** 规范化：去掉空白与各类标点/符号，仅保留 CJK 与字母数字 */
 export function normalizeForFingerprint(content: string): string {
@@ -30,13 +31,18 @@ export function computeSourceInfo(content: string): SummarySourceInfo {
   }
 }
 
-/** 判断源内容相对摘要生成时是否「显著变化」（STALE）。无指纹（旧数据）视为新鲜。 */
+export function nonWhitespaceLength(content: string): number {
+  return content.replace(/\s/gu, '').length
+}
+
+export function isShortDocForSummary(content: string): boolean {
+  const length = nonWhitespaceLength(content)
+  return length > 0 && length < MIN_DOC_SUMMARY_NON_WHITESPACE
+}
+
+/** Source is stale whenever the normalized fingerprint changes. */
 export function isSourceStale(info: SummarySourceInfo, current: string): boolean {
   if (!info.sourceFingerprint) return false
   const normalized = normalizeForFingerprint(current)
-  if (fingerprintOf(normalized) === info.sourceFingerprint) return false
-  const prevLen = info.sourceLength ?? current.length
-  const lenRatio = Math.abs(current.length - prevLen) / Math.max(prevLen, 1)
-  const normDelta = Math.abs(normalized.length - (info.sourceNormalizedLength ?? normalized.length))
-  return lenRatio > 0.3 || normDelta > 100
+  return fingerprintOf(normalized) !== info.sourceFingerprint
 }

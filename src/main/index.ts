@@ -9,6 +9,7 @@ import { initializeSummaryJobManager, shutdownSummaryJobManager } from './servic
 import { clearRecovery } from './services/recovery.service'
 import { initErrorLog, logError } from './services/log.service'
 import { disposeNeuralEmbedder } from './services/neural-embed.service'
+import { initializeDocSummaryMaintenance, shutdownDocSummaryMaintenance } from './services/doc-summary-maintenance.service'
 
 const ALLOWED_EXT = ['.txt', '.md', '.csv', '.doc', '.docx']
 
@@ -56,6 +57,7 @@ if (!gotLock) {
     await loadConfig()
     await initErrorLog()
     await initializeSummaryJobManager()
+    await initializeDocSummaryMaintenance()
     registerIpcHandlers()
 
     const win = createMainWindow()
@@ -86,6 +88,7 @@ if (!gotLock) {
       try {
         await flushRenderer()
         await commitAllProjects()
+        shutdownDocSummaryMaintenance()
         await shutdownSummaryJobManager(8000)
       } catch {
         // 关闭阶段错误不阻塞退出

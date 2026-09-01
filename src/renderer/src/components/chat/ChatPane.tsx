@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type UIEvent, type WheelEvent } from 'react'
 import {
   Brain,
+  LoaderCircle,
   Check,
   ChevronDown,
   ChevronRight,
@@ -25,6 +26,7 @@ import type {
   StreamContextRange,
   SummarySearchResult
 } from '@shared/types'
+import type { SummaryReadinessProgress } from '@shared/summary-job-protocol'
 import type { Tab } from '../../store/app.store'
 import { useAppStore } from '../../store/app.store'
 import { useContextStore } from '../../store/context.store'
@@ -100,6 +102,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   const [attachments, setAttachments] = useState<ChatAttachment[]>(initialDraft.attachments)
   const [range, setRange] = useState<ContextRange | null>(tab.contextRange ?? null)
   const [streaming, setStreaming] = useState<{ requestId: string; acc: string; reasoning: string } | null>(null)
+  const [summaryReadiness, setSummaryReadiness] = useState<SummaryReadinessProgress | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showUpload, setShowUpload] = useState(false)
   const [showDocumentPicker, setShowDocumentPicker] = useState(false)
@@ -128,6 +131,8 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   /** 每次回答的记忆使用情况（透明展示），键 = assistant 消息 id */
   const [expandedReasoning, setExpandedReasoning] = useState<Record<string, boolean>>({})
   const newSummaryNotifiedRef = useRef(false)
+  const knownInjectionKeysRef = useRef<Set<string> | null>(null)
+  const activeRequestIdRef = useRef<string | null>(null)
   const injectionRecoveryRef = useRef<string | null>(null)
   const pendingReasonRef = useRef<'context' | 'summary' | 'both' | null>(null)
   const pendingNewlyEnabledRef = useRef<string[]>([])
@@ -161,6 +166,10 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   useEffect(() => {
     let cancelled = false
     injectionRecoveryRef.current = null
+    newSummaryNotifiedRef.current = false
+    knownInjectionKeysRef.current = null
+    activeRequestIdRef.current = null
+    setSummaryReadiness(null)
     expandedReasoningRef.current = {}
     setExpandedReasoning({})
     streamBufferRef.current = null
@@ -267,6 +276,8 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
       const wasExpanded = !!expandedReasoningRef.current[streamReasoningKey]
       clearReasoningExpanded(streamReasoningKey)
       if (p.aborted) {
+        activeRequestIdRef.current = null
+        setSummaryReadiness(null)
         sentRangeRef.current = null
         pendingReasonRef.current = null
         pendingNewlyEnabledRef.current = []
@@ -274,11 +285,15 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
       }
       if (p.error) {
         setError(p.error)
+        activeRequestIdRef.current = null
+        setSummaryReadiness((current) => current?.phase === 'failed' && current.requestId === p.requestId ? current : null)
         sentRangeRef.current = null
         pendingReasonRef.current = null
         pendingNewlyEnabledRef.current = []
         return
       }
+      activeRequestIdRef.current = null
+      setSummaryReadiness(null)
       if (p.memory) {
         setDynamicInjections((p.memory.small ?? [])
           .map((item) => item.key)
@@ -561,25 +576,59 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   }, [chat, overview, config?.summaryEnabled, defaultActive, messages.length, activeInjections, disabledInjections, pendingEnabled, injectionItems])
 
 
-  // 打开对话窗口时检测新加入摘要系统的摘要（进行中对话默认关闭），一次性提示
+  // Request-scoped summary readiness events are isolated by chat and request id.
   useEffect(() => {
-    if (!chat || !overview || !started || newSummaryNotifiedRef.current) return
-    if (!activeInjections) return
-    const newKeys = injectionItems
-      .map((i) => i.key)
-      .filter((k) => !activeInjections.includes(k) && !disabledInjections.includes(k) && !pendingEnabled.includes(k))
-    if (newKeys.length > 0) {
+    const off = api.on('summary:readiness', (progress) => {
+      if (progress.chatId !== chatId || progress.requestId !== activeRequestIdRef.current) return
+      if (progress.phase === 'ready') {
+        setSummaryReadiness(null)
+      } else {
+        setSummaryReadiness(progress)
+      }
+    })
+    return off
+  }, [chatId])
+
+  // Establish the injection baseline only after chat initialization is complete.
+  useEffect(() => {
+    if (!chat || !overview || !historyLoaded || !config?.summaryEnabled) return
+    if (started && activeInjections === null) return
+    if (!started && defaultActive === null) return
+
+    const currentKeys = new Set(injectionItems.map((item) => item.key))
+    if (knownInjectionKeysRef.current === null) {
+      knownInjectionKeysRef.current = currentKeys
+      return
+    }
+
+    const newKeys = [...currentKeys].filter((key) =>
+      !knownInjectionKeysRef.current!.has(key)
+      && !disabledInjections.includes(key)
+      && !pendingEnabled.includes(key)
+    )
+    knownInjectionKeysRef.current = currentKeys
+    if (newKeys.length > 0 && !newSummaryNotifiedRef.current) {
       newSummaryNotifiedRef.current = true
       toast.info(t('chat.newSummaryDetected', { n: newKeys.length }))
     }
-  }, [chat, overview, started, activeInjections, disabledInjections, pendingEnabled, injectionItems, t])
+  }, [chat, overview, historyLoaded, config?.summaryEnabled, started, activeInjections, defaultActive, disabledInjections, pendingEnabled, injectionItems, t])
 
-  function toggleInjection(key: string): void {
-    if (streaming || titleGenerating) return
+  function isInjectionEnabled(key: string): boolean {
+    if (started) {
+      return (activeInjections?.includes(key) ?? false)
+        || pendingEnabled.includes(key)
+        || dynamicInjections.includes(key)
+    }
+    return !disabledInjections.includes(key)
+      && ((defaultActive?.includes(key) ?? false) || pendingEnabled.includes(key))
+  }
+
+  function toggleInjection(key: string): boolean {
+    if (streaming || titleGenerating) return false
     if (started) {
       const isActive = (activeInjections?.includes(key) ?? false) || dynamicInjections.includes(key)
       const isPending = pendingEnabled.includes(key)
-      if (isActive) return // 已随消息使用的摘要：锁定，不能关闭
+      if (isActive) return false // 已随消息使用的摘要：锁定，不能关闭
       if (isPending) {
         // 已开启但尚未随消息使用：仍可自由关闭
         const nextPending = pendingEnabled.filter((k) => k !== key)
@@ -590,7 +639,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
           chatId,
           patch: { injectionOverrides: { disabled: disabledInjections, active: activeInjections ?? [], pending: nextPending } }
         })
-        return
+        return true
       }
       // 关闭状态 → 手动开启（进入 pending，发送消息后锁定）
       const nextPending = [...pendingEnabled, key]
@@ -604,6 +653,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
         pendingReasonRef.current = pendingReasonRef.current === 'context' ? 'both' : 'summary'
         setRegeneratePrompt(true)
       }
+      return true
     } else {
       // 对话开始前：默认开启项可关（记 disabled）；默认关闭项可开（记 pending）
       const inDefault = defaultActive?.includes(key) ?? false
@@ -619,7 +669,17 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
         setPendingEnabled(nextPending)
       }
       void api.invoke('chat:patch', { chatId, patch: { injectionOverrides: { disabled: nextDisabled, pending: nextPending } } })
+      return true
     }
+  }
+
+  function clearInjectionSearch(): void {
+    if (searchTimer.current) {
+      clearTimeout(searchTimer.current)
+      searchTimer.current = null
+    }
+    setSearchQuery('')
+    setSearchResults([])
   }
 
   async function runSearch(q: string): Promise<void> {
@@ -765,6 +825,8 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
       const lastA = [...messages].reverse().find((message) => message.role === 'assistant')
       if (lastA) setPrevAnswer({ content: lastA.content, reasoning: lastA.reasoning })
     }
+    activeRequestIdRef.current = requestId
+    setSummaryReadiness(null)
     followBottomRef.current = true
     scheduleScrollToBottom(true)
     streamBufferRef.current = { requestId, acc: '', reasoning: '' }
@@ -929,6 +991,33 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
           </div>
         )}
 
+        {summaryReadiness && (
+          <div className="flex justify-start">
+            <div className="max-w-[80%] rounded-xl border px-3 py-2 text-sm" style={{ background: 'var(--panel)', borderColor: summaryReadiness.phase === 'failed' ? 'var(--danger)' : 'var(--border)' }}>
+              <div className="flex items-center gap-2" style={{ color: summaryReadiness.phase === 'failed' ? 'var(--danger)' : 'var(--muted)' }}>
+                <LoaderCircle size={13} className={summaryReadiness.phase === 'failed' ? undefined : 'animate-spin'} />
+                <span>
+                  {summaryReadiness.phase === 'checking'
+                    ? t('chat.summaryChecking')
+                    : summaryReadiness.phase === 'failed'
+                      ? t('chat.summaryPreparingFailed', { error: summaryReadiness.error ?? t('chat.summaryPreparing') })
+                      : summaryReadiness.total > 0
+                        ? t('chat.summaryPreparingProgress', { completed: summaryReadiness.completed, total: summaryReadiness.total })
+                        : t('chat.summaryPreparing')}
+                </span>
+              </div>
+              {summaryReadiness.phase === 'generating' && summaryReadiness.total > 0 && (
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full" style={{ background: 'var(--panel3)' }}>
+                  <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(100, (summaryReadiness.completed / summaryReadiness.total) * 100)}%`, background: 'var(--accent)' }} />
+                </div>
+              )}
+              {summaryReadiness.currentTitle && summaryReadiness.phase === 'generating' && (
+                <div className="mt-1 text-xs" style={{ color: 'var(--muted)' }}>{summaryReadiness.currentTitle}</div>
+              )}
+            </div>
+          </div>
+        )}
+
         {streaming && (
           <div className="flex justify-start">
             <div
@@ -948,7 +1037,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
           </div>
         )}
 
-        {error && (
+        {error && summaryReadiness?.phase !== 'failed' && (
           <div className="rounded-lg border px-3 py-2 text-sm" style={{ background: 'var(--danger-soft)', borderColor: 'var(--danger)', color: 'var(--danger)' }}>
             {t('chat.callFailed', { error })}
           </div>
@@ -986,7 +1075,9 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
                       <div key={r.key} className="flex items-center gap-2 text-xs">
                         <button
                           className="flex-1 truncate rounded px-1 py-0.5 text-left hover:bg-[var(--panel3)]"
-                          onClick={() => toggleInjection(r.key)}
+                          onClick={() => {
+                            if (!isInjectionEnabled(r.key) && toggleInjection(r.key)) clearInjectionSearch()
+                          }}
                         >
                           <span className="font-medium">{r.title}</span>
                           <span className="ml-1" style={{ color: 'var(--muted)' }}>{r.preview}</span>

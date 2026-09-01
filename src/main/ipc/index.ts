@@ -35,6 +35,7 @@ import {
   renameChat,
   renameDoc,
   renameProject,
+  setProjectSummaryAutoMaintenance,
   restoreChat,
   restoreDoc,
   restoreProject,
@@ -72,6 +73,7 @@ import { exportDoc, exportProject } from '../services/export.service'
 import { clearRecovery, readRecovery, updateRecovery } from '../services/recovery.service'
 import { migrateWorkspace } from '../services/migration.service'
 import { logError } from '../services/log.service'
+import { applyProjectDocSummaryMaintenance, cancelDocSummaryMaintenance, cancelProjectDocSummaryMaintenance, initializeDocSummaryMaintenance, scheduleDocSummaryMaintenance } from '../services/doc-summary-maintenance.service'
 import { broadcast, getMainWindow } from '../window'
 
 type Handler<K extends keyof IpcApi> = (req: IpcApi[K]['req']) => Promise<IpcApi[K]['res']> | IpcApi[K]['res']
@@ -92,6 +94,9 @@ export function registerIpcHandlers(): void {
   handle(IPC.configGet, () => loadConfig())
   handle(IPC.configSet, async (patch) => {
     const next = await setConfig(patch)
+    if (patch.workspaceDir !== undefined || patch.summaryEnabled !== undefined) {
+      await initializeDocSummaryMaintenance()
+    }
     broadcast(EVENTS.configChanged, next)
     return next
   })
@@ -115,7 +120,7 @@ export function registerIpcHandlers(): void {
   handle(IPC.workspaceMigrate, async (target) => {
     const res = await migrateWorkspace(target)
     if (res.ok) {
-      // 工作目录已变更：广播新配置，让渲染层同步显示
+      await initializeDocSummaryMaintenance()
       broadcast(EVENTS.configChanged, await loadConfig())
     }
     return res
@@ -124,9 +129,24 @@ export function registerIpcHandlers(): void {
   // 项目
   handle(IPC.projectCreate, (req) => createProject(req.name))
   handle(IPC.projectRename, (req) => renameProject(req.projectId, req.name))
-  handle(IPC.projectDelete, (id) => deleteProject(id))
-  handle(IPC.projectRestore, (id) => restoreProject(id))
-  handle(IPC.projectPurge, (id) => purgeProject(id))
+  handle(IPC.projectSetSummaryAutoMaintenance, async (req) => {
+    const project = await setProjectSummaryAutoMaintenance(req.projectId, req.enabled)
+    await applyProjectDocSummaryMaintenance(req.projectId, req.enabled)
+    return project
+  })
+  handle(IPC.projectDelete, async (id) => {
+    cancelProjectDocSummaryMaintenance(id)
+    return deleteProject(id)
+  })
+  handle(IPC.projectRestore, async (id) => {
+    const project = await restoreProject(id)
+    await applyProjectDocSummaryMaintenance(project.id, project.summaryAutoMaintenance === true)
+    return project
+  })
+  handle(IPC.projectPurge, async (id) => {
+    cancelProjectDocSummaryMaintenance(id)
+    return purgeProject(id)
+  })
 
   // 文档
   handle(IPC.docCreate, (req) => createDoc(req.projectId, req.title))
@@ -134,7 +154,10 @@ export function registerIpcHandlers(): void {
   handle(IPC.docSave, async (req) => {
     const doc = await findDocMeta(req.docId)
     const result = await saveDoc(req.docId, req.content, req.editorFormat)
-    if (doc) queueVectorSourceSync(doc.projectId, doc.id, 'doc')
+    if (doc) {
+      queueVectorSourceSync(doc.projectId, doc.id, 'doc')
+      await scheduleDocSummaryMaintenance(doc.projectId, doc.id)
+    }
     return result
   })
   handle(IPC.docRename, async (req) => {
@@ -146,19 +169,28 @@ export function registerIpcHandlers(): void {
   handle(IPC.docDelete, async (id) => {
     const doc = await findDocMeta(id)
     const result = await deleteDoc(id)
-    if (doc) queueVectorSourceRemoval(doc.projectId, doc.id, 'doc')
+    if (doc) {
+      cancelDocSummaryMaintenance(doc.projectId, doc.id)
+      queueVectorSourceRemoval(doc.projectId, doc.id, 'doc')
+    }
     return result
   })
   handle(IPC.docRestore, async (id) => {
     const doc = await findDocMeta(id)
     const result = await restoreDoc(id)
-    if (doc) queueVectorSourceSync(doc.projectId, doc.id, 'doc')
+    if (doc) {
+      queueVectorSourceSync(doc.projectId, doc.id, 'doc')
+      await scheduleDocSummaryMaintenance(doc.projectId, doc.id)
+    }
     return result
   })
   handle(IPC.docPurge, async (id) => {
     const doc = await findDocMeta(id)
     const result = await purgeDoc(id)
-    if (doc) queueVectorSourceRemoval(doc.projectId, doc.id, 'doc')
+    if (doc) {
+      cancelDocSummaryMaintenance(doc.projectId, doc.id)
+      queueVectorSourceRemoval(doc.projectId, doc.id, 'doc')
+    }
     return result
   })
 
@@ -249,7 +281,7 @@ export function registerIpcHandlers(): void {
   })
   handle(IPC.summaryGetResource, (req) => readResourceSummary(req.projectId, req.resourceId))
   handle(IPC.summaryListProject, (projectId) => listProjectSummaries(projectId))
-  handle(IPC.summaryRegenerateDoc, (docId) => regenerateDocSummaryInWorker(docId))
+  handle(IPC.summaryRegenerateDoc, (req) => regenerateDocSummaryInWorker(req.docId, req.forceFull ?? false))
   handle(IPC.summaryRegenerateChat, (chatId) => regenerateChatSummaryInWorker(chatId))
   handle(IPC.summaryQueueChat, (chatId) => {
     void queueChatSummaryInWorker(chatId)

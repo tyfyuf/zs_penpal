@@ -5,7 +5,8 @@ import type {
   ChatRelevanceLearningTerm,
   ProjectTree
 } from '@shared/types'
-import { readChatSummary, readDocSummary, readResource, readResourceSummary } from './services/file.service'
+import { readChatSummary, readDoc, readDocSummary, readResource, readResourceSummary } from './services/file.service'
+import { isShortDocForSummary, nonWhitespaceLength } from './summary-source'
 
 export const RELEVANCE_SAMPLE: Record<'doc' | 'chat' | 'res', number> = { doc: 10, chat: 10, res: 10 }
 export const PROJECT_RELEVANCE_SAMPLE: Record<'doc' | 'chat' | 'res', number> = { doc: 5, chat: 5, res: 5 }
@@ -196,6 +197,16 @@ export function extractSummaryMatchTerms(summary: unknown, title?: string): Map<
 async function buildAnchorEntities(chat: ChatMeta): Promise<Set<string>> {
   const ids = new Set<string>()
   if ((chat.kind === 'doc' || chat.kind === 'context') && chat.docId) {
+    try {
+      const { content } = await readDoc(chat.docId)
+      if (nonWhitespaceLength(content) === 0) return ids
+      if (isShortDocForSummary(content)) {
+        for (const term of extractConversationTerms(content)) ids.add(term)
+        return ids
+      }
+    } catch {
+      // Fall back to the stored summary if the source is temporarily unreadable.
+    }
     const summary = await readDocSummary(chat.projectId, chat.docId)
     for (const entity of extractSummaryEntities(summary)) ids.add(entity)
   }
@@ -211,6 +222,33 @@ async function loadCandidates(
     if (key === 'fulltext') return null
     const kind = summaryKeyKind(key)
     const id = summaryKeyId(key, kind)
+    const title = kind === 'doc'
+      ? tree?.docs.find((doc) => doc.id === id)?.title
+      : kind === 'chat'
+        ? tree?.chats.find((item) => item.id === id)?.title
+        : tree?.resources.find((resource) => resource.id === id)?.name
+
+    if (kind === 'doc') {
+      try {
+        const { content, doc } = await readDoc(id)
+        if (nonWhitespaceLength(content) === 0) return null
+        if (isShortDocForSummary(content)) {
+          const contentTerms = extractConversationTerms(content)
+          const terms = extractSummaryMatchTerms(null, title)
+          for (const term of contentTerms) addTerm(terms, term, 2)
+          return {
+            key,
+            kind,
+            updatedAt: doc.updatedAt,
+            strictTerms: new Set(contentTerms),
+            terms
+          }
+        }
+      } catch {
+        // Fall back to a stored summary if the document is temporarily unreadable.
+      }
+    }
+
     let summary: unknown
     try {
       if (kind === 'res' && (await readResource(chat.projectId, id)).encoding.suspicious) return null
@@ -223,11 +261,6 @@ async function loadCandidates(
       return null
     }
     if (!summary) return null
-    const title = kind === 'doc'
-      ? tree?.docs.find((doc) => doc.id === id)?.title
-      : kind === 'chat'
-        ? tree?.chats.find((item) => item.id === id)?.title
-        : tree?.resources.find((resource) => resource.id === id)?.name
     return {
       key,
       kind,
@@ -238,7 +271,6 @@ async function loadCandidates(
   }))
   return loaded.filter((item): item is Candidate => item !== null)
 }
-
 /** Selects the initial base set. Project chats intentionally start with 5 per type. */
 export async function selectDefaultKeys(
   chat: ChatMeta,
