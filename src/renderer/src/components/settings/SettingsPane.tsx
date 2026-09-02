@@ -190,6 +190,21 @@ export default function SettingsPane(): JSX.Element {
     }
   }
 
+  async function rebuildFeatureGuide(): Promise<void> {
+    if (!(await confirmDialog(t('settings.featureGuideRestoreConfirm')))) return
+    try {
+      const result = await api.invoke('guide:rebuild', undefined)
+      if (result.ok) {
+        toast.success(t('settings.featureGuideRestored'))
+        await refresh()
+      } else {
+        toast.error(result.error ?? t('settings.featureGuideRestoreFailed'))
+      }
+    } catch (err) {
+      toast.error((err as Error).message || t('settings.featureGuideRestoreFailed'))
+    }
+  }
+
   async function toggleGit(enabled: boolean): Promise<void> {
     if (enabled) {
       const check = await api.invoke('git:ensure', { consent: false })
@@ -300,7 +315,9 @@ export default function SettingsPane(): JSX.Element {
   const searchMatch = (value: string, query: string): boolean => value.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
   const archiveQuery = archiveSearch.trim()
   const trashQuery = trashSearch.trim()
-  const matchingTrashedProjects = workspace.trashedProjects.filter((project) => !trashQuery || searchMatch(project.name, trashQuery))
+  const matchingTrashedProjects = workspace.trashedProjects
+    .filter((project) => project.system !== 'feature-guide')
+    .filter((project) => !trashQuery || searchMatch(project.name, trashQuery))
   const archivedChatGroups = workspace.projects
     .map((project) => ({
       project,
@@ -362,6 +379,9 @@ export default function SettingsPane(): JSX.Element {
           </div>
           <button className="btn mt-2" onClick={() => void migrate()}>
             {t('settings.migrate')}
+          </button>
+          <button className="btn mt-2" onClick={() => void rebuildFeatureGuide()}>
+            {t('settings.featureGuideRestore')}
           </button>
         </Section> )}
 

@@ -1,4 +1,4 @@
-﻿// IPC 濂戠害锛歝hannel 鍚嶇О涓?request/response 绫诲瀷銆?
+// IPC 濂戠害锛歝hannel 鍚嶇О涓?request/response 绫诲瀷銆?
 // main 杩涚▼閫氳繃 ipcMain.handle 娉ㄥ唽锛宺enderer 閫氳繃 preload 鏆撮湶鐨勭被鍨嬪寲 API 璋冪敤銆?
 
 import type { SummaryProgress, SummaryQueueStatus, SummaryReadinessProgress } from './summary-job-protocol'
@@ -101,6 +101,7 @@ export const IPC = {
   configGet: 'config:get',
   configSet: 'config:set',
   configChooseWorkspace: 'config:choose-workspace',
+  guideRebuild: 'guide:rebuild',
   workspaceGet: 'workspace:get',
   workspaceMigrate: 'workspace:migrate',
   projectCreate: 'project:create',
@@ -183,6 +184,7 @@ export interface IpcApi {
   [IPC.configGet]: { req: void; res: AppConfig }
   [IPC.configSet]: { req: Partial<AppConfig>; res: AppConfig }
   [IPC.configChooseWorkspace]: { req: void; res: string | null }
+  [IPC.guideRebuild]: { req: void; res: { ok: boolean; error?: string } }
   [IPC.workspaceGet]: { req: void; res: WorkspaceSnapshot }
   [IPC.workspaceMigrate]: { req: string; res: { ok: boolean; error?: string } }
   [IPC.projectCreate]: { req: ProjectCreateInput; res: ProjectMeta }

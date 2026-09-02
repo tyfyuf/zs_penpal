@@ -34,7 +34,8 @@ import {
   writeChatSummary,
   writeDocRollups,
   writeDocSummary,
-  writeResourceSummary
+  writeResourceSummary,
+  isFeatureGuideProject
 } from './file.service'
 import { atomicWriteJson, nowIso, readJson } from '../util'
 import { join } from 'path'
@@ -1153,6 +1154,7 @@ export async function distillResource(
   type: ResourceDistillType,
   force = false
 ): Promise<DistillResult> {
+  if (await isFeatureGuideProject(projectId)) return { ok: false, error: 'Feature guide projects do not distill resources' }
   const key = `res:${resourceId}`
   markGenerating(key)
   let succeeded = false
@@ -1686,6 +1688,7 @@ async function buildRollupForChunk(
 
 /** 生成或重建项目中的大摘要 */
 export async function generateDocRollups(projectId: string, progressKey?: string): Promise<{ ok: boolean; error?: string }> {
+  if (await isFeatureGuideProject(projectId)) return { ok: false, error: 'Feature guide projects do not generate summaries' }
   const cfg = await loadConfig()
   if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未启用' }
   const state = await inspectDocRollupProject(projectId)
@@ -1719,6 +1722,7 @@ export async function generateDocRollups(projectId: string, progressKey?: string
 
 /** 单条重新生成大摘要 */
 export async function regenerateDocRollup(projectId: string, rollupId: string, progressKey?: string): Promise<{ ok: boolean; error?: string }> {
+  if (await isFeatureGuideProject(projectId)) return { ok: false, error: 'Feature guide projects do not generate summaries' }
   const settings = await loadApiSettings()
   if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }
   const state = await inspectDocRollupProject(projectId)

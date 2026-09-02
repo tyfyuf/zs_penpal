@@ -1,6 +1,6 @@
 import type { VectorChunk, VectorIndex, VectorIndexFileStatus, VectorIndexStatus, VectorIndexSource, VectorSearchHit } from '@shared/types'
 import { createHash } from 'node:crypto'
-import { buildSnapshot, readDoc, readResource, readVectorIndex, writeVectorIndex } from './file.service'
+import { buildSnapshot, readDoc, readResource, readVectorIndex, writeVectorIndex, isFeatureGuideProject } from './file.service'
 import { nowIso } from '../util'
 import {
   getNeuralEmbedder,
@@ -591,12 +591,14 @@ async function buildWithFallback(
 
 /** Project-wide refresh with changed/new sources only; removed sources are pruned. */
 export async function buildVectorIndex(projectId: string): Promise<VectorBuildResult> {
+  if (await isFeatureGuideProject(projectId)) return { ok: false, error: 'Feature guide projects do not build vector indexes' }
   const backend = await preferredBackend()
   return runProjectOperation(projectId, (generation) => buildWithFallback(projectId, backend, generation))
 }
 
 /** Force a single document/resource to be rebuilt. */
 export async function rebuildVectorSource(projectId: string, id: string, kind: 'doc' | 'res'): Promise<VectorBuildResult> {
+  if (await isFeatureGuideProject(projectId)) return { ok: false, error: 'Feature guide projects do not build vector indexes' }
   const backend = await preferredBackend()
   return runProjectOperation(projectId, (generation) => buildWithFallback(projectId, backend, generation, { id, kind, force: true }))
 }

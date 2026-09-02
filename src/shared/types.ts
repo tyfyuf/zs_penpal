@@ -6,6 +6,7 @@ export type ChatStatus = 'normal' | 'user_archived' | 'orphan_archived'
 export type ChatKind = 'project' | 'doc' | 'context'
 /** 右键创建上下文对话的动作（PRD 6.1） */
 export type ChatAction = 'diagnose' | 'plot' | 'optimize'
+export type BuiltinEntityKind = 'feature-guide'
 
 /** 该对话的摘要注入覆盖（对当前对话窗口单独生效） */
 export interface ChatRelevanceLearningTerm {
@@ -39,6 +40,8 @@ export interface ProjectMeta {
   status: ProjectStatus
   /** Whether writing-document summaries in this project are maintained after edits. */
   summaryAutoMaintenance?: boolean
+  /** System-owned project with protected built-in content. */
+  system?: BuiltinEntityKind
 }
 
 export interface DocCenteredParagraph {
@@ -65,6 +68,10 @@ export interface DocMeta {
   status: DocStatus
   /** Optional editor presentation metadata retained outside the Markdown body. */
   editorFormat?: DocEditorFormat
+  /** System-owned document with protected built-in content. */
+  system?: BuiltinEntityKind
+  /** Stable display/injection order for system-owned documents. */
+  systemOrder?: number
 }
 
 /** 上下文范围（文档级上下文对话使用，PRD 6.4） */
@@ -98,6 +105,8 @@ export interface ChatMeta {
   injectionOverrides?: ChatInjectionOverrides
   /** Dynamic, conversation-local relevance signals; never shared across chats. */
   summaryLearning?: ChatRelevanceLearning
+  /** System-owned chat with a dedicated assistant role. */
+  system?: BuiltinEntityKind
 }
 
 export interface ResourceMeta {

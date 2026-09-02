@@ -159,6 +159,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   const setTabContextRange = useAppStore((s) => s.setContextRange)
   const setStreamingChat = useAppStore((s) => s.setStreamingChat)
   const titleGenerating = useAppStore((s) => s.titleGenerating[chatId])
+  const isFeatureGuideChat = chat?.system === 'feature-guide'
 
   const docTitle = useMemo(() => {
     if (!chat?.docId) return undefined
@@ -194,6 +195,14 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
         .filter((key) => key.startsWith('doc:') || key.startsWith('chat:') || key.startsWith('res:') || key === 'fulltext'))
       setChat(chat)
       setMessages(messages)
+      if (chat.system === 'feature-guide') {
+        // Built-in guide chats own their tutorial context and cannot accept
+        // user attachments. Clear a stale draft left before the guide was opened.
+        setAttachments([])
+        setShowUpload(false)
+        setShowDocumentPicker(false)
+        writeChatDraft(chatId, { input: initialDraft.input, attachments: [] })
+      }
       setHistoryLoaded(true)
       if (chat.contextRange) setRange(chat.contextRange)
       if (chat.lockedRange) setLockedRange(chat.lockedRange)
@@ -208,16 +217,22 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
 
   // 摘要概览（注入开关面板数据）
   useEffect(() => {
-    if (!chat?.projectId) return
+    if (!chat?.projectId || chat.system === 'feature-guide') {
+      setOverview(null)
+      return
+    }
     void api.invoke('summary:listProject', chat.projectId).then(setOverview).catch(() => {})
-  }, [chat?.projectId, summaryRevision])
+  }, [chat?.projectId, chat?.system, summaryRevision])
 
   // 默认激活集（相关度采样），随摘要变化刷新
   useEffect(() => {
-    if (!chat?.id) return
+    if (!chat?.id || chat.system === 'feature-guide') {
+      setDefaultActive([])
+      return
+    }
     setDefaultActive(null)
     void api.invoke('summary:defaultActive', chat.id).then(setDefaultActive).catch(() => setDefaultActive([]))
-  }, [chat?.id, summaryRevision])
+  }, [chat?.id, chat?.system, summaryRevision])
 
   // 流式订阅
   function setReasoningExpanded(key: string, open: boolean): void {
@@ -510,7 +525,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
 
   // 注入开关项
   const injectionItems = useMemo<InjectionItem[]>(() => {
-    if (!chat || !overview || !config?.summaryEnabled) return []
+    if (!chat || chat.system === 'feature-guide' || !overview || !config?.summaryEnabled) return []
     const kind = chat.kind
     const inj = config.summaryInjection
     const items: InjectionItem[] = []
@@ -796,7 +811,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   async function send(regenerate = false): Promise<void> {
     if (streaming) return
     if (!regenerate && !input.trim() && attachments.length === 0) return
-    if (config?.summaryEnabled && ((messages.length === 0 && defaultActive === null) || (messages.length > 0 && activeInjections === null))) {
+    if (!isFeatureGuideChat && config?.summaryEnabled && ((messages.length === 0 && defaultActive === null) || (messages.length > 0 && activeInjections === null))) {
       setError('\u6458\u8981\u6ce8\u5165\u72b6\u6001\u4ecd\u5728\u52a0\u8f7d\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5')
       return
     }
@@ -806,7 +821,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
     if (!regenerate) {
       // Persist the frozen injection state before appending the first user message.
       // Otherwise appendMessage can race with chat:patch and restore an older meta snapshot.
-      if (messages.length === 0) {
+      if (messages.length === 0 && !isFeatureGuideChat) {
         const onKeys = injectionItems
           .filter((item) => ((defaultActive?.includes(item.key) ?? false) || pendingEnabled.includes(item.key)) && !disabledInjections.includes(item.key))
           .map((item) => item.key)
@@ -814,7 +829,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
         if (!persisted) return
         setActiveInjections(onKeys)
         setPendingEnabled([])
-      } else if (pendingEnabled.length > 0) {
+      } else if (!isFeatureGuideChat && pendingEnabled.length > 0) {
         const nextActive = [...new Set([...(activeInjections ?? []), ...pendingEnabled])]
         const persisted = await persistInjectionOverrides({ disabled: disabledInjections, active: nextActive, pending: [] })
         if (!persisted) return
@@ -823,12 +838,12 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
       }
       setMessages((current) => [
         ...current,
-        { id: userMessageId, role: 'user', content: input, createdAt: new Date().toISOString(), attachments }
+        { id: userMessageId, role: 'user', content: input, createdAt: new Date().toISOString(), attachments: isFeatureGuideChat ? [] : attachments }
       ])
       setPrevAnswer(null)
     } else {
       // Regeneration also consumes pending summaries, so persist them before starting the request.
-      if (pendingEnabled.length > 0) {
+      if (!isFeatureGuideChat && pendingEnabled.length > 0) {
         const nextActive = [...new Set([...(activeInjections ?? []), ...pendingEnabled])]
         const persisted = await persistInjectionOverrides({ disabled: disabledInjections, active: nextActive, pending: [] })
         if (!persisted) return
@@ -853,8 +868,8 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
       chatId,
       requestId,
       userText: regenerate ? '' : input,
-      snapshotIds: regenerate ? undefined : attachments.map((attachment) => attachment.snapshotId).filter((id): id is string => !!id),
-      docIds: regenerate ? undefined : attachments.map((attachment) => attachment.docId).filter((id): id is string => !!id),
+      snapshotIds: regenerate || isFeatureGuideChat ? undefined : attachments.map((attachment) => attachment.snapshotId).filter((id): id is string => !!id),
+      docIds: regenerate || isFeatureGuideChat ? undefined : attachments.map((attachment) => attachment.docId).filter((id): id is string => !!id),
       contextRange: streamRange,
       regenerate,
       regenerateReason: regenerate ? pendingReasonRef.current ?? undefined : undefined,
@@ -956,7 +971,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
                 wordBreak: 'break-word'
               }}
             >
-              {m.attachments && m.attachments.length > 0 && (
+              {m.attachments && m.attachments.length > 0 && !isFeatureGuideChat && (
                 <div className="mb-1 flex flex-wrap gap-1">
                   {m.attachments.map((a) => (
                     <span key={a.snapshotId} className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs" style={{ background: 'var(--panel3)' }}>
@@ -974,7 +989,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
                 />
               )}
               {m.content}
-              {m.role === 'assistant' && m.memory && <MemoryCard memory={m.memory} />}
+              {m.role === 'assistant' && m.memory && <MemoryCard memory={m.memory} hideVector={isFeatureGuideChat} />}
               {m.role === 'assistant' && (
                 <button
                   className="mt-1.5 flex items-center gap-1 text-xs opacity-60 hover:opacity-100"
@@ -1134,7 +1149,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
       )}
 
       <div className="border-t p-3" style={{ borderColor: 'var(--border)' }}>
-        {attachments.length > 0 && (
+        {attachments.length > 0 && !isFeatureGuideChat && (
           <div className="mb-2 flex flex-wrap gap-1">
             {attachments.map((a) => {
               const key = a.snapshotId ?? a.docId ?? a.name
@@ -1154,12 +1169,16 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
           </div>
         )}
         <div className="flex items-end gap-2">
-          <button className="btn !px-2 !py-2" title={t('chat.upload')} onClick={() => setShowUpload(true)}>
-            <Paperclip size={16} />
-          </button>
-          <button className="btn !px-2 !py-2" title={t('chat.attachDoc')} onClick={() => setShowDocumentPicker(true)}>
-            <FileText size={16} />
-          </button>
+          {!isFeatureGuideChat && (
+            <>
+              <button className="btn !px-2 !py-2" title={t('chat.upload')} onClick={() => setShowUpload(true)}>
+                <Paperclip size={16} />
+              </button>
+              <button className="btn !px-2 !py-2" title={t('chat.attachDoc')} onClick={() => setShowDocumentPicker(true)}>
+                <FileText size={16} />
+              </button>
+            </>
+          )}
           <textarea
             className="input min-h-[40px] flex-1 resize-none"
             rows={1}
@@ -1195,7 +1214,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
         </div>
       </div>
 
-      {showUpload && chat && (
+      {showUpload && chat && !isFeatureGuideChat && (
         <UploadPicker
           chatId={chatId}
           projectId={chat.projectId}
@@ -1203,7 +1222,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
           onClose={() => setShowUpload(false)}
         />
       )}
-      {showDocumentPicker && chat && (
+      {showDocumentPicker && chat && !isFeatureGuideChat && (
         <DocumentPicker
           projectId={chat.projectId}
           onSelect={(doc) => void handleSelectedDocument(doc)}
@@ -1256,13 +1275,13 @@ function ReasoningBlock({
 }
 
 /** “本次记忆”卡：透明展示本次回答使用了哪些摘要/大摘要/向量命中 */
-function MemoryCard({ memory }: { memory: MemoryContext }): JSX.Element {
+function MemoryCard({ memory, hideVector = false }: { memory: MemoryContext; hideVector?: boolean }): JSX.Element {
   const [open, setOpen] = useState(false)
   const t = useT()
   const small = memory.small ?? []
   const rollups = memory.rollups ?? []
-  const vector = memory.vector ?? []
-  const trace = memory.vectorTrace
+  const vector = hideVector ? [] : (memory.vector ?? [])
+  const trace = hideVector ? undefined : memory.vectorTrace
   const total = small.length + rollups.length + vector.length
   if (total === 0 && !memory.reason && !trace) return <></>
 

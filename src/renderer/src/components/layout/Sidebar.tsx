@@ -510,10 +510,12 @@ export default function Sidebar(): JSX.Element {
             {c.title}
           </span>
           <ActionBadge chat={c} />
-          <div className="hidden gap-0.5 group-hover:flex">
-            <TitleButton chatId={c.id} />
-            <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteChat(c)} />
-          </div>
+          {project.project.system !== 'feature-guide' && (
+            <div className="hidden gap-0.5 group-hover:flex">
+              <TitleButton chatId={c.id} />
+              <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteChat(c)} />
+            </div>
+          )}
         </div>
       )
     })
@@ -665,27 +667,30 @@ export default function Sidebar(): JSX.Element {
         {workspace.projects.map((p) => {
           const projectKey = `p:${p.project.id}`
           const projectChats = p.chats.filter((c) => !c.docId)
-          const open = isOpen(projectKey)
+          const isFeatureGuide = p.project.system === 'feature-guide'
+          const open = isOpen(projectKey, isFeatureGuide)
           return (
             <div key={p.project.id} className="mb-0.5">
               <div className="group flex items-center gap-1 px-2 py-1.5 hover:bg-[var(--panel3)]">
-                <button className="flex items-center gap-1" onClick={() => toggle(projectKey)}>
+                <button className="flex items-center gap-1" onClick={() => toggle(projectKey, isFeatureGuide)}>
                   {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                   {open ? <FolderOpen size={15} style={{ color: 'var(--accent)' }} /> : <Folder size={15} style={{ color: 'var(--accent)' }} />}
                 </button>
                 <span className="min-w-0 flex-1 truncate text-sm font-medium" title={p.project.name}>
                   {p.project.name}
                 </span>
-                <IconButton
+                {!isFeatureGuide && <IconButton
                   icon={<Activity size={12} />}
                   title={t(p.project.summaryAutoMaintenance ? 'sidebar.disableSummaryMaintenance' : 'sidebar.enableSummaryMaintenance')}
                   onClick={() => void toggleProjectSummaryMaintenance(p.project.id, !p.project.summaryAutoMaintenance)}
                   active={p.project.summaryAutoMaintenance === true}
-                />
+                />}
                 <div className="hidden gap-0.5 group-hover:flex">
-                  <IconButton icon={<FileText size={12} />} title={t('sidebar.newDoc')} onClick={() => void createDoc(p.project.id)} />
-                  <IconButton icon={<MessageSquare size={12} />} title={t('sidebar.newProjChat')} onClick={() => void createChat(p.project.id)} />
-                  <IconButton icon={<MoreHorizontal size={12} />} title={t('sidebar.rename')} onClick={() => void renameProject(p.project.id, p.project.name)} />
+                  {!isFeatureGuide && <>
+                    <IconButton icon={<FileText size={12} />} title={t('sidebar.newDoc')} onClick={() => void createDoc(p.project.id)} />
+                    <IconButton icon={<MessageSquare size={12} />} title={t('sidebar.newProjChat')} onClick={() => void createChat(p.project.id)} />
+                    <IconButton icon={<MoreHorizontal size={12} />} title={t('sidebar.rename')} onClick={() => void renameProject(p.project.id, p.project.name)} />
+                  </>}
                   <IconButton icon={<Trash2 size={12} />} title={t('sidebar.deleteProject')} onClick={() => void deleteProject(p.project.id)} />
                 </div>
               </div>
@@ -694,11 +699,11 @@ export default function Sidebar(): JSX.Element {
                 <div>
                   <Section
                     label={t('sidebar.secDocs')}
-                    open={isOpen(`${projectKey}:docs`)}
-                    onToggle={() => toggle(`${projectKey}:docs`)}
-                    onAdd={() => void createDoc(p.project.id)}
+                    open={isOpen(`${projectKey}:docs`, isFeatureGuide)}
+                    onToggle={() => toggle(`${projectKey}:docs`, isFeatureGuide)}
+                    onAdd={isFeatureGuide ? undefined : () => void createDoc(p.project.id)}
                   >
-                    {isOpen(`${projectKey}:docs`) &&
+                    {isOpen(`${projectKey}:docs`, isFeatureGuide) &&
                       p.docs.map((doc) => {
                         const docChats = p.chats.filter((chat) => chat.docId === doc.id)
                         const docChatsKey = `${projectKey}:doc:${doc.id}`
@@ -739,11 +744,11 @@ export default function Sidebar(): JSX.Element {
                               >
                                 {doc.title}
                               </span>
-                              <div className="hidden gap-0.5 group-hover:flex">
+                              {!isFeatureGuide && <div className="hidden gap-0.5 group-hover:flex">
                                 <IconButton icon={<MessageSquare size={12} />} title={t('sidebar.newDocChat')} onClick={() => void createChat(p.project.id, doc.id)} />
                                 <IconButton icon={<MoreHorizontal size={12} />} title={t('sidebar.rename')} onClick={() => void renameDoc(doc)} />
                                 <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteDoc(doc)} />
-                              </div>
+                              </div>}
                             </div>
                             {docChatsOpen && renderDocChats(p, doc)}
                           </div>
@@ -753,11 +758,11 @@ export default function Sidebar(): JSX.Element {
 
                   <Section
                     label={t('sidebar.secChats')}
-                    open={isOpen(`${projectKey}:chats`)}
-                    onToggle={() => toggle(`${projectKey}:chats`)}
-                    onAdd={() => void createChat(p.project.id)}
+                    open={isOpen(`${projectKey}:chats`, isFeatureGuide)}
+                    onToggle={() => toggle(`${projectKey}:chats`, isFeatureGuide)}
+                    onAdd={isFeatureGuide ? undefined : () => void createChat(p.project.id)}
                   >
-                    {isOpen(`${projectKey}:chats`) &&
+                    {isOpen(`${projectKey}:chats`, isFeatureGuide) &&
                       projectChats.map((c) => {
                         const isActive = activeChatId === c.id
                         return (
@@ -774,16 +779,18 @@ export default function Sidebar(): JSX.Element {
                             <span className="min-w-0 flex-1 cursor-pointer truncate" onClick={() => openChat(c)} title={c.title}>
                               {c.title}
                             </span>
-                            <div className="hidden gap-0.5 group-hover:flex">
-                              <TitleButton chatId={c.id} />
-                              <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteChat(c)} />
-                            </div>
+                            {!isFeatureGuide && (
+                              <div className="hidden gap-0.5 group-hover:flex">
+                                <TitleButton chatId={c.id} />
+                                <IconButton icon={<Trash2 size={12} />} title={t('sidebar.delete')} onClick={() => void deleteChat(c)} />
+                              </div>
+                            )}
                           </div>
                         )
                       })}
                   </Section>
 
-                  <Section label={t('sidebar.secResources')} open={isOpen(`${projectKey}:res`)} onToggle={() => toggle(`${projectKey}:res`)} onAdd={() => void uploadResource(p.project.id)}>
+                  {!isFeatureGuide && <Section label={t('sidebar.secResources')} open={isOpen(`${projectKey}:res`)} onToggle={() => toggle(`${projectKey}:res`)} onAdd={() => void uploadResource(p.project.id)}>
                     {isOpen(`${projectKey}:res`) &&
                       p.resources.map((r) => {
                         const generating = isResourceGenerating(p.project.id, r.id)
@@ -812,11 +819,11 @@ export default function Sidebar(): JSX.Element {
                         </div>
                         )
                       })}
-                  </Section>
+                  </Section>}
 
-                  <Section label={t('sidebar.secSummary')} open={isOpen(`${projectKey}:summary`)} onToggle={() => toggle(`${projectKey}:summary`)}>
+                  {!isFeatureGuide && <Section label={t('sidebar.secSummary')} open={isOpen(`${projectKey}:summary`)} onToggle={() => toggle(`${projectKey}:summary`)}>
                     {isOpen(`${projectKey}:summary`) && <SummaryArea projectId={p.project.id} />}
-                  </Section>
+                  </Section>}
                 </div>
               )}
             </div>

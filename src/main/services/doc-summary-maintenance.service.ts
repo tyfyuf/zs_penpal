@@ -7,6 +7,7 @@ import { ensureDocSummaryInWorker, generateDocRollupsInWorker } from './summary-
 import { projectDocRollupsNeedMaintenance } from './summary.service'
 import { loadConfig } from './config.service'
 import { logError } from './log.service'
+import { isFeatureGuideProject } from './file.service'
 
 export const DOC_SUMMARY_IDLE_DELAY_MS = 15 * 60 * 1000
 const RETRY_DELAYS_MS = [30_000, 3 * 60_000] as const

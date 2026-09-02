@@ -114,8 +114,10 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   const statsTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const firstLineIndentRef = useRef(false)
   const centeredButtonRef = useRef(false)
+  const readOnlyRef = useRef(false)
 
   const [docMeta, setDocMeta] = useState<DocMeta | null>(null)
+  const [loading, setLoading] = useState(true)
   const [fontSize, setFontSize] = useState(15)
   const [firstLineIndent, setFirstLineIndent] = useState(false)
   const [centeredSelection, setCenteredSelection] = useState(false)
@@ -126,6 +128,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
 
   const config = useAppStore((s) => s.config)
   const dirty = useAppStore((s) => s.dirty[docId])
+  const isReadOnly = docMeta?.system === 'feature-guide'
   const setDirty = useAppStore((s) => s.setDirty)
   const refresh = useAppStore((s) => s.refreshWorkspace)
   const openChat = useAppStore((s) => s.openChat)
@@ -148,7 +151,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
 
   const doSave = useCallback(async (): Promise<void> => {
     const view = viewRef.current
-    if (!view || !loadedRef.current) return
+    if (!view || !loadedRef.current || readOnlyRef.current) return
     let text = view.state.doc.toString()
     if (lineEndingRef.current === 'CRLF') text = text.replace(/\n/g, '\r\n')
     try {
@@ -164,6 +167,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   }, [docId, setDirty])
 
   const scheduleSave = useCallback((): void => {
+    if (readOnlyRef.current) return
     if (saveTimer.current) clearTimeout(saveTimer.current)
     const interval = config?.autosaveIntervalMs ?? 5000
     saveTimer.current = setTimeout(() => {
@@ -175,19 +179,26 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
     let cancelled = false
     firstLineIndentRef.current = false
     centeredButtonRef.current = false
+    readOnlyRef.current = false
     setFirstLineIndent(false)
     setCenteredSelection(false)
     setCharacterStats({ total: 0, nonWhitespace: 0 })
+    setLoading(true)
     void (async () => {
       const { doc, content } = await api.invoke('doc:read', docId)
       if (cancelled) return
       setDocMeta(doc)
+      setLoading(false)
+      const readOnly = doc.system === 'feature-guide'
+      readOnlyRef.current = readOnly
       if (content.includes('\r\n')) lineEndingRef.current = 'CRLF'
       else lineEndingRef.current = 'LF'
 
       const state = EditorState.create({
         doc: content,
         extensions: [
+          EditorState.readOnly.of(readOnly),
+          EditorView.editable.of(!readOnly),
           buildExtensions(() => {
             void doSave()
             return true
@@ -240,11 +251,13 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   // 上下文高亮（PRD 6.4）
 
   function markEditorFormatDirty(): void {
+    if (readOnlyRef.current) return
     setDirty(docId, true)
     scheduleSave()
   }
 
   function toggleCenteredParagraphs(): void {
+    if (readOnlyRef.current) return
     const view = viewRef.current
     if (!view || !toggleSelectedParagraphsCentered(view)) return
     syncCenteredButton(view)
@@ -252,6 +265,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   }
 
   function toggleFirstLineIndent(): void {
+    if (readOnlyRef.current) return
     const view = viewRef.current
     const next = !firstLineIndentRef.current
     firstLineIndentRef.current = next
@@ -288,12 +302,14 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
 
   function onContextMenu(e: React.MouseEvent): void {
     e.preventDefault()
+    if (loading) return
     const view = viewRef.current
     if (!view) return
     const coords = { x: e.clientX, y: e.clientY }
     const pos = view.posAtCoords(coords)
     if (pos == null) return
     const sel = view.state.selection.main
+    if (isReadOnly && sel.empty) return
     if (pos < sel.from || pos > sel.to) {
       view.dispatch({ selection: { anchor: pos } })
     }
@@ -314,6 +330,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   }
 
   async function cutSelection(): Promise<void> {
+    if (isReadOnly) return
     const view = viewRef.current
     const m = menu
     setMenu(null)
@@ -327,6 +344,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   }
 
   async function pasteAtCursor(): Promise<void> {
+    if (isReadOnly) return
     const view = viewRef.current
     const m = menu
     setMenu(null)
@@ -344,6 +362,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   }
 
   async function runAction(action: ChatAction): Promise<void> {
+    if (isReadOnly) return
     const view = viewRef.current
     const m = menu
     setMenu(null)
@@ -391,7 +410,8 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b px-3 py-1.5" style={{ background: 'var(--panel)', borderColor: 'var(--border)' }}>
         <span className="text-sm font-medium">{tab.title}</span>
-        {dirty && (
+        {isReadOnly && <span className="text-xs" style={{ color: 'var(--muted)' }}>{t('editor.readOnly')}</span>}
+        {dirty && !isReadOnly && (
           <span className="text-xs" style={{ color: 'var(--warn)' }}>
             ● {t('editor.unsaved')}
           </span>
@@ -406,27 +426,31 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
         <button className="btn !px-2 !py-1" onClick={() => setFontSize((f) => Math.min(28, f + 1))} title={t('editor.fontUp')}>
           <Plus size={14} />
         </button>
-        <button
-          className="btn !px-2 !py-1"
-          onClick={toggleCenteredParagraphs}
-          title={t('editor.center')}
-          aria-label={t('editor.center')}
-          aria-pressed={centeredSelection}
-        >
-          <AlignCenter size={14} />
-        </button>
-        <button
-          className="btn !px-2 !py-1"
-          onClick={toggleFirstLineIndent}
-          title={t('editor.firstLineIndent')}
-          aria-label={t('editor.firstLineIndent')}
-          aria-pressed={firstLineIndent}
-        >
-          <IndentIncrease size={14} />
-        </button>
-        <button className="btn !px-2 !py-1" onClick={() => void doSave()} title={t('editor.save')}>
-          <Save size={14} />
-        </button>
+        {!isReadOnly && (
+          <>
+            <button
+              className="btn !px-2 !py-1"
+              onClick={toggleCenteredParagraphs}
+              title={t('editor.center')}
+              aria-label={t('editor.center')}
+              aria-pressed={centeredSelection}
+            >
+              <AlignCenter size={14} />
+            </button>
+            <button
+              className="btn !px-2 !py-1"
+              onClick={toggleFirstLineIndent}
+              title={t('editor.firstLineIndent')}
+              aria-label={t('editor.firstLineIndent')}
+              aria-pressed={firstLineIndent}
+            >
+              <IndentIncrease size={14} />
+            </button>
+            <button className="btn !px-2 !py-1" onClick={() => void doSave()} title={t('editor.save')}>
+              <Save size={14} />
+            </button>
+          </>
+        )}
         <button className="btn !px-2 !py-1" onClick={() => void exportDoc('md')} title={t('editor.exportMd')}>
           <Download size={14} />
         </button>
@@ -461,30 +485,36 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
                 <Copy size={13} />
                 {t('editor.copy')}
               </button>
-              <button className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]" onClick={() => void cutSelection()}>
-                <Scissors size={13} />
-                {t('editor.cut')}
-              </button>
+              {!isReadOnly && (
+                <button className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]" onClick={() => void cutSelection()}>
+                  <Scissors size={13} />
+                  {t('editor.cut')}
+                </button>
+              )}
             </>
           )}
-          <button className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]" onClick={() => void pasteAtCursor()}>
-            <ClipboardPaste size={13} />
-            {t('editor.paste')}
-          </button>
-          <div className="mx-2 my-1 border-t" style={{ borderColor: 'var(--border)' }} />
-          {ACTIONS.filter((a) => a.value !== 'optimize' || !menu.empty).map((a) => {
-            const Icon = a.icon
-            return (
-              <button
-                key={a.value}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]"
-                onClick={() => void runAction(a.value)}
-              >
-                <Icon size={13} />
-                {t(a.labelKey)}
+          {!isReadOnly && (
+            <>
+              <button className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]" onClick={() => void pasteAtCursor()}>
+                <ClipboardPaste size={13} />
+                {t('editor.paste')}
               </button>
-            )
-          })}
+              <div className="mx-2 my-1 border-t" style={{ borderColor: 'var(--border)' }} />
+              {ACTIONS.filter((a) => a.value !== 'optimize' || !menu.empty).map((a) => {
+                const Icon = a.icon
+                return (
+                  <button
+                    key={a.value}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--panel3)]"
+                    onClick={() => void runAction(a.value)}
+                  >
+                    <Icon size={13} />
+                    {t(a.labelKey)}
+                  </button>
+                )
+              })}
+            </>
+          )}
         </div>
       )}
     </div>

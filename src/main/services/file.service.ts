@@ -1,4 +1,4 @@
-﻿import { join } from 'path'
+import { join } from 'path'
 import { basename } from 'path'
 import { mkdir, readdir, readFile, rm } from 'fs/promises'
 import type {
@@ -26,6 +26,7 @@ import { assertTextIntegrity, readDecodedTextFile } from './text-decoding.servic
 import { convertResourceInput, type ConvertedResourceInput } from './resource-conversion.service'
 import { getResourceSourceFormat, isSupportedResourceFile } from '@shared/resource-formats'
 import { isSummaryGenerating } from './summary-state.service'
+import { FEATURE_GUIDE_CHAT_TITLE, FEATURE_GUIDE_DOCUMENTS, FEATURE_GUIDE_PROJECT_KIND, FEATURE_GUIDE_PROJECT_NAME } from './feature-guide-content'
 
 // ---------------------------------------------------------------------------
 // 鐩綍缁撴瀯锛堜緷鎹?tech-stack 7.2锛岀敓鍛藉懆鏈熺姸鎬佸瓨浜庡厓鏁版嵁 JSON锛屼笉渚濊禆鐩綍绉诲姩锛?
@@ -40,6 +41,7 @@ import { isSummaryGenerating } from './summary-state.service'
 interface AppIndex {
   version: number
   projects: ProjectMeta[]
+  featureGuideInitialized?: boolean
 }
 
 function wsRoot(): string {
@@ -123,11 +125,145 @@ function resourceSourcePath(projectId: string, fileId: string): string {
 // ---------------------------------------------------------------------------
 
 async function loadIndex(): Promise<AppIndex> {
-  return (await readJson<AppIndex>(indexPath())) ?? { version: 1, projects: [] }
+  return (await readJson<AppIndex>(indexPath())) ?? { version: 1, projects: [], featureGuideInitialized: false }
 }
 
 async function saveIndex(idx: AppIndex): Promise<void> {
   await atomicWriteJson(indexPath(), idx)
+}
+
+async function projectMetaById(projectId: string): Promise<ProjectMeta | null> {
+  const idx = await loadIndex()
+  return idx.projects.find((project) => project.id === projectId) ?? null
+}
+
+async function assertProjectContentMutable(projectId: string): Promise<void> {
+  const project = await projectMetaById(projectId)
+  if (project?.system === FEATURE_GUIDE_PROJECT_KIND) {
+    throw new Error('Built-in feature guide content cannot be modified individually')
+  }
+}
+
+export async function isFeatureGuideProject(projectId: string): Promise<boolean> {
+  const project = await projectMetaById(projectId)
+  return project?.system === FEATURE_GUIDE_PROJECT_KIND
+}
+
+let featureGuideMutation: Promise<ProjectMeta> | null = null
+
+/**
+ * Bring an already-created README project up to the current bundled guide.
+ * Matching by systemOrder first and title second preserves document IDs and
+ * therefore keeps renderer-side collapse state stable across guide updates.
+ */
+async function syncFeatureGuideProject(project: ProjectMeta): Promise<void> {
+  const existingDocs = await listDocMetas(project.id)
+  const unused = new Set(existingDocs.map((doc) => doc.id))
+  const byOrder = new Map<number, DocMeta>()
+  const byTitle = new Map<string, DocMeta>()
+  const legacyOrderByTitle = new Map([
+    ['????', 2],
+    ['??????????', 3],
+    ['???????', 4],
+    ['?????????', 5],
+    ['?????', 6],
+    ['?????', 7],
+    ['?????????', 8],
+    ['???', 9],
+    ['????', 10],
+    ['???????', 11],
+    ['????????', 12],
+    ['??', 13],
+    ['???????????', 14],
+    ['?????????', 15],
+    ['?????????', 16]
+  ])
+  for (const doc of existingDocs) {
+    if (typeof doc.systemOrder === 'number') byOrder.set(doc.systemOrder, doc)
+    byTitle.set(doc.title, doc)
+  }
+
+  for (const guide of FEATURE_GUIDE_DOCUMENTS) {
+    // Prefer the new exact title, then migrate the previous unnumbered titles.
+    // Only use persisted order as a fallback for documents without a known title.
+    const legacy = existingDocs.find((doc) => legacyOrderByTitle.get(doc.title) === guide.order)
+    const current = byTitle.get(guide.title) ?? legacy ?? byOrder.get(guide.order)
+    const doc = current ?? await createDoc(project.id, guide.title, FEATURE_GUIDE_PROJECT_KIND, guide.order)
+    unused.delete(doc.id)
+    const next: DocMeta = {
+      ...doc,
+      title: guide.title,
+      status: 'normal',
+      system: FEATURE_GUIDE_PROJECT_KIND,
+      systemOrder: guide.order,
+      updatedAt: nowIso()
+    }
+    await atomicWrite(docContentPath(project.id, doc.id), guide.content)
+    await atomicWriteJson(docMetaPath(project.id, doc.id), next)
+  }
+
+  // Remove stale documents from an older version of the built-in guide.
+  for (const docId of unused) {
+    await rm(docMetaPath(project.id, docId), { force: true })
+    await rm(docContentPath(project.id, docId), { force: true })
+  }
+}
+
+/**
+ * Create or restore the built-in README project. The normal workspace startup
+ * path calls this only for a workspace that has never been initialized. Once a
+ * user deletes the project, it stays deleted until the explicit settings action
+ * calls this function with force=true.
+ */
+export async function ensureFeatureGuideProject(force = false): Promise<ProjectMeta> {
+  if (featureGuideMutation) return featureGuideMutation
+  featureGuideMutation = (async () => {
+    await ensureWorkspace()
+    const idx = await loadIndex()
+    const existing = idx.projects.find((project) => project.system === FEATURE_GUIDE_PROJECT_KIND)
+    if (!force && existing) {
+      // A normal startup must preserve a deliberately deleted (trashed) guide,
+      // but an existing active guide should track the bundled tutorial content.
+      if (existing.status === 'normal') await syncFeatureGuideProject(existing)
+      if (!idx.featureGuideInitialized) {
+        idx.featureGuideInitialized = true
+        await saveIndex(idx)
+      }
+      return existing
+    }
+    if (!force && idx.featureGuideInitialized) {
+      throw new Error('feature guide project is not available')
+    }
+
+    if (force && existing) {
+      idx.projects = idx.projects.filter((project) => project.id !== existing.id)
+      await saveIndex(idx)
+      await rm(projectDir(existing.id), { recursive: true, force: true })
+    }
+
+    const project = await createProject(FEATURE_GUIDE_PROJECT_NAME, FEATURE_GUIDE_PROJECT_KIND)
+    for (const guide of FEATURE_GUIDE_DOCUMENTS) {
+      const doc = await createDoc(project.id, guide.title, FEATURE_GUIDE_PROJECT_KIND, guide.order)
+      await atomicWrite(docContentPath(project.id, doc.id), guide.content)
+      await atomicWriteJson(docMetaPath(project.id, doc.id), { ...doc, updatedAt: nowIso() })
+    }
+    await createChat(project.id, 'project', FEATURE_GUIDE_CHAT_TITLE, undefined, undefined, undefined, FEATURE_GUIDE_PROJECT_KIND)
+    const next = await loadIndex()
+    next.featureGuideInitialized = true
+    await saveIndex(next)
+    return project
+  })()
+  try {
+    return await featureGuideMutation
+  } finally {
+    featureGuideMutation = null
+  }
+}
+
+export async function featureGuideProjectExists(): Promise<boolean> {
+  await ensureWorkspace()
+  const idx = await loadIndex()
+  return idx.projects.some((project) => project.system === FEATURE_GUIDE_PROJECT_KIND && project.status === 'normal')
 }
 
 export async function ensureWorkspace(): Promise<void> {
@@ -135,7 +271,7 @@ export async function ensureWorkspace(): Promise<void> {
   await mkdir(root, { recursive: true })
   await mkdir(indexPath().replace('app-index.json', ''), { recursive: true })
   if ((await readJson<AppIndex>(indexPath())) === null) {
-    await saveIndex({ version: 1, projects: [] })
+    await saveIndex({ version: 1, projects: [], featureGuideInitialized: false })
   }
 }
 
@@ -159,11 +295,11 @@ export async function listProjects(status?: ProjectMeta['status']): Promise<Proj
   return status ? idx.projects.filter((p) => p.status === status) : idx.projects
 }
 
-export async function createProject(name: string): Promise<ProjectMeta> {
+export async function createProject(name: string, system?: ProjectMeta['system']): Promise<ProjectMeta> {
   await ensureWorkspace()
   const idx = await loadIndex()
   const id = newId()
-  const meta: ProjectMeta = { id, name, status: 'normal', createdAt: nowIso(), updatedAt: nowIso() }
+  const meta: ProjectMeta = { id, name, status: 'normal', createdAt: nowIso(), updatedAt: nowIso(), ...(system ? { system } : {}) }
   idx.projects.push(meta)
   await saveIndex(idx)
   await mkdir(projectDir(id), { recursive: true })
@@ -172,10 +308,12 @@ export async function createProject(name: string): Promise<ProjectMeta> {
 }
 
 export async function renameProject(projectId: string, name: string): Promise<ProjectMeta> {
+  await assertProjectContentMutable(projectId)
   return mutateProject(projectId, { name })
 }
 
 export async function setProjectSummaryAutoMaintenance(projectId: string, enabled: boolean): Promise<ProjectMeta> {
+  await assertProjectContentMutable(projectId)
   return mutateProject(projectId, { summaryAutoMaintenance: enabled })
 }
 
@@ -184,6 +322,10 @@ export async function deleteProject(projectId: string): Promise<void> {
 }
 
 export async function restoreProject(projectId: string): Promise<ProjectMeta> {
+  const project = await projectMetaById(projectId)
+  if (project?.system === FEATURE_GUIDE_PROJECT_KIND) {
+    throw new Error('Built-in feature guide project can only be restored from Settings')
+  }
   return mutateProject(projectId, { status: 'normal' })
 }
 
@@ -214,9 +356,19 @@ async function listDocMetas(projectId: string): Promise<DocMeta[]> {
   return metas
 }
 
-export async function createDoc(projectId: string, title: string): Promise<DocMeta> {
+export async function createDoc(projectId: string, title: string, system?: DocMeta['system'], systemOrder?: number): Promise<DocMeta> {
+  if (!system) await assertProjectContentMutable(projectId)
   const id = newId()
-  const meta: DocMeta = { id, projectId, title, status: 'normal', createdAt: nowIso(), updatedAt: nowIso() }
+  const meta: DocMeta = {
+    id,
+    projectId,
+    title,
+    status: 'normal',
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    ...(system ? { system } : {}),
+    ...(systemOrder === undefined ? {} : { systemOrder })
+  }
   await atomicWriteJson(docMetaPath(projectId, id), meta)
   // 鏂板缓鏂囨。锛歎TF-8锛岀┖鍐呭锛圠F锛?
   await atomicWrite(docContentPath(projectId, id), '')
@@ -247,6 +399,7 @@ export async function findDocMeta(docId: string): Promise<DocMeta> {
 
 export async function saveDoc(docId: string, content: string, editorFormat?: DocEditorFormat): Promise<void> {
   const doc = await findDocMeta(docId)
+  await assertProjectContentMutable(doc.projectId)
   await atomicWrite(docContentPath(doc.projectId, docId), content)
   const meta = await getDocMeta(doc.projectId, docId)
   const next: DocMeta = {
@@ -259,6 +412,7 @@ export async function saveDoc(docId: string, content: string, editorFormat?: Doc
 
 export async function renameDoc(docId: string, title: string): Promise<DocMeta> {
   const doc = await findDocMeta(docId)
+  await assertProjectContentMutable(doc.projectId)
   const meta = await getDocMeta(doc.projectId, docId)
   const next = { ...meta, title, updatedAt: nowIso() }
   await atomicWriteJson(docMetaPath(doc.projectId, docId), next)
@@ -267,12 +421,14 @@ export async function renameDoc(docId: string, title: string): Promise<DocMeta> 
 
 export async function deleteDoc(docId: string): Promise<void> {
   const doc = await findDocMeta(docId)
+  await assertProjectContentMutable(doc.projectId)
   const meta = await getDocMeta(doc.projectId, docId)
   await atomicWriteJson(docMetaPath(doc.projectId, docId), { ...meta, status: 'trash', updatedAt: nowIso() })
 }
 
 export async function restoreDoc(docId: string): Promise<DocMeta> {
   const doc = await findDocMeta(docId)
+  await assertProjectContentMutable(doc.projectId)
   const meta = await getDocMeta(doc.projectId, docId)
   const next: DocMeta = { ...meta, status: 'normal', updatedAt: nowIso() }
   await atomicWriteJson(docMetaPath(doc.projectId, docId), next)
@@ -287,6 +443,7 @@ export async function restoreDoc(docId: string): Promise<DocMeta> {
  */
 export async function purgeDoc(docId: string): Promise<void> {
   const doc = await findDocMeta(docId)
+  await assertProjectContentMutable(doc.projectId)
   const projectId = doc.projectId
   await rm(docMetaPath(projectId, docId), { force: true })
   await rm(docContentPath(projectId, docId), { force: true })
@@ -369,8 +526,10 @@ export async function createChat(
   title: string,
   docId?: string,
   contextRange?: import('@shared/types').ContextRange,
-  action?: import('@shared/types').ChatAction
+  action?: import('@shared/types').ChatAction,
+  system?: ChatMeta['system']
 ): Promise<ChatMeta> {
+  if (!system) await assertProjectContentMutable(projectId)
   const id = newId()
   const meta: ChatMeta = {
     id,
@@ -380,7 +539,8 @@ export async function createChat(
     title,
     status: 'normal',
     createdAt: nowIso(),
-    updatedAt: nowIso()
+    updatedAt: nowIso(),
+    ...(system ? { system } : {})
   }
   if (kind === 'context') {
     meta.contextRange = contextRange
@@ -396,7 +556,12 @@ export async function updateChatMeta(
   chatId: string,
   patch: Partial<Pick<ChatMeta, 'contextRange' | 'lockedRange' | 'injectionOverrides' | 'summaryLearning'>>
 ): Promise<ChatMeta> {
-  return mutateChatMeta(chatId, (chat) => ({ ...chat, ...patch, updatedAt: nowIso() }))
+  return mutateChatMeta(chatId, (chat) => {
+    if (chat.system === FEATURE_GUIDE_PROJECT_KIND) {
+      throw new Error('Built-in feature guide chat cannot be modified')
+    }
+    return { ...chat, ...patch, updatedAt: nowIso() }
+  })
 }
 
 export async function getChat(chatId: string): Promise<{ chat: ChatMeta; messages: ChatMessage[] }> {
@@ -406,7 +571,9 @@ export async function getChat(chatId: string): Promise<{ chat: ChatMeta; message
 }
 
 export async function renameChat(chatId: string, title: string): Promise<ChatMeta> {
-  return mutateChatMeta(chatId, (chat) => ({ ...chat, title, updatedAt: nowIso() }))
+  const chat = await getChatMeta(chatId)
+  await assertProjectContentMutable(chat.projectId)
+  return mutateChatMeta(chatId, (current) => ({ ...current, title, updatedAt: nowIso() }))
 }
 
 /** 鏇存柊涓婁笅鏂囧璇濈殑涓婁笅鏂囪寖鍥达紙PRD 6.4 / 6.6锛?*/
@@ -414,12 +581,20 @@ export async function updateChatContext(
   chatId: string,
   contextRange: import('@shared/types').ContextRange
 ): Promise<ChatMeta> {
-  return mutateChatMeta(chatId, (chat) => ({ ...chat, contextRange, updatedAt: nowIso() }))
+  return mutateChatMeta(chatId, (chat) => {
+    if (chat.system === FEATURE_GUIDE_PROJECT_KIND) {
+      throw new Error('Built-in feature guide chat cannot be modified')
+    }
+    return { ...chat, contextRange, updatedAt: nowIso() }
+  })
 }
 
 export async function appendMessage(chatId: string, message: ChatMessage): Promise<void> {
   const chat = await getChatMeta(chatId)
-  await appendJsonl(chatJsonlPath(chat.projectId, chatId), message)
+  const persistedMessage = chat.system === FEATURE_GUIDE_PROJECT_KIND && message.attachments?.length
+    ? { ...message, attachments: [] }
+    : message
+  await appendJsonl(chatJsonlPath(chat.projectId, chatId), persistedMessage)
   await mutateChatMeta(chatId, (current) => ({ ...current, updatedAt: nowIso() }))
 }
 
@@ -446,11 +621,15 @@ export async function replaceLastAssistantMessage(
 
 /** 鐢ㄦ埛褰掓。瀵硅瘽锛圥RD 4.2.1锛?*/
 export async function deleteChat(chatId: string): Promise<void> {
+  const chat = await getChatMeta(chatId)
+  if (chat.system === FEATURE_GUIDE_PROJECT_KIND) throw new Error('Built-in feature guide chat cannot be deleted individually')
   await mutateChatMeta(chatId, (chat) => ({ ...chat, status: 'user_archived', updatedAt: nowIso() }))
 }
 
 /** 浠庡綊妗ｅ尯鎭㈠瀵硅瘽锛圥RD 4.2.3锛?*/
 export async function restoreChat(chatId: string): Promise<ChatMeta> {
+  const current = await getChatMeta(chatId)
+  if (current.system === FEATURE_GUIDE_PROJECT_KIND) throw new Error('Built-in feature guide chat cannot be restored individually')
   return mutateChatMeta(chatId, async (chat) => {
     // Restore the original relation when its document still exists; otherwise restore as a project chat.
     let kind: ChatKind = chat.kind
@@ -468,6 +647,7 @@ export async function restoreChat(chatId: string): Promise<ChatMeta> {
 
 export async function purgeChat(chatId: string): Promise<void> {
   const chat = await getChatMeta(chatId)
+  if (chat.system === FEATURE_GUIDE_PROJECT_KIND) throw new Error('Built-in feature guide chat cannot be deleted individually')
   await rm(chatMetaPath(chat.projectId, chatId), { force: true })
   await rm(chatJsonlPath(chat.projectId, chatId), { force: true })
   await rm(chatSummaryPath(chat.projectId, chatId), { force: true })
@@ -510,6 +690,7 @@ export async function uploadResource(
   name: string,
   content: string
 ): Promise<ResourceMeta> {
+  await assertProjectContentMutable(projectId)
   const sourceFormat = getResourceSourceFormat(name) ?? 'txt'
   return createResourceFiles(projectId, name, Buffer.from(content, 'utf8'), {
     content,
@@ -607,6 +788,7 @@ export async function uploadResourceBytes(
   data: Uint8Array,
   encodingHint?: string
 ): Promise<ResourceMeta> {
+  await assertProjectContentMutable(projectId)
   const converted = await convertResourceInput(name, data, encodingHint)
   return createResourceFiles(projectId, name, data, converted)
 }
@@ -638,6 +820,7 @@ export async function saveResourceText(
   resourceId: string,
   content: string
 ): Promise<ResourceMeta> {
+  await assertProjectContentMutable(projectId)
   assertResourceMutationAllowed(resourceId)
   const current = await readJson<ResourceMeta>(resourceMetaPath(projectId, resourceId))
   if (!current) throw new Error('resource not found')
@@ -661,6 +844,7 @@ export async function replaceResourceBytes(
   encodingHint?: string,
   sourceName?: string
 ): Promise<ResourceMeta> {
+  await assertProjectContentMutable(projectId)
   assertResourceMutationAllowed(resourceId)
   const current = await readJson<ResourceMeta>(resourceMetaPath(projectId, resourceId))
   if (!current) throw new Error('resource not found')
@@ -674,6 +858,7 @@ export async function replaceResourceBytes(
 }
 
 export async function deleteResource(projectId: string, resourceId: string): Promise<void> {
+  await assertProjectContentMutable(projectId)
   assertResourceMutationAllowed(resourceId)
   await rm(resourceDir(projectId, resourceId), { recursive: true, force: true })
   await removeResourceDerivedData(projectId, resourceId)
@@ -704,6 +889,7 @@ export async function importExternalResource(
   editedContent: string,
   conflict: 'overwrite' | 'rename'
 ): Promise<ResourceMeta> {
+  await assertProjectContentMutable(projectId)
   const converted = await convertResourceInput(name, data)
   if (!editedContent.trim()) throw new Error('澶栭儴鏂囦欢娌℃湁鍙繚瀛樼殑姝ｆ枃鍐呭')
   const resources = await listResources(projectId)
@@ -773,6 +959,11 @@ export async function attachResourceSnapshot(
   source: { mode: 'resource'; resourceId: string } | { mode: 'local'; name: string; data: Uint8Array; encodingHint?: string }
 ): Promise<UploadResult> {
   const chat = await getChatMeta(chatId)
+  if (chat.projectId !== projectId) throw new Error('chat does not belong to project')
+  await assertProjectContentMutable(chat.projectId)
+  if (chat.system === FEATURE_GUIDE_PROJECT_KIND) {
+    throw new Error('Built-in feature guide chat cannot accept attachments')
+  }
   let resource: ResourceMeta
   let content: string
   let name: string
@@ -884,15 +1075,18 @@ export async function writeVectorIndex(projectId: string, index: VectorIndex): P
 
 async function buildProjectTree(p: ProjectMeta): Promise<ProjectTree> {
   const docs = await listDocMetas(p.id)
+  const orderedDocs = p.system === FEATURE_GUIDE_PROJECT_KIND
+    ? [...docs].sort((a, b) => (a.systemOrder ?? Number.MAX_SAFE_INTEGER) - (b.systemOrder ?? Number.MAX_SAFE_INTEGER))
+    : docs
   const chats = await listChatMetas(p.id)
   const resources = await listResources(p.id)
   return {
     project: p,
-    docs: docs.filter((d) => d.status === 'normal'),
+    docs: orderedDocs.filter((d) => d.status === 'normal'),
     chats: chats.filter((c) => c.status === 'normal'),
     resources,
     archivedChats: chats.filter((c) => c.status === 'user_archived' || c.status === 'orphan_archived'),
-    trashedDocs: docs.filter((d) => d.status === 'trash')
+    trashedDocs: orderedDocs.filter((d) => d.status === 'trash')
   }
 }
 

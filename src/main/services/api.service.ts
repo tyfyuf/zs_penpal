@@ -78,28 +78,38 @@ import { broadcast } from '../window'
 /** 系统提示词：理性务实的回答风格 + 跟随界面语言输出 */
 function buildSystemPrompt(lang: 'zh' | 'en'): string {
   if (lang === 'en') {
-    return `You are the writing assistant of Penpal (笔伴). Your job is to help the writer make decisions, not to replace their writing.
+    return `You are the writing assistant of Penpal (\u7B14\u4F34). Your job is to help the writer make decisions, not to replace their writing.
 Rules:
 1. Never modify the user's documents automatically, and never generate, replace or export finished files automatically.
 2. You may provide diagnosis, rewritten text, examples and plot suggestions in the chat, in any form.
 3. Your output appears only in the chat; the user decides and copies manually.
+4. Penpal is organized around workspaces, projects, writing documents, project/document/context chats, resources, resource distillation, summaries and summary injection, large summaries, original-text retrieval, settings, archives, trash and version management.
+5. If the user greets you, answer briefly and naturally. If the user asks what you can do, briefly introduce these Penpal capabilities and ask what they want to work on.
+6. You know the general purpose of Penpal, but do not invent uncertain operation details. For a specific UI procedure you do not know, say so honestly and direct the user to the README feature-guide project or its Software Feature Guide Entry chat; if it was deleted, tell them it can be rebuilt in Settings.
 Style:
 - Rational and pragmatic: lead with conclusions, give concrete and verifiable reasons, avoid fluff and pleasantries.
 - Point out problems and actionable improvements directly; no empty praise.
 - Stay accurate when quoting or rewriting the original text; state clearly when uncertain.
 Always respond in English.`
   }
-  return `你是「笔伴（Penpal）」的写作助手，职责是辅助创作者决策，不替代创作者完成写作成果。
-规则：
-1. 你不得自动修改用户的写作文档，也不得自动生成、替换或导出成品文件。
-2. 你可以在对话中给出诊断、优化文本、改写示例和后续走向建议，表达形式不限。
-3. 你的输出只显示在对话区，由用户自行判断并手动复制粘贴。
-风格要求：
-- 理性务实：结论先行，理由具体、可验证，少用修辞与客套；
-- 直接指出问题与可操作的改进点，不空泛鼓励；
-- 涉及原文引用或改写时保持准确，不确定之处明确说明。
-请用中文回答。`
-}/** Build the task-specific role contract for Context chats.
+  return `You are the writing assistant of Penpal (\u7B14\u4F34). Your job is to help the writer make decisions, not to replace their writing.
+Rules:
+1. Never modify the user's documents automatically, and never generate, replace or export finished files automatically.
+2. You may provide diagnosis, rewritten text, examples and plot suggestions in the chat, in any form.
+3. Your output appears only in the chat; the user decides and copies manually.
+4. Know Penpal's main feature map: workspace, project, writing document, project chat, document chat, slider document chat, resource area, resource distillation, summaries, summary injection, large summaries, original-text retrieval, settings, archive, trash and version management.
+5. For a greeting, answer briefly and naturally. For a question about what you can do, briefly introduce Penpal's main capabilities and ask what the user wants to work on.
+6. Do not invent uncertain UI procedures. If you do not know a specific operation, say so honestly and direct the user to the README feature-guide project or its Software Feature Guide Entry chat. If that project was deleted, say it can be restored in Settings.
+Style: rational, pragmatic, concrete and concise. State uncertainty when needed. Always respond in \u4E2D\u6587.`
+}
+
+function buildFeatureGuidePrompt(lang: 'zh' | 'en'): string {
+  return lang === 'en'
+    ? `You are Penpal's Software Feature Guide Assistant. Your only task is to help users understand and use Penpal. Answer from the official feature-guide documents supplied below, preserve the distinction between documents, and give concrete user-facing steps. Do not turn the answer into a technical explanation and do not discuss unrelated creative tasks. If the documents do not cover a specific operation, say that the guide does not document it and do not guess.`
+    : `You are Penpal's \u8F6F\u4EF6\u529F\u80FD\u6307\u5F15\u52A9\u624B. Your only task is to help users understand and use Penpal. Answer from the official feature-guide documents supplied below, preserve document boundaries, and give concrete user-facing steps. Do not provide technical explanations or unrelated creative work. If the guide does not cover an operation, say so and do not guess. Always respond in \u4E2D\u6587.`
+}
+
+/** Build the task-specific role contract for Context chats.
  *
  * This deliberately stays in the single chat request: it borrows OpenFic's
  * separation of agent responsibilities without introducing extra LLM calls.
@@ -584,13 +594,18 @@ async function streamAnswerWithTools(options: {
   chatId: string
   requestId: string
   replayReasoning: boolean
+  allowProjectSourceSearch: boolean
 }): Promise<{ content: string; reasoning: string; usage?: UsageLike }> {
-  const { client, settings, projectId, memory, controller, chatId, requestId, replayReasoning } = options
+  const { client, settings, projectId, memory, controller, chatId, requestId, replayReasoning, allowProjectSourceSearch } = options
   const capabilityInstruction: ChatCompletionMessageParam = {
     role: 'system',
-    content: settings.language === 'en'
-      ? 'The host already performs one automatic project-source search. When the search_project_source tool is available, call it only if you need a different query or more precise original evidence. Never claim you lack source access before using supplied excerpts or the available tool.'
-      : '\u5bbf\u4e3b\u5df2\u81ea\u52a8\u6267\u884c\u4e00\u6b21\u9879\u76ee\u539f\u6587\u68c0\u7d22\u3002\u5982\u679c search_project_source \u5de5\u5177\u53ef\u7528\uff0c\u53ea\u5728\u9700\u8981\u6362\u68c0\u7d22\u8bcd\u6216\u8865\u5145\u66f4\u7cbe\u786e\u7684\u539f\u6587\u8bc1\u636e\u65f6\u8c03\u7528\u3002\u5728\u4f7f\u7528\u5df2\u63d0\u4f9b\u7684\u539f\u6587\u7247\u6bb5\u6216\u53ef\u7528\u5de5\u5177\u524d\uff0c\u4e0d\u5f97\u58f0\u79f0\u6ca1\u6709\u539f\u6587\u8bbf\u95ee\u6743\u9650\u3002'
+    content: allowProjectSourceSearch
+      ? settings.language === 'en'
+        ? 'The host already performs one automatic project-source search. When the search_project_source tool is available, call it only if you need a different query or more precise original evidence. Never claim you lack source access before using supplied excerpts or the available tool.'
+        : '\u5bbf\u4e3b\u5df2\u81ea\u52a8\u6267\u884c\u4e00\u6b21\u9879\u76ee\u539f\u6587\u68c0\u7d22\u3002\u5982\u679c search_project_source \u5de5\u5177\u53ef\u7528\uff0c\u53ea\u5728\u9700\u8981\u6362\u68c0\u7d22\u8bcd\u6216\u8865\u5145\u66f4\u7cbe\u51c6\u7684\u539f\u6587\u8bc1\u636e\u65f6\u8c03\u7528\u3002\u5728\u4f7f\u7528\u5df2\u63d0\u4f9b\u7684\u539f\u6587\u7247\u6bb5\u6216\u53ef\u7528\u5de5\u5177\u524d\uff0c\u4e0d\u5f97\u58f0\u79f0\u6ca1\u6709\u539f\u6587\u8bbf\u95ee\u6743\u9650\u3002'
+      : settings.language === 'en'
+        ? 'This is the official Penpal feature-guide chat. Use only the supplied feature-guide documents. Do not search project sources or call any project-source retrieval tool.'
+        : '\u8fd9\u662f\u7b14\u4f34\u5b98\u65b9\u529f\u80fd\u6307\u5f15\u5165\u53e3\u5bf9\u8bdd\u3002\u8bf7\u53ea\u4f7f\u7528\u4e0a\u65b9\u63d0\u4f9b\u7684\u8f6f\u4ef6\u529f\u80fd\u6307\u5f15\u6587\u6863\u3002\u4e0d\u8981\u68c0\u7d22\u9879\u76ee\u539f\u6587\u6216\u8c03\u7528\u4efb\u4f55\u9879\u76ee\u539f\u6587\u68c0\u7d22\u5de5\u5177\u3002'
   }
   const conversation: ChatCompletionMessageParam[] = [capabilityInstruction, ...options.messages]
   let content = ''
@@ -602,7 +617,7 @@ async function streamAnswerWithTools(options: {
   let noToolFallbackUsed = false
 
   while (true) {
-    const useTools = !toolsDisabledForRequest && executedToolCalls < MAX_SEARCH_TOOL_CALLS
+    const useTools = allowProjectSourceSearch && !toolsDisabledForRequest && executedToolCalls < MAX_SEARCH_TOOL_CALLS
     const roundStartedAt = Date.now()
     const state = newStreamRound()
 
@@ -1235,7 +1250,8 @@ async function buildMessages(
 ): Promise<MessageBuildParts> {
   const cfg = await loadConfig()
   const settings = await loadApiSettings()
-  const failedDocSummaries = await (ensureSummaries ?? (() => ensureProjectDocSummariesReady(chat.projectId)))()
+  const isFeatureGuide = chat.system === 'feature-guide'
+  const failedDocSummaries = isFeatureGuide ? [] : await (ensureSummaries ?? (() => ensureProjectDocSummariesReady(chat.projectId)))()
   if (failedDocSummaries.length > 0) {
     const names = failedDocSummaries.slice(0, 5).map((name) => `《${name}》`).join('、')
     const more = failedDocSummaries.length > 5 ? `等 ${failedDocSummaries.length} 个文档` : ''
@@ -1251,12 +1267,32 @@ async function buildMessages(
   const lang = cfg.language ?? 'zh'
   const en = lang === 'en'
 
-  const systemMsgs: ChatCompletionMessageParam[] = [{ role: 'system', content: buildSystemPrompt(lang) }]
+  const systemMsgs: ChatCompletionMessageParam[] = [{ role: 'system', content: isFeatureGuide ? buildFeatureGuidePrompt(lang) : buildSystemPrompt(lang) }]
   const projectDocs = new Map(
     (tree?.docs ?? [])
       .filter((doc) => doc.projectId === chat.projectId)
       .map((doc) => [doc.id, doc] as const)
   )
+
+  if (isFeatureGuide) {
+    const guideDocs = [...(tree?.docs ?? [])].sort((a, b) => {
+      const orderA = a.systemOrder ?? Number.MAX_SAFE_INTEGER
+      const orderB = b.systemOrder ?? Number.MAX_SAFE_INTEGER
+      return orderA - orderB || a.title.localeCompare(b.title, 'zh-CN')
+    })
+    for (const guideDoc of guideDocs) {
+      try {
+        const { content } = await readDoc(guideDoc.id)
+        const heading = en
+          ? `[Official Penpal feature guide]\nGuide document: ${guideDoc.title}\nDocument identity ID: ${guideDoc.id}\nThe following is the complete guide text:`
+          : `[\u7B14\u4F34\u5B98\u65B9\u529F\u80FD\u6307\u5F15]\n\u6307\u5F15\u6587\u6863\uFF1A\u300A${guideDoc.title}\u300B\n\u6587\u6863\u8EAB\u4EFD ID\uFF1A${guideDoc.id}\n\u4EE5\u4E0B\u4E3A\u8BE5\u6307\u5F15\u6587\u6863\u5168\u6587\uFF1A`
+        const ending = en ? '\n[End of official feature guide]' : '\n[\u5B98\u65B9\u529F\u80FD\u6307\u5F15\u6587\u6863\u7ED3\u675F]'
+        systemMsgs.push({ role: 'system', content: `${heading}\n${content}${ending}` })
+      } catch {
+        /* A damaged guide document should not prevent the guide chat from opening. */
+      }
+    }
+  }
   const attachmentSource: PromptAttachmentSource = appendUser
     ? 'current_user_message_attachment'
     : 'message_attachment'
@@ -1302,10 +1338,12 @@ async function buildMessages(
     if (guidance) systemMsgs.push({ role: 'system', content: guidance })
   }
 
-  const { docMsgs, chatMsgs, resourceMsgs, items } = await injectSummaries(chat, docContent, tree, activeKeys)
+  const { docMsgs, chatMsgs, resourceMsgs, items } = isFeatureGuide
+    ? { docMsgs: [], chatMsgs: [], resourceMsgs: [], items: [] }
+    : await injectSummaries(chat, docContent, tree, activeKeys)
 
   const snapshotMsgs: ChatCompletionMessageParam[] = []
-  const snapshotIds = req.snapshotIds ?? lastUserAttachments(history)
+  const snapshotIds = isFeatureGuide ? [] : (req.snapshotIds ?? lastUserAttachments(history))
   for (const sid of snapshotIds) {
     const snap = await readSnapshot(chat.projectId, chat.id, sid)
     if (snap && !analyzeTextIntegrity(snap.content).suspicious) {
@@ -1321,7 +1359,7 @@ async function buildMessages(
   if (chat.kind === 'doc' && chat.docId && cfg.summaryInjection.doc.fullText && activeKeys.has('fulltext')) {
     fullTextDocIds.add(chat.docId)
   }
-  const docIds = req.docIds ?? lastUserDocAttachments(history)
+  const docIds = isFeatureGuide ? [] : (req.docIds ?? lastUserDocAttachments(history))
   for (const docId of docIds) {
     if (fullTextDocIds.has(docId)) continue
     const projectDoc = projectDocs.get(docId)
@@ -1363,7 +1401,7 @@ async function buildMessages(
   const rollupMsgs: ChatCompletionMessageParam[] = []
   const rollupItems: MemoryContextItem[] = []
   let rollupReason = ''
-  if (!req.regenerate && cfg.summaryEnabled) {
+  if (!isFeatureGuide && !req.regenerate && cfg.summaryEnabled) {
     try {
       const rollups = await getUsableDocRollups(chat.projectId)
       const plan = await planMemory(settings, rollups, buildPlanningConversation(history, req.userMessageId, lang))
@@ -1429,6 +1467,7 @@ export async function streamChat(req: StreamRequest): Promise<void> {
 async function streamChatInner(req: StreamRequest): Promise<void> {
   const settings = await loadApiSettings()
   const { chat, messages } = await getChat(req.chatId)
+  const isFeatureGuide = chat.system === 'feature-guide'
 
   // 组装本次请求的历史与用户消息
   let historyForPrompt: ChatMessage[]
@@ -1445,22 +1484,26 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
     historyForPrompt = lastAssistantIdx >= 0 ? messages.filter((_, i) => i !== lastAssistantIdx) : messages
   } else {
     const attachments: ChatAttachment[] = []
-    for (const sid of req.snapshotIds ?? []) {
-      const snap = await readSnapshot(chat.projectId, chat.id, sid)
-      if (snap) attachments.push({ snapshotId: sid, kind: 'resource', name: snap.name })
+    if (chat.system !== 'feature-guide') {
+      for (const sid of req.snapshotIds ?? []) {
+        const snap = await readSnapshot(chat.projectId, chat.id, sid)
+        if (snap) attachments.push({ snapshotId: sid, kind: 'resource', name: snap.name })
+      }
     }
     const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
     const projectDocIds = new Set(
       (tree?.docs ?? []).filter((doc) => doc.projectId === chat.projectId).map((doc) => doc.id)
     )
-    for (const docId of req.docIds ?? []) {
-      if (!projectDocIds.has(docId)) continue
-      try {
-        const { doc } = await readDoc(docId)
-        if (doc.projectId !== chat.projectId) continue
-        attachments.push({ docId, kind: 'project_document', name: doc.title })
-      } catch {
-        /* Ignore an attachment that can no longer be read. */
+    if (chat.system !== 'feature-guide') {
+      for (const docId of req.docIds ?? []) {
+        if (!projectDocIds.has(docId)) continue
+        try {
+          const { doc } = await readDoc(docId)
+          if (doc.projectId !== chat.projectId) continue
+          attachments.push({ docId, kind: 'project_document', name: doc.title })
+        } catch {
+          /* Ignore an attachment that can no longer be read. */
+        }
       }
     }
     await appendMessage(req.chatId, {
@@ -1512,7 +1555,9 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
 
     // C-layer retrieval starts in the host. It never depends on summary settings,
     // regenerate mode, or whether a model follows a planning prompt.
-    if (shouldAutoRetrieve(req.userText)) {
+    if (isFeatureGuide) {
+      // The guide chat is intentionally isolated from project memory and source retrieval.
+    } else if (shouldAutoRetrieve(req.userText)) {
       const automatic = await retrieveProjectOriginals(chat.projectId, req.userText, settings.language, 'automatic')
       finalMessages = insertIntoSystemPrefix(finalMessages, automatic.messages)
       appendVectorAttempt(built.memory, automatic.attempt, automatic.items)
@@ -1520,12 +1565,14 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
       built.memory.vectorTrace = { attempted: false, outcome: 'skipped', hitCount: 0, attempts: [] }
     }
 
-    finalMessages = insertIntoSystemPrefix(finalMessages, [{
-      role: 'system',
-      content: settings.language === 'en'
-        ? 'Project original-text excerpts, when present above, were retrieved by the host application. Use them as source evidence. If retrieval returned nothing, say that no relevant excerpt was found; do not claim that you lack permission to access project sources.'
-        : '\u4e0a\u65b9\u5982\u6709\u9879\u76ee\u539f\u6587\u7247\u6bb5\uff0c\u5b83\u4eec\u7531\u5bbf\u4e3b\u7a0b\u5e8f\u68c0\u7d22\u5e76\u53ef\u4f5c\u4e3a\u4f5c\u7b54\u8bc1\u636e\u3002\u82e5\u672a\u547d\u4e2d\uff0c\u5e94\u8bf4\u660e\u672c\u6b21\u68c0\u7d22\u672a\u627e\u5230\u76f8\u5173\u539f\u6587\uff0c\u4e0d\u8981\u58f0\u79f0\u6ca1\u6709\u8bbf\u95ee\u9879\u76ee\u539f\u6587\u7684\u6743\u9650\u3002'
-    }])
+    if (!isFeatureGuide) {
+      finalMessages = insertIntoSystemPrefix(finalMessages, [{
+        role: 'system',
+        content: settings.language === 'en'
+          ? 'Project original-text excerpts, when present above, were retrieved by the host application. Use them as source evidence. If retrieval returned nothing, say that no relevant excerpt was found; do not claim that you lack permission to access project sources.'
+          : '\u4e0a\u65b9\u5982\u6709\u9879\u76ee\u539f\u6587\u7247\u6bb5\uff0c\u5b83\u4eec\u7531\u5bbf\u4e3b\u7a0b\u5e8f\u68c0\u7d22\u5e76\u53ef\u4f5c\u4e3a\u4f5c\u7b54\u8bc1\u636e\u3002\u82e5\u672a\u547d\u4e2d\uff0c\u5e94\u8bf4\u660e\u672c\u6b21\u68c0\u7d22\u672a\u627e\u5230\u76f8\u5173\u539f\u6587\uff0c\u4e0d\u8981\u58f0\u79f0\u6ca1\u6709\u8bbf\u95ee\u9879\u76ee\u539f\u6587\u7684\u6743\u9650\u3002'
+      }])
+    }
 
     return { messages: finalMessages, memory: built.memory }
   }
@@ -1547,7 +1594,8 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
       controller,
       chatId: req.chatId,
       requestId: req.requestId,
-      replayReasoning: replayReasoning === 'when_present'
+      replayReasoning: replayReasoning === 'when_present',
+      allowProjectSourceSearch: chat.system !== 'feature-guide'
     })
 
     let result
@@ -1922,6 +1970,9 @@ async function generateChatTitleOnce(chatId: string): Promise<{ ok: boolean; tit
   const settings = await loadApiSettings()
   if (!settings.apiKey) return { ok: false, error: '\u672A\u914D\u7F6E API Key' }
   const { chat, messages } = await getChat(chatId)
+  if (chat.system === 'feature-guide') {
+    return { ok: false, error: '\u5185\u7F6E\u8F6F\u4EF6\u529F\u80FD\u6307\u5F15\u5BF9\u8BDD\u4E0D\u53EF\u751F\u6210\u6807\u9898' }
+  }
   const turns = messages.filter((message) => message.role === 'user' || message.role === 'assistant')
   if (turns.length === 0) return { ok: false, error: '\u5BF9\u8BDD\u4E3A\u7A7A\uFF0C\u65E0\u6CD5\u751F\u6210\u6807\u9898' }
 

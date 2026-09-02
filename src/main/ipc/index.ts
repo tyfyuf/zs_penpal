@@ -18,6 +18,7 @@ import {
   deleteProject,
   deleteResource,
   ensureWorkspace,
+  ensureFeatureGuideProject,
   findDocMeta,
   getChat,
   importExternalFile,
@@ -98,12 +99,24 @@ export function registerIpcHandlers(): void {
   handle(IPC.configGet, () => loadConfig())
   handle(IPC.configSet, async (patch) => {
     const next = await setConfig(patch)
+    if (patch.workspaceDir !== undefined && next.workspaceDir.trim()) {
+      try { await ensureFeatureGuideProject(false) } catch { /* A previously deleted guide remains deleted. */ }
+    }
     if (patch.workspaceDir !== undefined || patch.summaryEnabled !== undefined) {
       await initializeDocSummaryMaintenance()
     }
     broadcast(EVENTS.configChanged, next)
     if (patch.workspaceDir !== undefined) notifyWorkspaceChanged({ reason: 'updated' })
     return next
+  })
+  handle(IPC.guideRebuild, async () => {
+    try {
+      await ensureFeatureGuideProject(true)
+      notifyWorkspaceChanged({ reason: 'updated' })
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
   })
   handle(IPC.configChooseWorkspace, async () => {
     const win = getMainWindow()
@@ -120,6 +133,7 @@ export function registerIpcHandlers(): void {
       return { workspaceDir: '', projects: [], trashedProjects: [] }
     }
     await ensureWorkspace()
+    try { await ensureFeatureGuideProject(false) } catch { /* deleted guide projects are not recreated automatically */ }
     return buildSnapshot()
   })
   handle(IPC.workspaceMigrate, async (target) => {

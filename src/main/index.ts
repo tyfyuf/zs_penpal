@@ -10,6 +10,7 @@ import { clearRecovery } from './services/recovery.service'
 import { initErrorLog, logError } from './services/log.service'
 import { disposeNeuralEmbedder } from './services/neural-embed.service'
 import { initializeDocSummaryMaintenance, shutdownDocSummaryMaintenance } from './services/doc-summary-maintenance.service'
+import { ensureFeatureGuideProject } from './services/file.service'
 
 const ALLOWED_EXT = ['.txt', '.md', '.csv', '.doc', '.docx']
 
@@ -62,6 +63,7 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     setUserDataDir(app.getPath('userData'))
     await loadConfig()
+    try { await ensureFeatureGuideProject(false) } catch { /* no workspace yet or guide was deliberately deleted */ }
     await initErrorLog()
     await initializeSummaryJobManager()
     await initializeDocSummaryMaintenance()
