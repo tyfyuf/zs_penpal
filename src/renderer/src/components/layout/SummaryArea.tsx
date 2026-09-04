@@ -412,8 +412,8 @@ export default function SummaryArea({ projectId }: { projectId: string }): JSX.E
                 ) : (
                   <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
                     ({r.type === 'story' ? t('summary.typeStory') : r.type === 'setting' ? t('summary.typeSetting') : t('summary.typeOther')})
-                    {r.stale && ` ? ${t('summary.stale')}`}
-                    {r.incomplete && ` ? ${t('summary.incomplete')}`}
+                    {r.stale && ` · ${t('summary.stale')}`}
+                    {r.incomplete && ` · ${t('summary.incomplete')}`}
                   </span>
                 )}
                 <MiniProgress progress={progress} t={t} />

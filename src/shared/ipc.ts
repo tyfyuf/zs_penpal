@@ -1,5 +1,5 @@
-// IPC 濂戠害锛歝hannel 鍚嶇О涓?request/response 绫诲瀷銆?
-// main 杩涚▼閫氳繃 ipcMain.handle 娉ㄥ唽锛宺enderer 閫氳繃 preload 鏆撮湶鐨勭被鍨嬪寲 API 璋冪敤銆?
+// IPC 契约：channel 名称与 request/response 类型
+// main 进程通过 ipcMain.handle 注册，renderer 通过 preload 暴露的类型化 API 调用。
 
 import type { SummaryProgress, SummaryQueueStatus, SummaryReadinessProgress } from './summary-job-protocol'
 
@@ -54,7 +54,7 @@ export interface ChatCreateInput {
   title: string
   docId?: string
   contextRange?: ContextRange
-  /** 鍙抽敭鍒涘缓涓婁笅鏂囧璇濈殑鍔ㄤ綔锛堣瘖鏂?璧板悜/浼樺寲锛?*/
+  /** 右键创建上下文对话的动作（诊断/走向/优化）*/
   action?: ChatAction
 }
 
@@ -79,7 +79,7 @@ export interface UsageResult {
   snapshot: UsageSnapshot
 }
 
-/** 涓昏繘绋?鈫?娓叉煋杩涚▼鐨勪簨浠堕€氶亾 */
+/** 主进程 → 渲染进程的事件通道 */
 export const EVENTS = {
   openExternalFile: 'open-external-file',
   streamChunk: 'stream:chunk',
@@ -95,7 +95,7 @@ export const EVENTS = {
   workspaceChanged: 'workspace:changed'
 } as const
 
-/** 娓叉煋杩涚▼ 鈫?涓昏繘绋嬬殑 invoke 閫氶亾 */
+/** 渲染进程 → 主进程的 invoke 通道 */
 export const IPC = {
   settingsOpen: 'settings:open',
   configGet: 'config:get',
@@ -178,7 +178,7 @@ export const IPC = {
   recoveryUpdate: 'recovery:update'
 } as const
 
-/** 鎵€鏈?invoke 閫氶亾瀵瑰簲鐨勮姹?鍝嶅簲绫诲瀷鏄犲皠 */
+/** 所有 invoke 通道对应的请求/响应类型映射 */
 export interface IpcApi {
   [IPC.settingsOpen]: { req: void; res: void }
   [IPC.configGet]: { req: void; res: AppConfig }

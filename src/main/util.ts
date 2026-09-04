@@ -18,6 +18,22 @@ export function nowIso(): string {
  */
 const writeQueues = new Map<string, Promise<void>>()
 
+export async function enqueueSerialized<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  const previous = writeQueues.get(key) ?? Promise.resolve()
+  let result: T | undefined
+  const next = previous.catch(() => {}).then(async () => {
+    result = await operation()
+  })
+  const queued = next.catch(() => {})
+  writeQueues.set(key, queued)
+  try {
+    await next
+    return result as T
+  } finally {
+    if (writeQueues.get(key) === queued) writeQueues.delete(key)
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -36,10 +52,7 @@ async function atomicWriteRaw(filePath: string, content: string | Uint8Array, en
 }
 
 export async function atomicWrite(filePath: string, content: string | Uint8Array, encoding: BufferEncoding = 'utf8'): Promise<void> {
-  // 同一文件串行写入
-  const prev = writeQueues.get(filePath) ?? Promise.resolve()
-  const next = prev.then(async () => {
-    // EPERM 退避重试（Windows rename 竞争）
+  await enqueueSerialized(filePath, async () => {
     for (let attempt = 0; ; attempt++) {
       try {
         await atomicWriteRaw(filePath, content, encoding)
@@ -53,9 +66,6 @@ export async function atomicWrite(filePath: string, content: string | Uint8Array
       }
     }
   })
-  // 失败后允许后续写入继续
-  writeQueues.set(filePath, next.catch(() => {}))
-  await next
 }
 
 export async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {
@@ -94,8 +104,10 @@ export async function readJsonl<T>(filePath: string): Promise<T[]> {
 
 /** 向 JSONL 追加一行 */
 export async function appendJsonl(filePath: string, data: unknown): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true })
-  await appendFile(filePath, JSON.stringify(data) + '\n', 'utf8')
+  await enqueueSerialized(filePath, async () => {
+    await mkdir(dirname(filePath), { recursive: true })
+    await appendFile(filePath, JSON.stringify(data) + '\n', 'utf8')
+  })
 }
 
 /** 简单防抖（用于自动保存等场景） */

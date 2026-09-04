@@ -504,7 +504,7 @@ export default function SettingsPane(): JSX.Element {
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium">{p.project.name}</span>
                         <span className="text-xs" style={{ color: 'var(--muted)' }}>
-                          {t('settings.rollupsDocCount', { n: docs })} ? {t('settings.rollupsThreshold', { n: ov?.threshold ?? 50, b: ov?.batchSize ?? 10 })}
+                          {t('settings.rollupsDocCount', { n: docs })} · {t('settings.rollupsThreshold', { n: ov?.threshold ?? 50, b: ov?.batchSize ?? 10 })}
                         </span>
                         <span className="flex-1" />
                         <button className="btn !py-1 text-xs" disabled={rollupBusy || !need} onClick={() => void generateRollups(p.project.id)}>
@@ -518,7 +518,7 @@ export default function SettingsPane(): JSX.Element {
                               <span className="h-1.5 w-1.5 rounded-full" style={{ background: r.stale ? 'var(--warn)' : 'var(--ok)' }} />
                               <span className="w-14">{t('settings.rollupsRange', { n: r.rangeLabel })}</span>
                               <span style={{ color: 'var(--muted)' }}>{t('settings.rollupsDocs', { n: r.docCount })}</span>
-                              {r.stale && <span style={{ color: 'var(--warn)' }}>? {t('summary.stale')}</span>}
+                              {r.stale && <span style={{ color: 'var(--warn)' }}>· {t('summary.stale')}</span>}
                               <span className="flex-1" />
                               <button className="btn !py-0.5 text-xs" onClick={() => void previewRollup(p.project.id, r.id, r.rangeLabel)}>{t('summary.preview')}</button>
                               <button className="btn !py-0.5 text-xs" disabled={rollupBusy} onClick={() => void regenRollup(p.project.id, r.id)}><RefreshCw size={12} /></button>
@@ -550,7 +550,7 @@ export default function SettingsPane(): JSX.Element {
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium">{p.project.name}</span>
                         <span className="text-xs" style={{ color: 'var(--muted)' }}>
-                          {status ? `${t('settings.vectorIndexChunks', { n: status.chunkCount })} ? ${status.embedModel ?? t('settings.vectorIndexNotBuilt')}` : t('summary.loading')}
+                          {status ? `${t('settings.vectorIndexChunks', { n: status.chunkCount })} · ${status.embedModel ?? t('settings.vectorIndexNotBuilt')}` : t('summary.loading')}
                         </span>
                         <span className="flex-1" />
                         <button className="btn !py-1 text-xs" disabled={vectorBusy} onClick={() => void buildVectors(p.project.id)}>

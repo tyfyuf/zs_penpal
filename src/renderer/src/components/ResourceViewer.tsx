@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Compartment, EditorState } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { AlertTriangle, RefreshCw, Save } from 'lucide-react'
@@ -188,6 +188,13 @@ export default function ResourceViewer({ tab }: { tab: Tab }): JSX.Element {
     if (meta?.contentEditedAt) {
       const confirmed = await confirmDialog(t('resource.reimportOverwriteConfirm'))
       if (!confirmed) return
+    }
+    if (savePromise.current) {
+      try {
+        await savePromise.current
+      } catch {
+        return
+      }
     }
     setRepairing(true)
     try {

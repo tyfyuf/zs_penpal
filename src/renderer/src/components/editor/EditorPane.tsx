@@ -111,6 +111,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   const highlightCompartment = useRef(new Compartment())
   const indentCompartment = useRef(new Compartment())
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const savePromise = useRef<Promise<void> | null>(null)
   const statsTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const firstLineIndentRef = useRef(false)
   const centeredButtonRef = useRef(false)
@@ -150,20 +151,33 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
   }, [])
 
   const doSave = useCallback(async (): Promise<void> => {
-    const view = viewRef.current
-    if (!view || !loadedRef.current || readOnlyRef.current) return
-    let text = view.state.doc.toString()
-    if (lineEndingRef.current === 'CRLF') text = text.replace(/\n/g, '\r\n')
-    try {
-      await api.invoke('doc:save', {
-        docId,
-        content: text,
-        editorFormat: buildEditorFormat(view, firstLineIndentRef.current)
-      })
-      setDirty(docId, false)
-    } catch (err) {
-      toast.error((err as Error).message)
-    }
+    if (savePromise.current) return savePromise.current
+    const pending = (async (): Promise<void> => {
+      try {
+        while (viewRef.current && loadedRef.current && !readOnlyRef.current) {
+          const view = viewRef.current
+          let text = view.state.doc.toString()
+          if (lineEndingRef.current === 'CRLF') text = text.replace(/\n/g, '\r\n')
+          await api.invoke('doc:save', {
+            docId,
+            content: text,
+            editorFormat: buildEditorFormat(view, firstLineIndentRef.current)
+          })
+          if (viewRef.current?.state.doc.toString() === text.replace(/\r\n/g, '\n')) {
+            setDirty(docId, false)
+            return
+          }
+          setDirty(docId, true)
+        }
+      } catch (err) {
+        toast.error((err as Error).message)
+        throw err
+      } finally {
+        savePromise.current = null
+      }
+    })()
+    savePromise.current = pending
+    return pending
   }, [docId, setDirty])
 
   const scheduleSave = useCallback((): void => {
@@ -171,7 +185,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
     if (saveTimer.current) clearTimeout(saveTimer.current)
     const interval = config?.autosaveIntervalMs ?? 5000
     saveTimer.current = setTimeout(() => {
-      void doSave()
+      void doSave().catch(() => undefined)
     }, interval)
   }, [config?.autosaveIntervalMs, doSave])
 
@@ -200,7 +214,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
           EditorState.readOnly.of(readOnly),
           EditorView.editable.of(!readOnly),
           buildExtensions(() => {
-            void doSave()
+            void doSave().catch(() => undefined)
             return true
           }),
           highlightCompartment.current.of([]),
@@ -446,7 +460,7 @@ export default function EditorPane({ tab }: { tab: Tab }): JSX.Element {
             >
               <IndentIncrease size={14} />
             </button>
-            <button className="btn !px-2 !py-1" onClick={() => void doSave()} title={t('editor.save')}>
+            <button className="btn !px-2 !py-1" onClick={() => void doSave().catch(() => undefined)} title={t('editor.save')}>
               <Save size={14} />
             </button>
           </>

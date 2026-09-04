@@ -1,8 +1,10 @@
+import { useRef } from 'react'
 import { X } from 'lucide-react'
 import { useAppStore } from '../../store/app.store'
 import { flushDoc } from '../../lib/editorRegistry'
 import { confirmDialog } from '../../store/dialog.store'
 import { useT } from '../../i18n'
+import { toast } from '../../store/toast.store'
 
 export default function Tabs(): JSX.Element {
   const t = useT()
@@ -11,8 +13,10 @@ export default function Tabs(): JSX.Element {
   const dirty = useAppStore((s) => s.dirty)
   const activateTab = useAppStore((s) => s.activateTab)
   const closeTab = useAppStore((s) => s.closeTab)
+  const closingTabs = useRef(new Set<string>())
 
   async function handleClose(tab: (typeof tabs)[number]): Promise<void> {
+    if (closingTabs.current.has(tab.id)) return
     const dirtyKey = tab.kind === 'external-resource' ? tab.id : tab.refId
     const isDirty = Boolean(dirtyKey && dirty[dirtyKey])
     if (isDirty && tab.kind === 'external-resource') {
@@ -24,7 +28,15 @@ export default function Tabs(): JSX.Element {
     if (isDirty && dirtyKey && (tab.kind === 'doc' || tab.kind === 'resource')) {
       const save = await confirmDialog(t('tabs.unsavedClose'))
       if (save) {
-        void flushDoc(dirtyKey).then(() => closeTab(tab.id))
+        closingTabs.current.add(tab.id)
+        try {
+          await flushDoc(dirtyKey)
+          closeTab(tab.id)
+        } catch (error) {
+          toast.error((error as Error).message)
+        } finally {
+          closingTabs.current.delete(tab.id)
+        }
         return
       }
     }

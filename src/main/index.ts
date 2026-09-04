@@ -95,13 +95,18 @@ if (!gotLock) {
 
     void (async () => {
       try {
-        await flushRenderer()
+        const flushed = await flushRenderer()
+        if (!flushed) {
+          isQuitting = false
+          return
+        }
         await commitAllProjects()
         shutdownDocSummaryMaintenance()
         await shutdownSummaryJobManager(8000)
       } catch {
         // 关闭阶段错误不阻塞退出
       } finally {
+        if (!isQuitting) return
         await disposeNeuralEmbedder()
         await clearRecovery()
         app.exit(0)
@@ -114,16 +119,28 @@ if (!gotLock) {
   })
 }
 
-/** 请求渲染层立即保存未落盘的编辑器内容，超时 1.5s 兜底 */
-function flushRenderer(): Promise<void> {
+/** 请求渲染层立即保存未落盘的编辑器内容，超时 10s 后中止退出 */
+function flushRenderer(): Promise<boolean> {
   const win = getMainWindow()
-  if (!win || win.isDestroyed()) return Promise.resolve()
+  if (!win || win.isDestroyed()) return Promise.resolve(true)
   return new Promise((resolve) => {
-    const timeout = setTimeout(() => resolve(), 1500)
-    ipcMain.once('app:flushed', () => {
+    let settled = false
+    const finish = (result: boolean): void => {
+      if (settled) return
+      settled = true
       clearTimeout(timeout)
-      resolve()
-    })
-    win.webContents.send('app:flush')
+      ipcMain.removeListener('app:flushed', onFlushed)
+      resolve(result)
+    }
+    const onFlushed = (_event: Electron.IpcMainEvent, payload?: { ok?: boolean }): void => {
+      finish(payload?.ok !== false)
+    }
+    const timeout = setTimeout(() => finish(false), 10000)
+    ipcMain.on('app:flushed', onFlushed)
+    try {
+      win.webContents.send('app:flush')
+    } catch {
+      finish(false)
+    }
   })
 }

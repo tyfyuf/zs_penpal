@@ -50,7 +50,12 @@ export default function App(): JSX.Element {
   useEffect(() => {
     if (isSettingsWindow) return undefined
     const off = api.on('app:flush', () => {
-      void flushAll().then(() => api.send('app:flushed'))
+      void flushAll()
+        .then(() => api.send('app:flushed', { ok: true }))
+        .catch((error) => {
+          toast.error((error as Error).message)
+          api.send('app:flushed', { ok: false, error: (error as Error).message })
+        })
     })
     return off
   }, [])
