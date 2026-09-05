@@ -907,7 +907,7 @@ function LimitRow({
         max={max}
         value={value}
         onChange={(event) => onChange(Number(event.target.value))}
-        aria-label={`${label}??`}
+        aria-label={label}
       />
     </div>
   )
