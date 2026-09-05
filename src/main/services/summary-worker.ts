@@ -41,37 +41,62 @@ function phaseForTask(job: SummaryWorkerJob): 'reading' | 'classifying' | 'chunk
   return 'reading'
 }
 
+class SummaryWorkerCancelledError extends Error {
+  constructor() {
+    super('Summary worker job cancelled')
+    this.name = 'SummaryWorkerCancelledError'
+  }
+}
+
+function isCancellationError(error: unknown): boolean {
+  return error instanceof SummaryWorkerCancelledError || (error as { name?: unknown } | null)?.name === 'SummaryWorkerCancelledError'
+}
+
 async function execute(job: SummaryWorkerJob): Promise<SummaryWorkerResult> {
   setConfigCache(job.config)
   setRuntimeApiSettings(job.settings)
-  const controller = new AbortController()
-  running.set(job.jobId, { key: job.key, controller, cancelled: false })
+  const state = { key: job.key, controller: new AbortController(), cancelled: false }
+  running.set(job.jobId, state)
   send({
     type: 'progress',
     protocolVersion: SUMMARY_WORKER_PROTOCOL_VERSION,
     progress: { jobId: job.jobId, key: job.key, phase: phaseForTask(job), completed: 0, total: 1 }
   })
   try {
+    let result: SummaryWorkerResult
     switch (job.task.kind) {
       case 'ensure-doc':
-        return await ensureDocSummary(job.task.projectId, job.task.docId, job.task.currentContent)
+        result = await ensureDocSummary(job.task.projectId, job.task.docId, job.task.currentContent)
+        break
       case 'regenerate-doc':
-        return await regenerateDocSummary(job.task.docId, job.task.forceFull ?? false)
+        result = await regenerateDocSummary(job.task.projectId, job.task.docId, job.task.forceFull ?? false)
+        break
       case 'queue-chat':
-        await queueChatSummary(job.task.chatId, job.task.force ?? false)
-        return undefined
+        await queueChatSummary(job.task.projectId, job.task.chatId, job.task.force ?? false)
+        result = undefined
+        break
       case 'regenerate-chat':
-        return await regenerateChatSummary(job.task.chatId)
+        result = await regenerateChatSummary(job.task.projectId, job.task.chatId)
+        break
       case 'distill-resource':
-        return await distillResource(job.task.projectId, job.task.resourceId, job.task.type, job.task.force ?? false)
+        result = await distillResource(job.task.projectId, job.task.resourceId, job.task.type, job.task.force ?? false)
+        break
       case 'generate-rollups':
-        return await generateDocRollups(job.task.projectId, job.key)
+        result = await generateDocRollups(job.task.projectId, job.key)
+        break
       case 'regenerate-rollup':
-        return await regenerateDocRollup(job.task.projectId, job.task.rollupId, job.key)
+        result = await regenerateDocRollup(job.task.projectId, job.task.rollupId, job.key)
+        break
       case 'retry-pending':
         await retryPendingSummaries()
-        return undefined
+        result = undefined
+        break
     }
+    if (state.cancelled) throw new SummaryWorkerCancelledError()
+    return result
+  } catch (error) {
+    if (state.cancelled) throw new SummaryWorkerCancelledError()
+    throw error
   } finally {
     running.delete(job.jobId)
   }
@@ -114,6 +139,12 @@ parentPort.on('message', (event) => {
 
   void execute(message.job).then(
     (result) => send({ type: 'completed', protocolVersion: SUMMARY_WORKER_PROTOCOL_VERSION, jobId: message.job.jobId, key: message.job.key, result }),
-    (error) => send({ type: 'failed', protocolVersion: SUMMARY_WORKER_PROTOCOL_VERSION, jobId: message.job.jobId, key: message.job.key, error: errorPayload(error) })
+    (error) => {
+      if (isCancellationError(error)) {
+        send({ type: 'cancelled', protocolVersion: SUMMARY_WORKER_PROTOCOL_VERSION, jobId: message.job.jobId, key: message.job.key })
+        return
+      }
+      send({ type: 'failed', protocolVersion: SUMMARY_WORKER_PROTOCOL_VERSION, jobId: message.job.jobId, key: message.job.key, error: errorPayload(error) })
+    }
   )
 })

@@ -2,12 +2,18 @@ import type { ApiSettings } from '../api-settings'
 
 /**
  * Provider-specific wire dialects used only by structured generation.
+ * `standard_reasoning_effort_low` is the standard lowest-effort fallback for
+ * providers that expose the OpenAI reasoning-effort field.
  * `provider_default_only` is the safe fallback for unknown models.
  */
 export type StructuredReasoningControl =
   | 'deepseek_thinking'
   | 'qwen_enable_thinking'
-  | 'kimi_thinking'
+  | 'kimi_k3'
+  | 'kimi_k27_code'
+  | 'kimi_k26'
+  | 'kimi_unknown'
+  | 'standard_reasoning_effort_low'
   | 'provider_default_only'
 
 /** A conservative provider grouping inferred only from endpoint/model metadata. */
@@ -80,12 +86,17 @@ export function defaultReasoningReplayPolicy(provider: ProviderFamily): Reasonin
  * request field can turn a successful request into a 400.
  */
 export function inferStructuredReasoningControl(settings: Pick<ApiSettings, 'baseURL' | 'model'>): StructuredReasoningControl {
-  switch (inferProviderFamily(settings)) {
-    case 'deepseek': return 'deepseek_thinking'
-    case 'qwen': return 'qwen_enable_thinking'
-    case 'kimi': return 'kimi_thinking'
-    default: return 'provider_default_only'
-  }
+  const provider = inferProviderFamily(settings)
+  if (provider === 'deepseek') return 'deepseek_thinking'
+  if (provider === 'qwen') return 'qwen_enable_thinking'
+  if (provider === 'openai') return 'standard_reasoning_effort_low'
+  if (provider !== 'kimi') return 'provider_default_only'
+
+  const model = normalized(settings.model)
+  if (model.includes('kimi-k3') || model.includes('kimi_k3')) return 'kimi_k3'
+  if (model.includes('kimi-k2.7-code') || model.includes('kimi_k2.7_code')) return 'kimi_k27_code'
+  if (model.includes('kimi-k2.6') || model.includes('kimi_k2.6')) return 'kimi_k26'
+  return 'kimi_unknown'
 }
 
 export function reasoningControlLabel(control: StructuredReasoningControl): string {
@@ -113,7 +124,19 @@ export function isReasoningReplayRequiredError(error: unknown): boolean {
 
 /** Translate the semantic request to the provider-independent Responses shape. */
 export function responsesReasoningFields(control: StructuredReasoningControl): Record<string, unknown> {
-  if (control === 'provider_default_only') return {}
+  // Provider-private Kimi/Qwen fields are documented for Chat Completions.
+  // Responses uses the standard reasoning-effort shape where the provider
+  // exposes a lowest-effort mode; unsupported gateways are downgraded by the
+  // structured-task capability fallback.
+  if (control === 'standard_reasoning_effort_low' || control === 'kimi_k3') {
+    return { reasoning: { effort: 'low' } }
+  }
+  if (control === 'qwen_enable_thinking' || control === 'kimi_k26') {
+    return { reasoning: { effort: 'low' } }
+  }
+  if (control === 'provider_default_only'
+    || control === 'kimi_k27_code'
+    || control === 'kimi_unknown') return {}
   return { reasoning: { effort: 'none' } }
 }
 
@@ -121,11 +144,18 @@ export function responsesReasoningFields(control: StructuredReasoningControl): R
 export function chatReasoningFields(control: StructuredReasoningControl): Record<string, unknown> {
   switch (control) {
     case 'deepseek_thinking':
-    case 'kimi_thinking':
+    case 'kimi_k26':
       return { thinking: { type: 'disabled' } }
     case 'qwen_enable_thinking':
       return { enable_thinking: false }
+    case 'standard_reasoning_effort_low':
+    case 'kimi_k3':
+      return { reasoning_effort: 'low' }
+    case 'kimi_k27_code':
+    case 'kimi_unknown':
     default:
+      // Kimi K2.7-code controls thinking server-side and rejects the
+      // generic thinking field. Unknown Kimi models stay conservative.
       return {}
   }
 }
@@ -133,6 +163,10 @@ export function chatReasoningFields(control: StructuredReasoningControl): Record
 export function isReasoningControl(value: unknown): value is StructuredReasoningControl {
   return value === 'deepseek_thinking'
     || value === 'qwen_enable_thinking'
-    || value === 'kimi_thinking'
+    || value === 'kimi_k3'
+    || value === 'kimi_k27_code'
+    || value === 'kimi_k26'
+    || value === 'kimi_unknown'
+    || value === 'standard_reasoning_effort_low'
     || value === 'provider_default_only'
 }

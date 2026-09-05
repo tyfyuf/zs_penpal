@@ -342,7 +342,7 @@ export interface EventPayloads {
 
 export type EventChannel = keyof EventPayloads
 
-/** preload 鏆撮湶缁?renderer 鐨勭被鍨嬪寲 API */
+/** 类型化的 preload 到 renderer API */
 export interface RendererApi {
   invoke<K extends IpcChannel>(channel: K, req: IpcApi[K]['req']): Promise<IpcApi[K]['res']>
   on<E extends EventChannel>(channel: E, listener: (payload: EventPayloads[E]) => void): () => void

@@ -47,6 +47,7 @@ export function logStructuredGenerationAttempt(event: {
   reasoningControl?: string
   providerFamily?: string
   reasoningReplay?: 'never' | 'when_present'
+  model?: string
   endpointKey: string
   attempt: number
   mode: string

@@ -1,4 +1,4 @@
-﻿import { utilityProcess, type UtilityProcess } from 'electron'
+import { utilityProcess, type UtilityProcess } from 'electron'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { EVENTS, type WorkspaceChangeEntity } from '@shared/ipc'
@@ -20,6 +20,7 @@ import { broadcast } from '../window'
 import { setSummaryGeneratingState } from './summary-state.service'
 import { notifyWorkspaceChanged } from './workspace-events.service'
 import type { ApiSettings } from './api-settings'
+import { logError } from './log.service'
 
 interface SummaryJobContext {
   projectId?: string
@@ -27,12 +28,29 @@ interface SummaryJobContext {
   entityId?: string
 }
 
+interface SummaryJobControl {
+  key: string
+  keyGeneration: number
+  projectId?: string
+  projectGeneration?: number
+  retryGeneration?: number
+  cancelled: boolean
+}
+
 interface ActiveJob<T = SummaryWorkerResult> {
   jobId: string
   key: SummaryJobKey
   context: SummaryJobContext
+  control: SummaryJobControl
+  cancelRequested: boolean
   resolve: (result: T) => void
   reject: (error: Error) => void
+}
+
+interface TrackedSummaryJob {
+  task: SummaryWorkerTask
+  promise: Promise<SummaryWorkerResult>
+  control: SummaryJobControl
 }
 
 let worker: UtilityProcess | null = null
@@ -43,13 +61,29 @@ let runtimeUserDataDir = ''
 let shuttingDown = false
 let restartCount = 0
 const active = new Map<string, ActiveJob>()
-const activeByKey = new Map<string, { task: SummaryWorkerTask; promise: Promise<SummaryWorkerResult> }>()
+const activeByKey = new Map<string, TrackedSummaryJob>()
 const latestPhaseByJobId = new Map<string, SummaryProgress['phase']>()
+const quiescedProjects = new Map<string, number>()
+const quiescedKeys = new Map<string, number>()
+const keyCancellationGeneration = new Map<string, number>()
+const projectCancellationGeneration = new Map<string, number>()
+let retryCancellationGeneration = 0
 let queuedCount = 0
 
 function broadcastQueueStatus(): void {
   const activeCount = active.size
   broadcast(EVENTS.summaryQueue, { active: activeCount, queued: queuedCount, total: activeCount + queuedCount })
+}
+
+class SummaryJobCancelledError extends Error {
+  constructor() {
+    super('\u6458\u8981\u4efb\u52a1\u5df2\u53d6\u6d88')
+    this.name = 'SummaryJobCancelledError'
+  }
+}
+
+function cancellationError(): SummaryJobCancelledError {
+  return new SummaryJobCancelledError()
 }
 
 function workerError(message: string, name?: string): Error {
@@ -76,23 +110,28 @@ function markStarted(key: SummaryJobKey, jobId: string, context: SummaryJobConte
   broadcast(EVENTS.summaryProgress, { jobId, key, phase: 'queued', completed: 0, total: 1 })
 }
 
-function markFinished(key: SummaryJobKey, jobId: string, phase: 'complete' | 'failed' | 'cancelled', context: SummaryJobContext): void {
+function markFinished(key: SummaryJobKey, jobId: string, phase: 'complete' | 'failed' | 'waiting-confirmation' | 'cancelled', context: SummaryJobContext): void {
   latestPhaseByJobId.set(jobId, phase)
   setSummaryGeneratingState(key, false)
   broadcast(EVENTS.summaryProgress, { jobId, key, phase, completed: phase === 'complete' ? 1 : 0, total: 1 })
   broadcast(EVENTS.summaryStatus, { key, generating: false, ...context })
-  notifyWorkspaceChanged({ ...context, reason: phase === 'complete' ? 'summary-completed' : 'summary-failed' })
+  if (phase === 'complete' || phase === 'failed') {
+    notifyWorkspaceChanged({ ...context, reason: phase === 'complete' ? 'summary-completed' : 'summary-failed' })
+  }
   latestPhaseByJobId.delete(jobId)
 }
 
 function rejectAll(error: Error): void {
+  // Mark the tail controls first. A serialized chain must not start another
+  // worker after a fatal worker failure or process shutdown.
+  for (const tracked of activeByKey.values()) tracked.control.cancelled = true
   for (const job of active.values()) {
+    job.control.cancelled = true
     markFinished(job.key, job.jobId, 'failed', job.context)
     latestPhaseByJobId.delete(job.jobId)
     job.reject(error)
   }
   active.clear()
-  activeByKey.clear()
   broadcastQueueStatus()
 }
 
@@ -124,15 +163,26 @@ function onMessage(message: SummaryWorkerToMainMessage, source: UtilityProcess):
   if (!job) return
   active.delete(message.jobId)
   broadcastQueueStatus()
-  if (message.type === 'completed') {
+  if (message.type === 'cancelled' || job.cancelRequested || isControlCancelled(job.control)) {
+    markFinished(job.key, job.jobId, 'cancelled', job.context)
+    job.reject(cancellationError())
+  } else if (message.type === 'completed') {
     const result = message.result
+    const isConfirmationRequired = Boolean(
+      result &&
+      typeof result === 'object' &&
+      'ok' in result &&
+      (result as { ok?: unknown }).ok === false &&
+      (((result as { mismatch?: unknown }).mismatch === true) || ((result as { uncertain?: unknown }).uncertain === true))
+    )
     const isExplicitFailure = Boolean(result && typeof result === 'object' && 'ok' in result && (result as { ok?: unknown }).ok === false)
-    const phase = isExplicitFailure || latestPhaseByJobId.get(job.jobId) === 'failed' ? 'failed' : 'complete'
+    const phase = isConfirmationRequired
+      ? 'waiting-confirmation'
+      : isExplicitFailure || latestPhaseByJobId.get(job.jobId) === 'failed'
+        ? 'failed'
+        : 'complete'
     markFinished(job.key, job.jobId, phase, job.context)
     job.resolve(result)
-  } else if (message.type === 'cancelled') {
-    markFinished(job.key, job.jobId, 'cancelled', job.context)
-    job.reject(workerError('摘要任务已取消'))
   } else {
     markFinished(job.key, job.jobId, 'failed', job.context)
     job.reject(workerError(message.error.message, message.error.name))
@@ -156,8 +206,15 @@ function onExit(source: UtilityProcess, code: number): void {
 
 async function startWorker(): Promise<void> {
   if (worker && readyPromise) return readyPromise
-  const workerPath = join(__dirname, 'summary-worker.js')
-  const child = utilityProcess.fork(workerPath, [], { serviceName: 'summary-worker' })
+  // The manager is bundled into out/main/chunks/summary.service-*.js, while
+  // the utility-process entry remains at out/main/summary-worker.js.
+  const workerPath = join(__dirname, '..', 'summary-worker.js')
+  const child = utilityProcess.fork(workerPath, [], {
+    serviceName: 'summary-worker',
+    // Keep Worker diagnostics observable. Without piped stderr a startup
+    // exception is reduced to the opaque "code=1" message in the main log.
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
   worker = child
   let resolveReady!: () => void
   let rejectReady!: (error: Error) => void
@@ -178,6 +235,14 @@ async function startWorker(): Promise<void> {
     child.kill()
   }, 15000)
   promise.then(() => clearTimeout(timeout), () => clearTimeout(timeout))
+  child.stdout?.on('data', (chunk) => {
+    const text = chunk.toString().trim()
+    if (text) logError('summary-worker:stdout', text)
+  })
+  child.stderr?.on('data', (chunk) => {
+    const text = chunk.toString().trim()
+    if (text) logError('summary-worker:stderr', text)
+  })
   child.on('message', (message) => onMessage(message as SummaryWorkerToMainMessage, child))
   child.on('exit', (code) => onExit(child, code))
   child.on('error', (type, location, report) => {
@@ -186,7 +251,7 @@ async function startWorker(): Promise<void> {
     readyReject?.(error)
     readyResolve = null
     readyReject = null
-    void report
+    if (report) logError('summary-worker:fatal', report)
   })
   try {
     post({
@@ -212,6 +277,11 @@ export async function initializeSummaryJobManager(): Promise<void> {
   runtimeUserDataDir = getUserDataDir()
   shuttingDown = false
   restartCount = 0
+  quiescedProjects.clear()
+  quiescedKeys.clear()
+  keyCancellationGeneration.clear()
+  projectCancellationGeneration.clear()
+  retryCancellationGeneration = 0
   await startWorker()
 }
 
@@ -228,12 +298,68 @@ async function makeJob(key: SummaryJobKey, task: SummaryWorkerTask): Promise<Sum
   }
 }
 
+function projectIdForTask(task: SummaryWorkerTask): string | undefined {
+  return 'projectId' in task && typeof task.projectId === 'string' ? task.projectId : undefined
+}
+
+function isRetryPendingTask(task: SummaryWorkerTask): boolean {
+  return task.kind === 'retry-pending'
+}
+
+function currentGeneration(store: Map<string, number>, key: string): number {
+  return store.get(key) ?? 0
+}
+
+function captureJobControl(key: SummaryJobKey, task: SummaryWorkerTask): SummaryJobControl {
+  const projectId = projectIdForTask(task)
+  return {
+    key,
+    keyGeneration: currentGeneration(keyCancellationGeneration, key),
+    projectId,
+    projectGeneration: projectId ? currentGeneration(projectCancellationGeneration, projectId) : undefined,
+    retryGeneration: isRetryPendingTask(task) ? retryCancellationGeneration : undefined,
+    cancelled: false
+  }
+}
+
+function isControlCancelled(control: SummaryJobControl): boolean {
+  if (control.cancelled) return true
+  if (currentGeneration(keyCancellationGeneration, control.key) > control.keyGeneration) return true
+  if (control.projectId && currentGeneration(projectCancellationGeneration, control.projectId) > (control.projectGeneration ?? 0)) return true
+  if (control.retryGeneration !== undefined && retryCancellationGeneration > control.retryGeneration) return true
+  return false
+}
+
+function assertSummaryJobCanEnter(key: SummaryJobKey, task: SummaryWorkerTask): void {
+  if (shuttingDown) throw new Error('\u5e94\u7528\u6b63\u5728\u9000\u51fa\uff0c\u65e0\u6cd5\u542f\u52a8\u6458\u8981\u4efb\u52a1')
+  if (quiescedKeys.has(key)) throw new Error('\u8be5\u6458\u8981\u4efb\u52a1\u6b63\u5728\u8fdb\u884c\u751f\u547d\u5468\u671f\u64cd\u4f5c\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5')
+  const projectId = projectIdForTask(task)
+  if (projectId && quiescedProjects.has(projectId)) {
+    throw new Error('\u8be5\u9879\u76ee\u6b63\u5728\u8fdb\u884c\u751f\u547d\u5468\u671f\u64cd\u4f5c\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5')
+  }
+  // retry-pending scans all projects and therefore cannot safely enter while
+  // any project is quiesced. Later batches may make the retry sweep scoped.
+  if (isRetryPendingTask(task) && quiescedProjects.size > 0) {
+    throw new Error('\u9879\u76ee\u751f\u547d\u5468\u671f\u64cd\u4f5c\u8fdb\u884c\u4e2d\uff0c\u6682\u4e0d\u80fd\u542f\u52a8\u6458\u8981\u91cd\u8bd5\u626b\u63cf')
+  }
+}
+
+function assertSummaryJobCanStart(key: SummaryJobKey, task: SummaryWorkerTask, control: SummaryJobControl): void {
+  if (isControlCancelled(control)) throw cancellationError()
+  assertSummaryJobCanEnter(key, task)
+}
+
+function decrementQueuedCount(): void {
+  queuedCount = Math.max(0, queuedCount - 1)
+  broadcastQueueStatus()
+}
+
 function contextForTask(key: SummaryJobKey, task: SummaryWorkerTask): SummaryJobContext {
   const [kind, id] = key.split(':', 2)
   const entityType: WorkspaceChangeEntity | undefined = kind === 'doc' || kind === 'chat' || kind === 'res' || kind === 'rollup'
     ? (kind === 'res' ? 'resource' : kind)
     : undefined
-  const projectId = 'projectId' in task ? task.projectId : undefined
+  const projectId = projectIdForTask(task)
   return {
     projectId,
     entityType,
@@ -244,6 +370,7 @@ function contextForTask(key: SummaryJobKey, task: SummaryWorkerTask): SummaryJob
 function createSummaryJobPromise(
   key: SummaryJobKey,
   task: SummaryWorkerTask,
+  control: SummaryJobControl,
   alreadyTracked = false
 ): Promise<SummaryWorkerResult> {
   if (!alreadyTracked) {
@@ -253,14 +380,25 @@ function createSummaryJobPromise(
   let promoted = false
   const promise = (async (): Promise<SummaryWorkerResult> => {
     try {
-            if (shuttingDown) throw new Error('应用正在退出，无法启动摘要任务')
+      assertSummaryJobCanStart(key, task, control)
       await startWorker()
+      assertSummaryJobCanStart(key, task, control)
       const job = await makeJob(key, task)
-      queuedCount--
+      assertSummaryJobCanStart(key, task, control)
+      const context = contextForTask(key, task)
+      decrementQueuedCount()
       promoted = true
-      active.set(job.jobId, { jobId: job.jobId, key, context: contextForTask(key, task), resolve: () => {}, reject: () => {} })
+      active.set(job.jobId, {
+        jobId: job.jobId,
+        key,
+        context,
+        control,
+        cancelRequested: false,
+        resolve: () => {},
+        reject: () => {}
+      })
       broadcastQueueStatus()
-      markStarted(key, job.jobId, contextForTask(key, task))
+      markStarted(key, job.jobId, context)
       return await new Promise<SummaryWorkerResult>((resolve, reject) => {
         const current = active.get(job.jobId)
         if (current) {
@@ -271,25 +409,25 @@ function createSummaryJobPromise(
           post({ type: 'start', protocolVersion: SUMMARY_WORKER_PROTOCOL_VERSION, job })
         } catch (error) {
           active.delete(job.jobId)
-          markFinished(key, job.jobId, 'failed', contextForTask(key, task))
+          markFinished(key, job.jobId, 'failed', context)
           broadcastQueueStatus()
           reject(error as Error)
         }
       })
     } finally {
-      if (!promoted) {
-        queuedCount--
-        broadcastQueueStatus()
-      }
+      if (!promoted) decrementQueuedCount()
     }
   })()
   return promise
 }
 
-function trackSummaryJob(key: SummaryJobKey, task: SummaryWorkerTask, promise: Promise<SummaryWorkerResult>): Promise<SummaryWorkerResult> {
-  activeByKey.set(key, { task, promise })
+function trackSummaryJob(key: SummaryJobKey, task: SummaryWorkerTask, promise: Promise<SummaryWorkerResult>, control: SummaryJobControl): Promise<SummaryWorkerResult> {
+  activeByKey.set(key, { task, promise, control })
   void promise.catch(() => {}).finally(() => {
-    if (activeByKey.get(key)?.promise === promise) activeByKey.delete(key)
+    if (activeByKey.get(key)?.promise === promise) {
+      activeByKey.delete(key)
+      broadcastQueueStatus()
+    }
   })
   return promise
 }
@@ -303,39 +441,58 @@ function canJoinSummaryJob(existing: SummaryWorkerTask, requested: SummaryWorker
 }
 
 export function runSummaryJob<T extends SummaryWorkerResult>(key: SummaryJobKey, task: SummaryWorkerTask): Promise<T> {
+  try {
+    assertSummaryJobCanEnter(key, task)
+  } catch (error) {
+    return Promise.reject(error) as Promise<T>
+  }
+
   const existing = activeByKey.get(key)
   if (!existing) {
-    return trackSummaryJob(key, task, createSummaryJobPromise(key, task)) as Promise<T>
+    const control = captureJobControl(key, task)
+    return trackSummaryJob(key, task, createSummaryJobPromise(key, task, control), control) as Promise<T>
   }
-  if (canJoinSummaryJob(existing.task, task)) return existing.promise as Promise<T>
+  if (canJoinSummaryJob(existing.task, task) && !isControlCancelled(existing.control)) {
+    return existing.promise as Promise<T>
+  }
 
   // Different operations for the same source must remain serialized. Keep the
   // chained promise in activeByKey immediately, so a third request joins the
   // tail instead of starting a second operation concurrently after the first
-  // one completes.
+  // one completes. The reservation is released if cancellation prevents the
+  // tail from being created.
+  const control = captureJobControl(key, task)
   queuedCount++
   broadcastQueueStatus()
+  const releaseReservation = (): void => decrementQueuedCount()
+  const startTail = (): Promise<SummaryWorkerResult> => {
+    if (isControlCancelled(control)) {
+      releaseReservation()
+      return Promise.reject(cancellationError())
+    }
+    return createSummaryJobPromise(key, task, control, true)
+  }
   const chained = existing.promise.then(
-    () => trackSummaryJob(key, task, createSummaryJobPromise(key, task, true)),
-    () => trackSummaryJob(key, task, createSummaryJobPromise(key, task, true))
+    () => startTail(),
+    () => startTail()
   )
-  return trackSummaryJob(key, task, chained) as Promise<T>
+  return trackSummaryJob(key, task, chained, control) as Promise<T>
 }
 
 export function ensureDocSummaryInWorker(projectId: string, docId: string, currentContent: string): Promise<DocSummary | null> {
   return runSummaryJob<DocSummary | null>(`doc:${docId}`, { kind: 'ensure-doc', projectId, docId, currentContent })
 }
 
-export function regenerateDocSummaryInWorker(docId: string, forceFull = false): Promise<{ ok: boolean; error?: string }> {
-  return runSummaryJob<{ ok: boolean; error?: string }>(`doc:${docId}`, { kind: 'regenerate-doc', docId, forceFull })
+export function regenerateDocSummaryInWorker(projectId: string, docId: string, forceFull = false): Promise<{ ok: boolean; error?: string }> {
+  return runSummaryJob<{ ok: boolean; error?: string }>(`doc:${docId}`, { kind: 'regenerate-doc', projectId, docId, forceFull })
 }
 
-export function queueChatSummaryInWorker(chatId: string, force = false): Promise<void> {
-  return runSummaryJob<void>(`chat:${chatId}`, { kind: 'queue-chat', chatId, force })
+export function queueChatSummaryInWorker(projectId: string, chatId: string, force = false): Promise<void> {
+  return runSummaryJob<void>(`chat:${chatId}`, { kind: 'queue-chat', projectId, chatId, force })
 }
 
-export function regenerateChatSummaryInWorker(chatId: string): Promise<{ ok: boolean; error?: string }> {
-  return runSummaryJob<{ ok: boolean; error?: string }>(`chat:${chatId}`, { kind: 'regenerate-chat', chatId })
+export function regenerateChatSummaryInWorker(projectId: string, chatId: string): Promise<{ ok: boolean; error?: string }> {
+  return runSummaryJob<{ ok: boolean; error?: string }>(`chat:${chatId}`, { kind: 'regenerate-chat', projectId, chatId })
 }
 
 export function distillResourceInWorker(projectId: string, resourceId: string, type: ResourceDistillType, force = false): Promise<DistillResult> {
@@ -354,16 +511,105 @@ export function retryPendingSummariesInWorker(): Promise<void> {
   return runSummaryJob<void>('chat:retry-pending' as SummaryJobKey, { kind: 'retry-pending' })
 }
 
-export async function waitForSummaryWorker(timeoutMs: number): Promise<boolean> {
+function requestCancellation(job: ActiveJob): void {
+  if (job.cancelRequested) return
+  job.cancelRequested = true
+  try {
+    post({ type: 'cancel', protocolVersion: SUMMARY_WORKER_PROTOCOL_VERSION, jobId: job.jobId })
+  } catch {
+    // Worker exit is handled by onExit; the job remains tracked until then.
+  }
+}
+
+function taskBelongsToProject(task: SummaryWorkerTask, projectId: string): boolean {
+  return projectIdForTask(task) === projectId
+}
+
+function hasPendingSummaryJob(key: string): boolean {
+  return activeByKey.has(key) || [...active.values()].some((job) => job.key === key)
+}
+
+function hasPendingProjectJob(projectId: string): boolean {
+  return [...activeByKey.values()].some(({ task }) => taskBelongsToProject(task, projectId) || isRetryPendingTask(task))
+    || [...active.values()].some((job) => job.context.projectId === projectId || job.key === 'chat:retry-pending')
+}
+
+export function quiesceSummaryJob(key: SummaryJobKey): void {
+  quiescedKeys.set(key, (quiescedKeys.get(key) ?? 0) + 1)
+}
+
+export function resumeSummaryJob(key: SummaryJobKey): void {
+  const count = quiescedKeys.get(key) ?? 0
+  if (count <= 1) quiescedKeys.delete(key)
+  else quiescedKeys.set(key, count - 1)
+}
+
+export function quiesceProject(projectId: string): void {
+  quiescedProjects.set(projectId, (quiescedProjects.get(projectId) ?? 0) + 1)
+}
+
+export function resumeProject(projectId: string): void {
+  const count = quiescedProjects.get(projectId) ?? 0
+  if (count <= 1) quiescedProjects.delete(projectId)
+  else quiescedProjects.set(projectId, count - 1)
+}
+
+export function cancelSummaryJob(key: SummaryJobKey): void {
+  keyCancellationGeneration.set(key, currentGeneration(keyCancellationGeneration, key) + 1)
+  const tracked = activeByKey.get(key)
+  if (tracked) tracked.control.cancelled = true
+  for (const job of active.values()) {
+    if (job.key !== key) continue
+    job.control.cancelled = true
+    requestCancellation(job)
+  }
+}
+
+export function cancelProjectJobs(projectId: string): void {
+  projectCancellationGeneration.set(projectId, currentGeneration(projectCancellationGeneration, projectId) + 1)
+  retryCancellationGeneration += 1
+  for (const tracked of activeByKey.values()) {
+    if (taskBelongsToProject(tracked.task, projectId) || isRetryPendingTask(tracked.task)) tracked.control.cancelled = true
+  }
+  for (const job of active.values()) {
+    if (job.context.projectId === projectId || job.key === 'chat:retry-pending') {
+      job.control.cancelled = true
+      requestCancellation(job)
+    }
+  }
+}
+
+export async function drainSummaryJob(key: SummaryJobKey, timeoutMs = 8000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
-  while (active.size > 0 && Date.now() < deadline) {
+  while (hasPendingSummaryJob(key) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(10, deadline - Date.now()))))
   }
-  return active.size === 0
+  return !hasPendingSummaryJob(key)
+}
+
+export async function drainProject(projectId: string, timeoutMs = 8000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (hasPendingProjectJob(projectId) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(10, deadline - Date.now()))))
+  }
+  return !hasPendingProjectJob(projectId)
+}
+
+export async function waitForSummaryWorker(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while ((active.size > 0 || activeByKey.size > 0 || queuedCount > 0) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(10, deadline - Date.now()))))
+  }
+  return active.size === 0 && activeByKey.size === 0 && queuedCount === 0
 }
 
 export async function shutdownSummaryJobManager(timeoutMs = 8000): Promise<boolean> {
   shuttingDown = true
+  for (const tracked of activeByKey.values()) tracked.control.cancelled = true
+  for (const job of active.values()) {
+    job.control.cancelled = true
+    requestCancellation(job)
+  }
   const drained = await waitForSummaryWorker(timeoutMs)
   if (worker) {
     try {
@@ -371,10 +617,38 @@ export async function shutdownSummaryJobManager(timeoutMs = 8000): Promise<boole
     } catch {
       // Worker may already have exited.
     }
-    if (!drained) worker.kill()
+    if (!drained) {
+      worker.kill()
+      rejectAll(workerError('\u6458\u8981 Worker \u6392\u7a7a\u8d85\u65f6'))
+    }
   }
   worker = null
   readyPromise = null
+  quiescedProjects.clear()
+  quiescedKeys.clear()
   return drained
 }
 
+/**
+ * Prevent summary workers from reading/writing a project while a destructive
+ * lifecycle operation updates its files. The operation is rejected if active
+ * workers cannot drain within the bounded grace period.
+ */
+export async function withSummaryProjectQuiesced<T>(
+  projectId: string,
+  operation: () => Promise<T>,
+  timeoutMs = 15000
+): Promise<T> {
+  quiesceProject(projectId)
+  cancelProjectJobs(projectId)
+  const drained = await drainProject(projectId, timeoutMs)
+  if (!drained) {
+    resumeProject(projectId)
+    throw new Error('摘要任务仍在运行，无法安全执行项目文件操作，请稍后重试')
+  }
+  try {
+    return await operation()
+  } finally {
+    resumeProject(projectId)
+  }
+}

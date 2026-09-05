@@ -382,16 +382,20 @@ export function registerIpcHandlers(): void {
   handle(IPC.summaryGetResource, (req) => readResourceSummary(req.projectId, req.resourceId))
   handle(IPC.summaryListProject, (projectId) => listProjectSummaries(projectId))
   handle(IPC.summaryRegenerateDoc, async (req) => {
-    const result = await regenerateDocSummaryInWorker(req.docId, req.forceFull ?? false)
+    const doc = await findDocMeta(req.docId)
+    const result = await regenerateDocSummaryInWorker(doc.projectId, req.docId, req.forceFull ?? false)
     if (result.ok) {
-      const doc = await findDocMeta(req.docId)
-      if (doc) await scheduleProjectRollupMaintenance(doc.projectId, 0)
+      await scheduleProjectRollupMaintenance(doc.projectId, 0)
     }
     return result
   })
-  handle(IPC.summaryRegenerateChat, (chatId) => regenerateChatSummaryInWorker(chatId))
-  handle(IPC.summaryQueueChat, (chatId) => {
-    void queueChatSummaryInWorker(chatId)
+  handle(IPC.summaryRegenerateChat, async (chatId) => {
+    const { chat } = await getChat(chatId)
+    return regenerateChatSummaryInWorker(chat.projectId, chatId)
+  })
+  handle(IPC.summaryQueueChat, async (chatId) => {
+    const { chat } = await getChat(chatId)
+    void queueChatSummaryInWorker(chat.projectId, chatId)
   })
   handle(IPC.summaryDefaultActive, (chatId) => getDefaultActiveKeys(chatId))
   handle(IPC.summarySearch, (req) => searchProjectSummaries(req.projectId, req.query))

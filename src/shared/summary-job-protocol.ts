@@ -1,4 +1,4 @@
-﻿import type { ApiProtocol, AppConfig, ChatSummary, DistillResult, DocSummary, ResourceDistillType, ResourceSummary } from '@shared/types'
+import type { ApiProtocol, AppConfig, ChatSummary, DistillResult, DocSummary, ResourceDistillType, ResourceSummary } from '@shared/types'
 
 export const SUMMARY_WORKER_PROTOCOL_VERSION = 1 as const
 
@@ -16,6 +16,7 @@ export type SummaryProgressPhase =
   | 'writing'
   | 'complete'
   | 'failed'
+  | 'waiting-confirmation'
   | 'cancelled'
 
 export interface SummaryProgress {
@@ -63,9 +64,9 @@ export interface SummaryWorkerApiSettings {
 
 export type SummaryWorkerTask =
   | { kind: 'ensure-doc'; projectId: string; docId: string; currentContent: string }
-  | { kind: 'regenerate-doc'; docId: string; forceFull?: boolean }
-  | { kind: 'queue-chat'; chatId: string; force?: boolean }
-  | { kind: 'regenerate-chat'; chatId: string }
+  | { kind: 'regenerate-doc'; projectId: string; docId: string; forceFull?: boolean }
+  | { kind: 'queue-chat'; projectId: string; chatId: string; force?: boolean }
+  | { kind: 'regenerate-chat'; projectId: string; chatId: string }
   | { kind: 'distill-resource'; projectId: string; resourceId: string; type: ResourceDistillType; force?: boolean }
   | { kind: 'generate-rollups'; projectId: string }
   | { kind: 'regenerate-rollup'; projectId: string; rollupId: string }

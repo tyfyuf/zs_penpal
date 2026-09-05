@@ -16,11 +16,17 @@ function getWindowIconPath(): string | undefined {
   const candidates = [
     // Packaged build: electron-builder copies the icon to resources/.
     join(process.resourcesPath, fileName),
-    // Development build: __dirname points at out/main after electron-vite build.
+    // Development build: __dirname points at out/main/chunks after bundling.
     resolve(__dirname, '../../build', fileName),
-    join(process.cwd(), 'build', fileName),
-    join(app.getAppPath(), 'build', fileName)
+    join(process.cwd(), 'build', fileName)
   ]
+
+  // Summary workers run as Electron Utility Processes. They can load modules
+  // shared with the main process, but do not expose electron.app. Keep the
+  // app-specific candidate optional so worker startup never depends on it.
+  if (app && typeof app.getAppPath === 'function') {
+    candidates.push(join(app.getAppPath(), 'build', fileName))
+  }
 
   return candidates.find((candidate) => existsSync(candidate))
 }
@@ -47,7 +53,7 @@ export function createMainWindow(): BrowserWindow {
     ...(windowIconPath ? { icon: windowIconPath } : {}),
     backgroundColor: '#0b0f14',
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: resolve(__dirname, '../../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -73,7 +79,7 @@ export function createMainWindow(): BrowserWindow {
   if (process.env.ELECTRON_RENDERER_URL) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    void mainWindow.loadFile(resolve(__dirname, '../../renderer/index.html'))
   }
 
   return mainWindow
@@ -112,7 +118,7 @@ export function openSettingsWindow(): BrowserWindow {
     backgroundColor: '#0b0f14',
     parent: mainWindow ?? undefined,
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: resolve(__dirname, '../../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -131,7 +137,7 @@ export function openSettingsWindow(): BrowserWindow {
   if (process.env.ELECTRON_RENDERER_URL) {
     void settingsWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}#settings`)
   } else {
-    void settingsWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash: 'settings' })
+    void settingsWindow.loadFile(resolve(__dirname, '../../renderer/index.html'), { hash: 'settings' })
   }
 
   return settingsWindow

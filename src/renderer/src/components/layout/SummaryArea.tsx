@@ -38,7 +38,7 @@ function readSummarySectionState(projectId: string): SummarySectionState {
 type SummaryTranslator = (key: string, vars?: Record<string, string | number>) => string
 
 function isTerminalProgress(progress: SummaryProgress | undefined): boolean {
-  return progress?.phase === 'complete' || progress?.phase === 'failed' || progress?.phase === 'cancelled'
+  return progress?.phase === 'complete' || progress?.phase === 'failed' || progress?.phase === 'waiting-confirmation' || progress?.phase === 'cancelled'
 }
 
 function progressPercent(progress: SummaryProgress): number | null {

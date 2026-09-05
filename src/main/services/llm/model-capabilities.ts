@@ -26,7 +26,7 @@ export interface ModelCapabilityProfile {
   outputTokenParam: OutputTokenParam
   temperature: 'supported' | 'unsupported'
   updatedAt: string
-  profileVersion: 4
+  profileVersion: 6
 }
 
 interface CachedModelCapabilityProfile extends Omit<Partial<ModelCapabilityProfile>, 'profileVersion'> {
@@ -69,9 +69,12 @@ export function defaultModelCapabilityProfile(settings: ApiSettings): ModelCapab
       ? defaultReasoningReplayPolicy(providerFamily)
       : 'never',
     outputTokenParam: 'max_tokens',
-    temperature: 'supported',
+    // Kimi rejects temperature and Qwen's thinking mode normalizes values
+    // below 0.6. Structured generation does not need to override either
+    // provider's default, so omit the field for both provider families.
+    temperature: providerFamily === 'kimi' || providerFamily === 'qwen' ? 'unsupported' : 'supported',
     updatedAt: new Date().toISOString(),
-    profileVersion: 4
+    profileVersion: 6
   }
 }
 
@@ -89,7 +92,7 @@ function isReasoningReplayPolicy(value: unknown): value is ReasoningReplayPolicy
 
 
 /**
- * Migrates existing profileVersion 3 records without discarding their learned
+ * Migrates existing capability profile records without discarding their learned
  * structured-output capability. Provider identity and replay defaults are
  * always recalculated from the active endpoint/model, then explicit runtime
  * replay learning is retained if present.
@@ -99,20 +102,24 @@ export function normalizeModelCapabilityProfile(
   fallback: ModelCapabilityProfile
 ): ModelCapabilityProfile {
   if (!cached) return fallback
+  const cachedVersion = typeof cached.profileVersion === 'number' ? cached.profileVersion : 0
+  const useCachedReasoningControl = cachedVersion >= 6 && isReasoningControl(cached.reasoningControl)
   return {
     ...fallback,
     key: fallback.key,
     source: cached.source === 'preset' || cached.source === 'runtime-fallback' ? cached.source : fallback.source,
     providerFamily: fallback.providerFamily,
     structuredOutput: isStructuredOutputMode(cached.structuredOutput) ? cached.structuredOutput : fallback.structuredOutput,
-    reasoningControl: isReasoningControl(cached.reasoningControl) ? cached.reasoningControl : fallback.reasoningControl,
+    reasoningControl: useCachedReasoningControl ? cached.reasoningControl as StructuredReasoningControl : fallback.reasoningControl,
     reasoningReplay: isReasoningReplayPolicy(cached.reasoningReplay) ? cached.reasoningReplay : fallback.reasoningReplay,
     outputTokenParam: isOutputTokenParam(cached.outputTokenParam) ? cached.outputTokenParam : fallback.outputTokenParam,
-    temperature: cached.temperature === 'supported' || cached.temperature === 'unsupported'
-      ? cached.temperature
-      : fallback.temperature,
+    temperature: fallback.providerFamily === 'kimi' || fallback.providerFamily === 'qwen'
+      ? fallback.temperature
+      : cached.temperature === 'supported' || cached.temperature === 'unsupported'
+        ? cached.temperature
+        : fallback.temperature,
     updatedAt: typeof cached.updatedAt === 'string' ? cached.updatedAt : fallback.updatedAt,
-    profileVersion: 4
+    profileVersion: 6
   }
 }
 
@@ -130,7 +137,7 @@ export async function updateModelCapabilityProfile(
   let saved = fallback
   const next = capabilityWriteQueue.then(async () => {
     const store = await loadModelCapabilityStore()
-    saved = { ...mutate(normalizeModelCapabilityProfile(store.profiles[fallback.key], fallback)), profileVersion: 4 }
+    saved = { ...mutate(normalizeModelCapabilityProfile(store.profiles[fallback.key], fallback)), profileVersion: 6 }
     store.profiles[saved.key] = saved
     await atomicWriteJson(capabilityPath(), store)
   })

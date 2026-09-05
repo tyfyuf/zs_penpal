@@ -21,10 +21,15 @@ import { loadApiSettings, type ApiSettings } from './api-settings'
 import { loadConfig } from './config.service'
 import { estimateTokens } from './tokenizer'
 import {
+  assertSummaryEntityActive,
+  assertSummaryProjectActive,
   buildSnapshot,
   getChat,
+  getChatForSummary,
+  listProjects,
   readChatSummary,
   readDoc,
+  readDocForSummary,
   readDocRollups,
   readDocSummary,
   readResource,
@@ -61,8 +66,12 @@ function markGenerating(key: string): void {
   reportSummaryProgress(key, 'starting')
 }
 
-function markDone(key: string, succeeded = true): void {
-  reportSummaryProgress(key, succeeded ? 'complete' : 'failed', succeeded ? 1 : 0, 1)
+function markDone(
+  key: string,
+  succeeded = true,
+  terminalPhase: 'complete' | 'failed' | 'waiting-confirmation' = succeeded ? 'complete' : 'failed'
+): void {
+  reportSummaryProgress(key, terminalPhase, terminalPhase === 'complete' ? 1 : 0, 1)
   setSummaryGeneratingState(key, false)
 }
 
@@ -852,11 +861,12 @@ export async function ensureDocSummary(projectId: string, docId: string, current
   const settings = await loadApiSettings()
   if (!settings.apiKey) return null
 
-  let content = currentContent
+  let content: string
   try {
-    content = (await readDoc(docId)).content
+    content = (await readDocForSummary(projectId, docId)).content
   } catch {
-    // Fall back to the content captured by the caller.
+    // The source may have been deleted, archived, or moved while the job waited.
+    return null
   }
   if (nonWhitespaceLength(content) === 0 || isShortDocForSummary(content)) return null
 
@@ -884,7 +894,7 @@ export async function ensureDocSummary(projectId: string, docId: string, current
 }
 
 /** Manually rebuild a document summary. Normal rebuilds reuse unchanged chunks. */
-export async function regenerateDocSummary(docId: string, forceFull = false): Promise<{ ok: boolean; error?: string }> {
+export async function regenerateDocSummary(projectId: string, docId: string, forceFull = false): Promise<{ ok: boolean; error?: string }> {
   const key = `doc:${docId}`
   markGenerating(key)
   let succeeded = false
@@ -893,15 +903,17 @@ export async function regenerateDocSummary(docId: string, forceFull = false): Pr
     if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能已关闭' }
     const settings = await loadApiSettings()
     if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }
+    await assertSummaryEntityActive(projectId, 'doc', docId)
     reportSummaryProgress(key, 'reading', 0, 1)
-    const { doc, content } = await readDoc(docId)
+    const { content } = await readDocForSummary(projectId, docId)
     reportSummaryProgress(key, 'reading', 1, 1)
     if (nonWhitespaceLength(content) === 0) return { ok: false, error: '文档内容为空，无法生成摘要' }
     if (isShortDocForSummary(content)) return { ok: false, error: '短文档无需生成摘要，将按全文候选参与注入' }
-    const previous = forceFull ? null : await readDocSummary(doc.projectId, docId)
-    const summary = await generateDocSummary(doc.projectId, docId, content, settings, key, previous)
+    const previous = forceFull ? null : await readDocSummary(projectId, docId)
+    const summary = await generateDocSummary(projectId, docId, content, settings, key, previous)
     reportSummaryProgress(key, 'writing', 0, 1)
-    await writeDocSummary(doc.projectId, docId, summary)
+    await assertSummaryEntityActive(projectId, 'doc', docId)
+    await writeDocSummary(projectId, docId, summary)
     reportSummaryProgress(key, 'writing', 1, 1)
     succeeded = true
     return { ok: true }
@@ -965,11 +977,11 @@ function isChatSummaryComplete(
   return cursor === expectedEnd + 1
 }
 
-async function generateChatSummary(chatId: string, force = false): Promise<void> {
+async function generateChatSummary(projectId: string, chatId: string, force = false): Promise<void> {
   const cfg = await loadApiSettings()
   if (!cfg.apiKey) throw new Error('未配置 API Key')
 
-  const { chat, messages } = await getChat(chatId)
+  const { chat, messages } = await getChatForSummary(projectId, chatId)
   const turns = messages.filter((m) => m.role === 'user' || m.role === 'assistant')
   if (turns.length === 0) return
 
@@ -1019,7 +1031,8 @@ async function generateChatSummary(chatId: string, force = false): Promise<void>
     }
 
     reportSummaryProgress(key, 'writing', 0, 1)
-    await writeChatSummary(chat.projectId, chatId, {
+    await assertSummaryEntityActive(projectId, 'chat', chatId)
+    await writeChatSummary(projectId, chatId, {
       schemaVersion: SUMMARY_SCHEMA_VERSION,
       items,
       compacted,
@@ -1101,29 +1114,29 @@ async function summarizeInterval(turns: { role: string; content: string }[], cfg
   }))
 }
 
-async function runQueuedChatSummary(chatId: string, force: boolean, propagate: boolean): Promise<void> {
+async function runQueuedChatSummary(projectId: string, chatId: string, force: boolean, propagate: boolean): Promise<void> {
   try {
-    await generateChatSummary(chatId, force)
+    await generateChatSummary(projectId, chatId, force)
     pendingRetry.delete(chatId)
     await persistRetry()
   } catch (err) {
     pendingRetry.add(chatId)
     await persistRetry()
-    logError('summary:chat', `Chat summary generation failed chatId=${chatId}`, (err as Error).message)
+    logError('summary:chat', `Chat summary generation failed projectId=${projectId} chatId=${chatId}`, (err as Error).message)
     if (propagate) throw err
   }
 }
 
-export function queueChatSummary(chatId: string, force = false): Promise<void> {
-  return enqueue(() => runQueuedChatSummary(chatId, force, false))
+export function queueChatSummary(projectId: string, chatId: string, force = false): Promise<void> {
+  return enqueue(() => runQueuedChatSummary(projectId, chatId, force, false))
 }
 
 /** Manual calls propagate failure; this fixes the historical false-success response. */
-export async function regenerateChatSummary(chatId: string): Promise<{ ok: boolean; error?: string }> {
+export async function regenerateChatSummary(projectId: string, chatId: string): Promise<{ ok: boolean; error?: string }> {
   try {
     const cfg = await loadConfig()
     if (!cfg.summaryEnabled) return { ok: false, error: 'Summary feature is disabled' }
-    await enqueue(() => runQueuedChatSummary(chatId, true, true))
+    await enqueue(() => runQueuedChatSummary(projectId, chatId, true, true))
     return { ok: true }
   } catch (err) {
     return { ok: false, error: (err as Error).message }
@@ -1132,9 +1145,24 @@ export async function regenerateChatSummary(chatId: string): Promise<{ ok: boole
 
 export async function retryPendingSummaries(): Promise<void> {
   const ids = await loadRetryState()
+  const projects = await listProjects()
+  const projectsById = new Map(projects.map((project) => [project.id, project]))
   for (const id of ids) {
-    if (id) await queueChatSummary(id)
+    if (!id) continue
+    try {
+      const { chat } = await getChat(id)
+      const project = projectsById.get(chat.projectId)
+      if (!project || project.status !== 'normal' || chat.status !== 'normal') {
+        pendingRetry.delete(id)
+        continue
+      }
+      await queueChatSummary(chat.projectId, id)
+    } catch {
+      // Missing or malformed retry entries must not create a permanent retry loop.
+      pendingRetry.delete(id)
+    }
   }
+  await persistRetry()
 }
 
 /** 退出时等待摘要队列；超时返回 false（PRD 7.5） */
@@ -1158,12 +1186,15 @@ export async function distillResource(
   const key = `res:${resourceId}`
   markGenerating(key)
   let succeeded = false
+  let terminalPhase: 'complete' | 'failed' | 'waiting-confirmation' = 'failed'
   try {
     const result = await distillResourceInner(projectId, resourceId, type, force, key)
     succeeded = result.ok
+    if (!result.ok && (result.mismatch || result.uncertain)) terminalPhase = 'waiting-confirmation'
+    else if (result.ok) terminalPhase = 'complete'
     return result
   } finally {
-    markDone(key, succeeded)
+    markDone(key, succeeded, terminalPhase)
   }
 }
 
@@ -1174,6 +1205,7 @@ async function distillResourceInner(
   force: boolean,
   progressKey?: string
 ): Promise<DistillResult> {
+  await assertSummaryEntityActive(projectId, 'resource', resourceId)
   const cfg = await loadConfig()
   if (!cfg.summaryEnabled) return { ok: false, error: '\u6458\u8981\u529f\u80fd\u672a\u5f00\u542f' }
   const settings = await loadApiSettings()
@@ -1267,6 +1299,7 @@ async function distillResourceInner(
 }
 
 export async function undistillResource(projectId: string, resourceId: string): Promise<void> {
+  await assertSummaryEntityActive(projectId, 'resource', resourceId)
   if (isSummaryGenerating(`res:${resourceId}`)) {
     throw new Error('资源正在蒸馏，暂不可编辑，请等待蒸馏完成后再操作')
   }
@@ -1565,7 +1598,7 @@ async function inspectDocRollupProject(projectId: string): Promise<RollupProject
   const docs = [...(tree?.docs ?? [])].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   const states = await Promise.all(docs.map(async (doc) => {
     try {
-      const [{ content }, summary] = await Promise.all([readDoc(doc.id), readDocSummary(projectId, doc.id)])
+      const [{ content }, summary] = await Promise.all([readDocForSummary(projectId, doc.id), readDocSummary(projectId, doc.id)])
       const summarizable = !analyzeTextIntegrity(content).suspicious
         && nonWhitespaceLength(content) > 0
         && !isShortDocForSummary(content)
@@ -1688,6 +1721,7 @@ async function buildRollupForChunk(
 
 /** 生成或重建项目中的大摘要 */
 export async function generateDocRollups(projectId: string, progressKey?: string): Promise<{ ok: boolean; error?: string }> {
+  await assertSummaryProjectActive(projectId)
   if (await isFeatureGuideProject(projectId)) return { ok: false, error: 'Feature guide projects do not generate summaries' }
   const cfg = await loadConfig()
   if (!cfg.summaryEnabled) return { ok: false, error: '摘要功能未启用' }
@@ -1722,6 +1756,7 @@ export async function generateDocRollups(projectId: string, progressKey?: string
 
 /** 单条重新生成大摘要 */
 export async function regenerateDocRollup(projectId: string, rollupId: string, progressKey?: string): Promise<{ ok: boolean; error?: string }> {
+  await assertSummaryProjectActive(projectId)
   if (await isFeatureGuideProject(projectId)) return { ok: false, error: 'Feature guide projects do not generate summaries' }
   const settings = await loadApiSettings()
   if (!settings.apiKey) return { ok: false, error: '未配置 API Key' }

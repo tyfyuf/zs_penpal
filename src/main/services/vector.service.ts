@@ -1,6 +1,6 @@
 import type { VectorChunk, VectorIndex, VectorIndexFileStatus, VectorIndexStatus, VectorIndexSource, VectorSearchHit } from '@shared/types'
 import { createHash } from 'node:crypto'
-import { buildSnapshot, readDoc, readResource, readVectorIndex, writeVectorIndex, isFeatureGuideProject } from './file.service'
+import { assertSummaryProjectActive, buildSnapshot, readDoc, readResource, readVectorIndex, withProjectWriteLock, writeVectorIndex, isFeatureGuideProject } from './file.service'
 import { nowIso } from '../util'
 import {
   getNeuralEmbedder,
@@ -346,7 +346,10 @@ function runProjectOperation<T>(projectId: string, operation: (generation: numbe
       projectBusy.add(projectId)
       projectRunningGenerations.set(projectId, generation)
       try {
-        return await operation(generation)
+        // Serialize vector reads/writes with document/resource/project
+        // lifecycle mutations. Generation checks alone cannot stop a build
+        // that started before a delete from writing stale chunks afterwards.
+        return await withProjectWriteLock(projectId, () => operation(generation))
       } finally {
         if (projectRunningGenerations.get(projectId) === generation) {
           projectRunningGenerations.delete(projectId)
@@ -591,6 +594,11 @@ async function buildWithFallback(
 
 /** Project-wide refresh with changed/new sources only; removed sources are pruned. */
 export async function buildVectorIndex(projectId: string): Promise<VectorBuildResult> {
+  try {
+    await assertSummaryProjectActive(projectId)
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
   if (await isFeatureGuideProject(projectId)) return { ok: false, error: 'Feature guide projects do not build vector indexes' }
   const backend = await preferredBackend()
   return runProjectOperation(projectId, (generation) => buildWithFallback(projectId, backend, generation))
@@ -598,6 +606,11 @@ export async function buildVectorIndex(projectId: string): Promise<VectorBuildRe
 
 /** Force a single document/resource to be rebuilt. */
 export async function rebuildVectorSource(projectId: string, id: string, kind: 'doc' | 'res'): Promise<VectorBuildResult> {
+  try {
+    await assertSummaryProjectActive(projectId)
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
   if (await isFeatureGuideProject(projectId)) return { ok: false, error: 'Feature guide projects do not build vector indexes' }
   const backend = await preferredBackend()
   return runProjectOperation(projectId, (generation) => buildWithFallback(projectId, backend, generation, { id, kind, force: true }))
@@ -710,6 +723,11 @@ export async function searchVectorIndex(
   const startedAt = Date.now()
   const normalizedQuery = query.trim()
   if (!normalizedQuery || topK <= 0) return []
+  try {
+    await assertSummaryProjectActive(projectId)
+  } catch {
+    return []
+  }
   let prepared = await ensureSearchIndex(projectId)
   if (!prepared) {
     logVectorEvent({ stage: 'search', backend: 'none', outcome: 'empty', durationMs: Date.now() - startedAt, hitCount: 0, source: trace?.source, attempt: trace?.attempt, queryLength: normalizedQuery.length })
