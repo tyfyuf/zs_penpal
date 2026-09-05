@@ -20,3 +20,13 @@ models/
 
 # 用户提供的问题复现材料，仅限本地分析，禁止入库
 失败文档/
+
+# Local-only user data, private audit material, and provider notes
+settings/
+.tmp-*
+2212
+docs/kimi.txt
+docs/qwen.txt
+docs/*audit*.md
+docs/*triage*.md
+docs/*repair-plan*.md
