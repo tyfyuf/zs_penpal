@@ -63,11 +63,11 @@ export default function App(): JSX.Element {
   async function handleExternalFile(path: string): Promise<void> {
     const res = await api.invoke('file:openExternal', path)
     if (!res.ok) {
-      toast.error(res.error ?? '无法打开文件')
+      toast.error(res.error ?? t('app.externalOpenFailed'))
       return
     }
     useAppStore.getState().openExternalResource(res)
-    toast.info(`已临时打开外部文件：${res.name}`)
+    toast.info(t('app.externalOpened', { name: res.name ?? path }))
   }
 
   async function confirmRecovery(restore: boolean): Promise<void> {

@@ -55,6 +55,7 @@ interface AppStore {
 }
 
 let configSub: (() => void) | null = null
+let configChangeVersion = 0
 let workspaceChangeSub: (() => void) | null = null
 let workspacePollTimer: ReturnType<typeof setInterval> | null = null
 let workspaceRefreshTimer: ReturnType<typeof setTimeout> | null = null
@@ -90,15 +91,25 @@ export const useAppStore = create<AppStore>((set, get) => ({
   summaryRevision: 0,
 
   async init() {
+    if (!configSub) {
+      configSub = api.on('config:changed', (cfg) => {
+        configChangeVersion += 1
+        useI18nStore.getState().setLocale(cfg.language ?? 'zh')
+        set({ config: cfg })
+      })
+    }
+    const configVersionAtStart = configChangeVersion
     const config = await api.invoke('config:get', undefined)
     const workspace = await api.invoke('workspace:get', undefined)
+    // A config event may arrive while workspace initialization is in flight.
+    // Prefer the event-updated store value so a stale config response cannot
+    // switch the renderer back to the previous language.
+    const effectiveConfig = configChangeVersion === configVersionAtStart ? config : (get().config ?? config)
     const theme = get().theme
     document.documentElement.classList.toggle('light', theme === 'light')
     document.documentElement.classList.toggle('dark', theme === 'dark')
-    useI18nStore.getState().setLocale(config.language ?? 'zh')
-    // 主进程侧配置变更（如工作目录迁移）→ 同步渲染层缓存
-    if (configSub) configSub()
-    configSub = api.on('config:changed', (cfg) => set({ config: cfg }))
+    useI18nStore.getState().setLocale(effectiveConfig.language ?? 'zh')
+    // Keep the config cache in sync with main-process changes.
     if (workspaceChangeSub) workspaceChangeSub()
     workspaceChangeSub = api.on('workspace:changed', (payload) => {
       if (isSummaryChange(payload)) {
@@ -112,7 +123,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         if (document.visibilityState === 'visible') scheduleWorkspaceRefresh(0)
       }, 20000)
     }
-    set({ config, workspace, initialized: true })
+    set({ config: effectiveConfig, workspace, initialized: true })
   },
 
   setTheme(t) {
@@ -166,6 +177,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   async updateConfig(patch) {
     const config = await api.invoke('config:set', patch)
+    if (patch.language !== undefined) useI18nStore.getState().setLocale(config.language ?? 'zh')
     set({ config })
   },
 

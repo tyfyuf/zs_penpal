@@ -1,4 +1,6 @@
 import type { ApiProtocol } from '@shared/types'
+// Use Electron/Node's Web Fetch API instead of openai's node-fetch shim.
+import 'openai/shims/web'
 import OpenAI from 'openai'
 import type { ChatCompletion, ChatCompletionChunk } from 'openai/resources/chat/completions/completions'
 import { Stream } from 'openai/streaming'

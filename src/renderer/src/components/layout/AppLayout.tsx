@@ -5,6 +5,7 @@ import EditorPane from '../editor/EditorPane'
 import ChatPane from '../chat/ChatPane'
 import ResourceViewer from '../ResourceViewer'
 import ExternalResourceViewer from '../ExternalResourceViewer'
+import { useT } from '../../i18n'
 
 function renderActiveTab(tab: Tab): JSX.Element | null {
   switch (tab.kind) {
@@ -20,6 +21,7 @@ function renderActiveTab(tab: Tab): JSX.Element | null {
 }
 
 function MainContent(): JSX.Element | null {
+  const t = useT()
   const tabs = useAppStore((s) => s.tabs)
   const activeTabId = useAppStore((s) => s.activeTabId)
   const active: Tab | undefined = tabs.find((t) => t.id === activeTabId)
@@ -28,7 +30,7 @@ function MainContent(): JSX.Element | null {
   if (!active) {
     return (
       <div className="flex h-full items-center justify-center text-sm" style={{ color: 'var(--muted)' }}>
-        从左侧选择或新建文档 / 对话开始
+        {t('layout.noActiveTab')}开始
       </div>
     )
   }

@@ -277,7 +277,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   // Stream chunks are merged in a ref and committed to React in small batches.
   useEffect(() => {
     const offChunk = api.on('stream:chunk', (p) => {
-      if (p.chatId !== chatId) return
+      if (p.chatId !== chatId || p.requestId !== activeRequestIdRef.current) return
       const buffered = streamBufferRef.current
       if (!buffered || buffered.requestId !== p.requestId) return
       buffered.acc += p.delta
@@ -285,7 +285,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
       scheduleStreamingFlush()
     })
     const offDone = api.on('stream:done', (p) => {
-      if (p.chatId !== chatId) return
+      if (p.chatId !== chatId || p.requestId !== activeRequestIdRef.current) return
       flushStreamingBuffer()
       streamBufferRef.current = null
       setStreaming((s) => (s && s.requestId === p.requestId ? null : s))
@@ -373,6 +373,9 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
   useEffect(() => {
     return () => {
       // Unmount remains the fallback for closing a chat tab or leaving the app.
+      const requestId = activeRequestIdRef.current
+      activeRequestIdRef.current = null
+      if (requestId) void api.invoke('api:cancelStream', requestId).catch(() => {})
       void api.invoke('summary:queueChat', chatId).catch(() => {})
       setStreamingChat(chatId, false)
       if (rangeSaveTimer.current) {
@@ -812,7 +815,7 @@ export default function ChatPane({ tab, isActive = true }: { tab: Tab; isActive?
     if (streaming) return
     if (!regenerate && !input.trim() && attachments.length === 0) return
     if (!isFeatureGuideChat && config?.summaryEnabled && ((messages.length === 0 && defaultActive === null) || (messages.length > 0 && activeInjections === null))) {
-      setError('\u6458\u8981\u6ce8\u5165\u72b6\u6001\u4ecd\u5728\u52a0\u8f7d\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5')
+      setError(t('chat.injectionsLoading'))
       return
     }
 

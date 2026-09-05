@@ -5,7 +5,7 @@ import { useAppStore } from '../../store/app.store'
 import { api } from '../../lib/api'
 import { toast } from '../../store/toast.store'
 import { confirmDialog } from '../../store/dialog.store'
-import { useI18nStore, useT, type Locale } from '../../i18n'
+import { tGlobal, useI18nStore, useT, type Locale } from '../../i18n'
 import UsageCharts from './UsageCharts'
 import Modal from '../common/Modal'
 
@@ -83,7 +83,7 @@ export default function SettingsPane(): JSX.Element {
 
   async function loadVectorStatuses(): Promise<void> {
     const map: Record<string, VectorIndexStatus> = {}
-    for (const p of workspace.projects) {
+    for (const p of workspace.projects.filter((entry) => entry.project.system !== 'feature-guide')) {
       try {
         map[p.project.id] = await api.invoke('vector:status', p.project.id)
       } catch {
@@ -315,6 +315,7 @@ export default function SettingsPane(): JSX.Element {
   const searchMatch = (value: string, query: string): boolean => value.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
   const archiveQuery = archiveSearch.trim()
   const trashQuery = trashSearch.trim()
+  const vectorProjects = workspace.projects.filter((project) => project.project.system !== 'feature-guide')
   const matchingTrashedProjects = workspace.trashedProjects
     .filter((project) => project.system !== 'feature-guide')
     .filter((project) => !trashQuery || searchMatch(project.name, trashQuery))
@@ -335,7 +336,15 @@ export default function SettingsPane(): JSX.Element {
 
   return (
     <div className="flex h-full overflow-hidden">
-      <aside className="w-48 shrink-0 border-r p-3" style={{ borderColor: 'var(--border)', background: 'var(--panel)' }}>
+      <aside
+        className="w-48 shrink-0 border-r p-3"
+        style={{
+          width: '12rem',
+          flex: '0 0 12rem',
+          borderColor: 'var(--border)',
+          background: 'var(--panel)'
+        }}
+      >
         <h2 className="mb-3 px-2 text-base font-semibold">{t('settings.title')}</h2>
         <nav className="space-y-1">
           {([
@@ -538,11 +547,11 @@ export default function SettingsPane(): JSX.Element {
           <Section title={t('settings.vectorIndex')}>
             <div className="space-y-3">
               <SearchBox value={vectorSearch} onChange={setVectorSearch} placeholder={t('settings.searchEntries')} />
-              {workspace.projects.length === 0 && (
+              {vectorProjects.length === 0 && (
                 <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('settings.vectorIndexEmpty')}</div>
               )}
               <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
-                {workspace.projects.map((p) => {
+                {vectorProjects.map((p) => {
                   const status = vectorStatuses[p.project.id]
                   if (vectorSearch.trim() && !searchMatch(p.project.name, vectorSearch) && !(status?.files ?? []).some((f) => searchMatch(f.title, vectorSearch))) return null
                   return (
@@ -947,5 +956,5 @@ function InjCheck({ label, checked, onChange }: { label: string; checked: boolea
 function formatRollup(r: DocRollup): string {
   const changes = (Array.isArray(r.stateChanges) ? r.stateChanges : []).map((s) => `- ${s}`).join('\n')
   const causal = (Array.isArray(r.causality) ? r.causality : []).map((s) => `- ${s}`).join('\n')
-  return `总览：${r.overview || '（无）'}\n\n状态变化：\n${changes || '（无）'}\n\n跨文档因果关系：\n${causal || '（无）'}`
+  return `${tGlobal('settings.rollupOverview')}${r.overview || tGlobal('settings.none')}\n\n${tGlobal('settings.rollupStateChanges')}\n${changes || tGlobal('settings.none')}\n\n${tGlobal('settings.rollupCausality')}\n${causal || tGlobal('settings.none')}`
 }

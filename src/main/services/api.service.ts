@@ -191,6 +191,47 @@ interface UsageLike {
 }
 
 const controllers = new Map<string, AbortController>()
+const activeChatRequests = new Map<string, string>()
+
+interface StreamLifecycle {
+  doneEmitted: boolean
+}
+
+function ownsStreamRequest(req: StreamRequest, controller: AbortController): boolean {
+  return activeChatRequests.get(req.chatId) === req.requestId && controllers.get(req.requestId) === controller
+}
+
+function isLiveStreamRequest(req: StreamRequest, controller: AbortController): boolean {
+  return ownsStreamRequest(req, controller) && !controller.signal.aborted
+}
+
+function emitStreamDone(
+  req: StreamRequest,
+  lifecycle: StreamLifecycle,
+  payload: Omit<StreamDonePayload, 'chatId' | 'requestId'>
+): void {
+  if (lifecycle.doneEmitted) return
+  const controller = controllers.get(req.requestId)
+  if (!controller || activeChatRequests.get(req.chatId) !== req.requestId) return
+  lifecycle.doneEmitted = true
+  broadcast(EVENTS.streamDone, {
+    chatId: req.chatId,
+    requestId: req.requestId,
+    ...payload
+  })
+}
+
+function stopIfStreamInactive(
+  req: StreamRequest,
+  controller: AbortController,
+  lifecycle: StreamLifecycle
+): boolean {
+  if (isLiveStreamRequest(req, controller)) return false
+  if (ownsStreamRequest(req, controller) && controller.signal.aborted) {
+    emitStreamDone(req, lifecycle, { content: '', aborted: true })
+  }
+  return true
+}
 
 export function cancelStream(requestId: string): void {
   controllers.get(requestId)?.abort()
@@ -551,6 +592,8 @@ function publishStreamRoundProgress(
   state: StreamRoundState,
   forceContent = false
 ): void {
+  const controller = controllers.get(requestId)
+  if (activeChatRequests.get(chatId) !== requestId || !controller || controller.signal.aborted) return
   const nativeToolSignal = state.pending.size > 0 || isToolFinishReason(state.finishReason)
   const textMayBeToolCall = classifyExplicitToolTextPrefix(state.content) === 'candidate'
   const canPublishContent = forceContent || (!nativeToolSignal && !textMayBeToolCall)
@@ -1451,22 +1494,41 @@ async function learnConversationRelevance(
 }
 
 export async function streamChat(req: StreamRequest): Promise<void> {
+  const controller = new AbortController()
+  const lifecycle: StreamLifecycle = { doneEmitted: false }
+  const previousRequestId = activeChatRequests.get(req.chatId)
+  if (previousRequestId) controllers.get(previousRequestId)?.abort()
+  controllers.set(req.requestId, controller)
+  activeChatRequests.set(req.chatId, req.requestId)
+
   try {
-    await streamChatInner(req)
+    await streamChatInner(req, controller, lifecycle)
   } catch (err) {
-    const done: StreamDonePayload = {
-      chatId: req.chatId,
-      requestId: req.requestId,
-      content: '',
-      error: (err as Error).message
+    if (ownsStreamRequest(req, controller)) {
+      emitStreamDone(req, lifecycle, controller.signal.aborted
+        ? { content: '', aborted: true }
+        : { content: '', error: (err as Error).message })
     }
-    broadcast(EVENTS.streamDone, done)
+  } finally {
+    if (controllers.get(req.requestId) === controller) {
+      controllers.delete(req.requestId)
+    }
+    if (activeChatRequests.get(req.chatId) === req.requestId) {
+      activeChatRequests.delete(req.chatId)
+    }
   }
 }
 
-async function streamChatInner(req: StreamRequest): Promise<void> {
+async function streamChatInner(
+  req: StreamRequest,
+  controller: AbortController,
+  lifecycle: StreamLifecycle
+): Promise<void> {
+  const stopIfInactive = (): boolean => stopIfStreamInactive(req, controller, lifecycle)
   const settings = await loadApiSettings()
+  if (stopIfInactive()) return
   const { chat, messages } = await getChat(req.chatId)
+  if (stopIfInactive()) return
   const isFeatureGuide = chat.system === 'feature-guide'
 
   // 组装本次请求的历史与用户消息
@@ -1486,19 +1548,24 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
     const attachments: ChatAttachment[] = []
     if (chat.system !== 'feature-guide') {
       for (const sid of req.snapshotIds ?? []) {
+        if (stopIfInactive()) return
         const snap = await readSnapshot(chat.projectId, chat.id, sid)
+        if (stopIfInactive()) return
         if (snap) attachments.push({ snapshotId: sid, kind: 'resource', name: snap.name })
       }
     }
     const tree = (await buildSnapshot()).projects.find((p) => p.project.id === chat.projectId)
+    if (stopIfInactive()) return
     const projectDocIds = new Set(
       (tree?.docs ?? []).filter((doc) => doc.projectId === chat.projectId).map((doc) => doc.id)
     )
     if (chat.system !== 'feature-guide') {
       for (const docId of req.docIds ?? []) {
+        if (stopIfInactive()) return
         if (!projectDocIds.has(docId)) continue
         try {
           const { doc } = await readDoc(docId)
+          if (stopIfInactive()) return
           if (doc.projectId !== chat.projectId) continue
           attachments.push({ docId, kind: 'project_document', name: doc.title })
         } catch {
@@ -1506,6 +1573,7 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
         }
       }
     }
+    if (stopIfInactive()) return
     await appendMessage(req.chatId, {
       id: req.userMessageId,
       role: 'user',
@@ -1513,25 +1581,25 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
       createdAt: nowIso(),
       attachments
     })
+    if (stopIfInactive()) return
     historyForPrompt = (await getChat(req.chatId)).messages
+    if (stopIfInactive()) return
   }
 
   if (!settings.apiKey) {
-    const done: StreamDonePayload = { chatId: req.chatId, requestId: req.requestId, content: '', error: '未配置 API Key，请先在设置中配置' }
-    broadcast(EVENTS.streamDone, done)
+    emitStreamDone(req, lifecycle, { content: '', error: '\u672a\u914d\u7f6e API Key\uff0c\u8bf7\u5148\u5728\u8bbe\u7f6e\u4e2d\u914d\u7f6e' })
     return
   }
 
   const client = makeClient(settings)
-  const controller = new AbortController()
-  controllers.set(req.requestId, controller)
-
   let compatibility = await loadModelCapabilityProfile(settings)
+  if (stopIfInactive()) return
   let replayReasoning = compatibility.reasoningReplay
   let summaryReadinessPromise: Promise<string[]> | null = null
   const ensureSummaries = (): Promise<string[]> => {
     if (!summaryReadinessPromise) {
       summaryReadinessPromise = ensureProjectDocSummariesReady(chat.projectId, (progress: SummaryReadinessUpdate) => {
+        if (!isLiveStreamRequest(req, controller)) return
         broadcast(EVENTS.summaryReadiness, {
           requestId: req.requestId,
           chatId: chat.id,
@@ -1541,8 +1609,9 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
     }
     return summaryReadinessPromise
   }
-  const prepareMessages = async (replay: boolean): Promise<{ messages: ChatCompletionMessageParam[]; memory: MemoryContext }> => {
+  const prepareMessages = async (replay: boolean): Promise<{ messages: ChatCompletionMessageParam[]; memory: MemoryContext } | null> => {
     const built = await buildMessages(req, chat, historyForPrompt, !req.regenerate, replay, ensureSummaries)
+    if (stopIfInactive()) return null
     const auxMsgs = [...built.highPriorityAuxMsgs, ...built.rollupMsgs, ...built.resourceMsgs]
     let finalMessages = applyBudget(
       built.systemMsgs,
@@ -1559,6 +1628,7 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
       // The guide chat is intentionally isolated from project memory and source retrieval.
     } else if (shouldAutoRetrieve(req.userText)) {
       const automatic = await retrieveProjectOriginals(chat.projectId, req.userText, settings.language, 'automatic')
+      if (stopIfInactive()) return null
       finalMessages = insertIntoSystemPrefix(finalMessages, automatic.messages)
       appendVectorAttempt(built.memory, automatic.attempt, automatic.items)
     } else {
@@ -1574,9 +1644,12 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
       }])
     }
 
+    if (stopIfInactive()) return null
     return { messages: finalMessages, memory: built.memory }
   }
-  let prepared = await prepareMessages(replayReasoning === 'when_present')
+  const initialPrepared = await prepareMessages(replayReasoning === 'when_present')
+  if (!initialPrepared) return
+  let prepared = initialPrepared
 
   let acc = ''
   let reasoning = ''
@@ -1604,17 +1677,26 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
     } catch (error) {
       const shouldLearnReplay = settings.apiProtocol === 'chat_completions'
         && replayReasoning === 'never'
-        && !controller.signal.aborted
+        && isLiveStreamRequest(req, controller)
         && hasAssistantReasoning(historyForPrompt)
         && isReasoningReplayRequiredError(error)
-      if (!shouldLearnReplay) throw error
+      if (!shouldLearnReplay) {
+        if (stopIfInactive()) return
+        throw error
+      }
 
       const retryStartedAt = Date.now()
+      if (stopIfInactive()) return
       compatibility = await enableReasoningReplay(settings)
+      if (stopIfInactive()) return
       replayReasoning = compatibility.reasoningReplay
-      prepared = await prepareMessages(true)
+      const retryPrepared = await prepareMessages(true)
+      if (!retryPrepared) return
+      prepared = retryPrepared
+      if (stopIfInactive()) return
       try {
         result = await runPreparedChat()
+        if (stopIfInactive()) return
         logChatCompatibilityEvent({
           protocol: settings.apiProtocol,
           providerFamily: compatibility.providerFamily,
@@ -1625,6 +1707,7 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
           error: compactCompatibilityError(error)
         })
       } catch (retryError) {
+        if (stopIfInactive()) return
         logChatCompatibilityEvent({
           protocol: settings.apiProtocol,
           providerFamily: compatibility.providerFamily,
@@ -1637,47 +1720,31 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
         throw retryError
       }
     }
+    if (stopIfInactive()) return
     acc = result.content
     reasoning = result.reasoning
     usage = result.usage
-
-    if (controller.signal.aborted) {
-      broadcast(EVENTS.streamDone, {
-        chatId: req.chatId,
-        requestId: req.requestId,
-        content: '',
-        aborted: true
-      })
-      return
-    }
   } catch (err) {
-    if (controller.signal.aborted) {
-      broadcast(EVENTS.streamDone, {
-        chatId: req.chatId,
-        requestId: req.requestId,
-        content: '',
-        aborted: true
-      })
-      return
-    }
+    if (stopIfInactive()) return
     failed = true
-    broadcast(EVENTS.streamDone, {
-      chatId: req.chatId,
-      requestId: req.requestId,
+    emitStreamDone(req, lifecycle, {
       content: acc,
       reasoning: reasoning || undefined,
       error: (err as Error).message
     })
-  } finally {
-    controllers.delete(req.requestId)
+    return
   }
 
-  // 成功：持久化回答（含思维链）+ 记录用量
+  if (stopIfInactive()) return
+
   if (!failed && acc.length > 0) {
     if (req.regenerate) {
+      if (stopIfInactive()) return
       persistedMessageId = (await replaceLastAssistantMessage(req.chatId, acc, reasoning || undefined, prepared.memory)) ?? undefined
+      if (stopIfInactive()) return
     }
     if (!persistedMessageId) {
+      if (stopIfInactive()) return
       persistedMessageId = newId()
       await appendMessage(req.chatId, {
         id: persistedMessageId,
@@ -1687,23 +1754,28 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
         reasoning: reasoning || undefined,
         memory: prepared.memory
       })
+      if (stopIfInactive()) return
     }
   }
 
   if (!failed && !req.regenerate && acc.length > 0) {
+    if (stopIfInactive()) return
     const currentUser = historyForPrompt.find((message) => message.id === req.userMessageId)
     await learnConversationRelevance(req.chatId, historyForPrompt, req.userText, currentUser?.attachments, acc)
+    if (stopIfInactive()) return
   }
 
-  if (usage) await recordUsage(usage, 'chat')
-  else if (!failed && !controller.signal.aborted) {
+  if (stopIfInactive()) return
+  if (usage) {
+    await recordUsage(usage, 'chat')
+    if (stopIfInactive()) return
+  } else if (!failed) {
     await recordUsage(undefined, 'chat')
+    if (stopIfInactive()) return
   }
 
   if (!failed) {
-    broadcast(EVENTS.streamDone, {
-      chatId: req.chatId,
-      requestId: req.requestId,
+    emitStreamDone(req, lifecycle, {
       content: acc,
       reasoning: reasoning || undefined,
       usage: usage ? { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, total_tokens: usage.total_tokens } : undefined,
@@ -1712,6 +1784,7 @@ async function streamChatInner(req: StreamRequest): Promise<void> {
       regenerated: req.regenerate
     })
   }
+
 }
 
 // ---------------------------------------------------------------------------

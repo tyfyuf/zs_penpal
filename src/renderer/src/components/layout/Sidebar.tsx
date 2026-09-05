@@ -543,7 +543,7 @@ export default function Sidebar(): JSX.Element {
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold">{t('app.title')}</div>
           <div className="truncate text-[11px]" style={{ color: 'var(--muted)' }} title={workspace.workspaceDir}>
-            {workspace.workspaceDir || '未设置工作目录'}
+            {workspace.workspaceDir || t('sidebar.workspaceUnset')}
           </div>
         </div>
         <div className="flex items-center gap-1">
@@ -918,6 +918,7 @@ function Section({
   onAdd?: () => void
   children: ReactNode
 }): JSX.Element {
+  const t = useT()
   return (
     <div className="mb-0.5">
       <div className="group flex items-center gap-1 px-2 py-0.5 text-[12px] hover:bg-[var(--panel3)]" style={{ color: 'var(--muted)' }}>
@@ -927,7 +928,7 @@ function Section({
         </button>
         <span className="flex-1" />
         {onAdd && (
-          <button className="hidden rounded p-0.5 group-hover:block hover:opacity-70" onClick={onAdd} title={`新建${label}`}>
+          <button className="hidden rounded p-0.5 group-hover:block hover:opacity-70" onClick={onAdd} title={t('sidebar.newSection', { label })}>
             <Plus size={12} />
           </button>
         )}

@@ -7,7 +7,9 @@ export default defineConfig({
   main: {
     resolve: {
       alias: {
-        '@shared': resolve('src/shared')
+        '@shared': resolve('src/shared'),
+        // Force OpenAI's auto shim to use Web Fetch and avoid loading node-fetch.
+        'openai/_shims/auto/runtime': resolve('node_modules/openai/_shims/auto/runtime.js')
       }
     },
     build: {
