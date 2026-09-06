@@ -69,7 +69,7 @@ npm run build      # Build the Electron application
 npm run dist       # Build a Windows installer
 ```
 
-On Windows, you can also double-click `start-dev.cmd` for development mode or `start.cmd` to run an already-built `out/` directory.
+For development, run the commands above from a terminal. To run an already-built application, use the packaged Windows installer from the Release attachments.
 
 On first launch, choose a dedicated workspace folder. Projects, documents, chats, resources, and summaries are stored there. Do not commit real writing data to this repository.
 
@@ -88,7 +88,6 @@ src/preload/    Typed contextBridge and IPC allowlist
 src/renderer/   React UI, editor, sidebar, chat, and settings
 scripts/        Build and verification scripts
 build/          Application icons and build resources
-docs/           Public implementation notes
 ```
 
 ## License

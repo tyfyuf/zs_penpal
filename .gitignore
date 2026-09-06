@@ -18,13 +18,9 @@ research/
 BAAI--bge-small-zh-v1.5/
 models/
 
-# User-provided repro documents are local-only
-失败文档/
-
-# Local-only user data, private audit material, and provider notes
+# Local-only user data and private provider files
 settings/
 .tmp-*
-2212
 docs/kimi.txt
 docs/qwen.txt
 docs/*audit*.md

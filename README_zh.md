@@ -67,7 +67,7 @@ npm run build      # 构建 Electron 应用
 npm run dist       # 构建 Windows 安装包
 ```
 
-在 Windows 上，也可以双击 `start-dev.cmd` 启动开发模式，或双击 `start.cmd` 运行已经构建好的 `out/` 目录。
+开发时请在终端中运行上面的命令。要运行已经构建好的应用，请从 Release 附件下载 Windows 安装包。
 
 首次启动时，请选择一个专门的工作区文件夹。项目、写作文档、对话、资源和摘要都会保存在该工作区中。请不要将真实创作数据提交到源码仓库。
 
@@ -86,7 +86,6 @@ src/preload/    类型化 contextBridge 与 IPC 白名单
 src/renderer/   React 界面、编辑器、左侧栏、对话和设置
 scripts/        构建与校验脚本
 build/          应用图标与构建资源
-docs/           公开实现说明
 ```
 
 ## 许可证
