@@ -1,31 +1,29 @@
+# Node.js / Electron dependencies and generated output
 node_modules/
 out/
 dist/
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tsbuildinfo
+
+# Operating-system and local environment files
 .DS_Store
+Thumbs.db
 .env
 .env.*
 
-# Local build/download caches
+# Local package-manager and Electron build caches
 .npm-cache/
 .electron-cache/
 .electron-builder-cache/
 
-# Research/reference archives are local-only and should not be committed
-research/
-
-# Raw and converted embedding model assets are distributed as release attachments, not committed
+# Large model assets are distributed separately from the source repository
 BAAI--bge-small-zh-v1.5/
 models/
 
-# Local-only user data and private provider files
-settings/
+# Generic local scratch files and release-upload staging files
 .tmp-*
-docs/kimi.txt
-docs/qwen.txt
-docs/*audit*.md
-docs/*triage*.md
-docs/*repair-plan*.md
-
-# Local copies prepared for GitHub Release uploads
 release-assets/
