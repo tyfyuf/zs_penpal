@@ -1,9 +1,19 @@
 # Penpal
 
+> Chinese users can read [README_zh.md](README_zh.md).
+
 Penpal is a Windows desktop writing assistant for authors. It helps you organize projects, edit documents, manage reference material, and use controlled AI conversations to support creative decisions.
 
 > Penpal assists the author; it does not replace the author. AI suggestions stay in the conversation area. Penpal does not silently rewrite your writing documents or publish a finished work without your decision.
 
+## Download
+
+For end users, download the Windows installer from the GitHub Release attachments:
+
+- `Penpal-0.1.0-win-x64-setup.exe` — Windows x64 installer.
+- `bge-small-zh-onnx.zip` — optional local embedding model package for vector retrieval.
+
+The model package is optional. If you want to use local vector retrieval, extract its `bge-small-zh-onnx/` directory under `models/`, then launch Penpal. The installer and model package are distributed as Release attachments rather than committed to the source repository.
 ## Features
 
 - Project and document management backed by a local workspace.

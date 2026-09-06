@@ -30,3 +30,6 @@ docs/qwen.txt
 docs/*audit*.md
 docs/*triage*.md
 docs/*repair-plan*.md
+
+# Local copies prepared for GitHub Release uploads
+release-assets/
