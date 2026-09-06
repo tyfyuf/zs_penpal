@@ -41,7 +41,7 @@
 - `special_tokens_map.json`
 - `vocab.txt`
 
-解压模型附件后，请运行 `npm run verify:embedding-model` 校验模型完整性。模型附件中也应包含来自 `THIRD_PARTY_LICENSES/BAAI-bge-small-zh-v1.5-LICENSE.txt` 的许可证文本。第三方组件和模型许可证信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+解压模型附件后，请运行 `npm run verify:embedding-model` 校验模型完整性。模型附件中已经包含一份模型许可证文本。源码和打包应用中包含的许可证信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 运行要求
 

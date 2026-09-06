@@ -10,7 +10,6 @@ files:
   - out/**/*
   - package.json
   - THIRD_PARTY_NOTICES.md
-  - THIRD_PARTY_LICENSES/**/*
   # Transformers.js Node builds use the Node/ORT runtime; exclude web/demo sources and WASM assets from release packages.
   - '!node_modules/@huggingface/transformers/src/**/*'
   - '!node_modules/@huggingface/transformers/types/**/*'

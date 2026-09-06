@@ -43,7 +43,7 @@ Required model files:
 - `special_tokens_map.json`
 - `vocab.txt`
 
-Run `npm run verify:embedding-model` after extracting the model attachment. The release attachment should include the model license text copied from `THIRD_PARTY_LICENSES/BAAI-bge-small-zh-v1.5-LICENSE.txt`. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for license information.
+Run `npm run verify:embedding-model` after extracting the model attachment. The model attachment includes a copy of its license text. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the license information included with the source and packaged application.
 
 ## Requirements
 
