@@ -1,4 +1,4 @@
-import { dirname, relative, resolve } from 'path'
+import { dirname, isAbsolute, relative, resolve, sep } from 'path'
 import { cp, lstat, mkdir, readdir, realpath, rename, rm } from 'fs/promises'
 import { EVENTS } from '@shared/ipc'
 import { loadConfig, setConfig } from './config.service'
@@ -8,7 +8,11 @@ import { newId } from '../util'
 
 function isSubdir(child: string, parent: string): boolean {
   const rel = relative(parent, child)
-  return rel !== '' && !rel.startsWith('..') && !resolve(rel).startsWith('..')
+  // On Windows, relative() returns an absolute path when the roots differ
+  // (for example, when the paths are on different drive letters). Such paths
+  // are not nested and must not be treated as subdirectories.
+  if (!rel || isAbsolute(rel)) return false
+  return rel !== '..' && !rel.startsWith(`..${sep}`)
 }
 
 /**

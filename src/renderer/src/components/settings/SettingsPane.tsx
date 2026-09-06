@@ -179,7 +179,7 @@ export default function SettingsPane(): JSX.Element {
   }
 
   async function migrate(): Promise<void> {
-    const dir = await api.invoke('config:choose-workspace', undefined)
+    const dir = await api.invoke('config:choose-migration-target', undefined)
     if (!dir) return
     const res = await api.invoke('workspace:migrate', dir)
     if (res.ok) {

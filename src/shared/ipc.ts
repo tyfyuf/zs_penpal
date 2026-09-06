@@ -101,6 +101,7 @@ export const IPC = {
   configGet: 'config:get',
   configSet: 'config:set',
   configChooseWorkspace: 'config:choose-workspace',
+  configChooseMigrationTarget: 'config:choose-migration-target',
   guideRebuild: 'guide:rebuild',
   workspaceGet: 'workspace:get',
   workspaceMigrate: 'workspace:migrate',
@@ -184,6 +185,7 @@ export interface IpcApi {
   [IPC.configGet]: { req: void; res: AppConfig }
   [IPC.configSet]: { req: Partial<AppConfig>; res: AppConfig }
   [IPC.configChooseWorkspace]: { req: void; res: string | null }
+  [IPC.configChooseMigrationTarget]: { req: void; res: string | null }
   [IPC.guideRebuild]: { req: void; res: { ok: boolean; error?: string } }
   [IPC.workspaceGet]: { req: void; res: WorkspaceSnapshot }
   [IPC.workspaceMigrate]: { req: string; res: { ok: boolean; error?: string } }

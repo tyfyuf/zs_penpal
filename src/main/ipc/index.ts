@@ -1,4 +1,5 @@
 import { dialog, ipcMain, clipboard } from 'electron'
+import { basename, dirname, resolve } from 'path'
 import { EVENTS, IPC, type IpcApi } from '@shared/ipc'
 import type { RecoveryState } from '@shared/types'
 import {
@@ -125,6 +126,22 @@ export function registerIpcHandlers(): void {
       properties: ['openDirectory', 'createDirectory']
     })
     return res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0]
+  })
+
+  handle(IPC.configChooseMigrationTarget, async () => {
+    const win = getMainWindow()
+    const config = await loadConfig()
+    const currentWorkspace = config.workspaceDir.trim()
+    const defaultPath = currentWorkspace
+      ? resolve(dirname(resolve(currentWorkspace)), `${basename(resolve(currentWorkspace))}-migrated`)
+      : undefined
+    const res = await dialog.showSaveDialog(win!, {
+      title: '选择新的工作目录',
+      buttonLabel: '选择此目录',
+      defaultPath,
+      properties: ['createDirectory', 'dontAddToRecent', 'showOverwriteConfirmation']
+    })
+    return res.canceled || !res.filePath ? null : res.filePath
   })
 
   // 工作区
