@@ -60,7 +60,7 @@ interface ChatDraft {
   attachments: ChatAttachment[]
 }
 
-const CHAT_DRAFTS_KEY = 'writing-agent:chat-drafts'
+const CHAT_DRAFTS_KEY = 'penpal:chat-drafts'
 
 function readChatDraft(chatId: string): ChatDraft {
   try {

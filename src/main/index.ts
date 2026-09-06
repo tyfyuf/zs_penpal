@@ -15,10 +15,10 @@ import { ensureFeatureGuideProject } from './services/file.service'
 const ALLOWED_EXT = ['.txt', '.md', '.csv', '.doc', '.docx']
 
 // Keep development windows grouped under Penpal instead of Electron on Windows.
-// The existing app ID is retained for install/update compatibility.
+// This ID matches the public Penpal package identity.
 if (process.platform === 'win32') {
   app.setName('Penpal')
-  app.setAppUserModelId('com.vibewrite.app')
+  app.setAppUserModelId('com.penpal.app')
 }
 
 // 全局错误落盘（供维护查阅）

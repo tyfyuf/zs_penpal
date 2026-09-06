@@ -69,7 +69,7 @@ bge-small-zh-v1.5-onnx-fp32-cls-qinst-v1
 - 原生 ORT 和 sharp 相关模块使用 `asarUnpack`。
 - 首发包裁掉 darwin、linux、Windows arm64、DirectML、DX 编译器及 ORT Web WASM/源码/source map 等无关资产。
 - 裁剪后仍保留 Transformers.js Node ESM 所需的 ORT Web 模块入口；已从裁剪后的 `app.asar` 完成加载烟测。
-- `npm run dist` 与 `npm run dist:dir` 会先执行模型完整性检查。
+- `npm run dist` and `npm run dist:dir` run model integrity checks before packaging.
 
 ## 4. 完整性与隐私
 
@@ -97,7 +97,7 @@ bge-small-zh-v1.5-onnx-fp32-cls-qinst-v1
 - `npm run verify:embedding-model`；
 - `npm run build`；
 - `npm run dist:dir`；
-- `npm run dist`：正式 NSIS 安装器构建成功，`dist/VibeWrite Setup 1.3.0.exe` 为 141,568,588 bytes（约 135.0 MiB），blockmap 为 148,572 bytes；
+- `npm run dist`: NSIS installer build passed; current artifact name and size should be checked from the active release build.
 - `git diff --check`；
 - Node 模型推理：`[1,512]`、L2≈1；
 - Electron 33.4.11 开发依赖推理：`[2,512]`、L2≈1；

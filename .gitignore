@@ -6,19 +6,19 @@ dist/
 .env
 .env.*
 
-# 本地构建/下载缓存（沙箱环境下重定向到工作区）
+# Local build/download caches
 .npm-cache/
 .electron-cache/
 .electron-builder-cache/
 
-# 对标研究参考仓库（体积大，不入库）
+# Research/reference archives are local-only and should not be committed
 research/
 
-# 原始嵌入模型与 ONNX 产物（大体积资产，不入库；安装包通过 extraResources 分发）
+# Raw and converted embedding model assets are distributed as release attachments, not committed
 BAAI--bge-small-zh-v1.5/
 models/
 
-# 用户提供的问题复现材料，仅限本地分析，禁止入库
+# User-provided repro documents are local-only
 失败文档/
 
 # Local-only user data, private audit material, and provider notes

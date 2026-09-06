@@ -14,8 +14,8 @@ import Modal from '../common/Modal'
 type SummarySectionKey = 'docs' | 'chats' | 'resources'
 type SummarySectionState = Record<SummarySectionKey, boolean>
 
-const SUMMARY_SECTION_STORAGE_PREFIX = 'vibewrite.summary.sections:'
-const CONSISTENCY_STORAGE_PREFIX = 'vibewrite.summary.consistency:'
+const SUMMARY_SECTION_STORAGE_PREFIX = 'penpal.summary.sections:'
+const CONSISTENCY_STORAGE_PREFIX = 'penpal.summary.consistency:'
 
 function readSummarySectionState(projectId: string): SummarySectionState {
   const defaults: SummarySectionState = { docs: true, chats: true, resources: true }

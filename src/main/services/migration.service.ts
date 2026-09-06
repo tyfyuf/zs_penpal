@@ -110,7 +110,7 @@ export async function migrateWorkspace(targetDir: string): Promise<{ ok: boolean
       await commitAllProjects()
     }
 
-    const staging = resolve(dirname(targetAbs), `.vibewrite-migrate-${newId()}`)
+    const staging = resolve(dirname(targetAbs), `.penpal-migrate-${newId()}`)
     try {
       await mkdir(staging, { recursive: true })
       broadcast(EVENTS.migrateProgress, { phase: 'copy', message: '复制项目数据（含 Git 历史）…', percent: 40 })

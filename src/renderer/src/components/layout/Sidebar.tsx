@@ -35,8 +35,8 @@ import type { ProjectSummariesOverview } from '@shared/types'
 import SummaryArea from './SummaryArea'
 import Modal from '../common/Modal'
 
-const SIDEBAR_EXPANDED_STORAGE_KEY = 'vibewrite.sidebar.expanded'
-const SIDEBAR_WIDTH_STORAGE_KEY = 'vibewrite.sidebar.width'
+const SIDEBAR_EXPANDED_STORAGE_KEY = 'penpal.sidebar.expanded'
+const SIDEBAR_WIDTH_STORAGE_KEY = 'penpal.sidebar.width'
 const DEFAULT_SIDEBAR_WIDTH = 260
 const MIN_SIDEBAR_WIDTH = 220
 const MAX_SIDEBAR_WIDTH = 480

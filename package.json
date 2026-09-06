@@ -1,6 +1,6 @@
 {
-  "name": "writing-agent",
-  "version": "1.3.0",
+  "name": "penpal",
+  "version": "0.1.0",
   "description": "Penpal - desktop writing assistant for creators: assists decisions without replacing the creator work",
   "main": "./out/main/index.js",
   "author": "Penpal",

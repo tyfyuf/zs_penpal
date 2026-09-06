@@ -1,7 +1,8 @@
-appId: com.vibewrite.app
+appId: com.penpal.app
 productName: Penpal
 icon: build/icon.ico
 afterPack: scripts/after-pack.cjs
+electronDist: node_modules/electron/dist
 directories:
   buildResources: build
   output: dist
@@ -9,7 +10,8 @@ files:
   - out/**/*
   - package.json
   - THIRD_PARTY_NOTICES.md
-  # Transformers.js 的 Node 导出会依赖 ORT Web 的模块入口，但 CPU 路径不会加载 WASM；剔除发布无关资产。
+  - THIRD_PARTY_LICENSES/**/*
+  # Transformers.js Node builds use the Node/ORT runtime; exclude web/demo sources and WASM assets from release packages.
   - '!node_modules/@huggingface/transformers/src/**/*'
   - '!node_modules/@huggingface/transformers/types/**/*'
   - '!node_modules/@huggingface/transformers/dist/transformers.js'
@@ -31,7 +33,7 @@ files:
   - '!node_modules/onnxruntime-web/dist/ort.jspi.mjs'
   - '!node_modules/onnxruntime-web/dist/ort.wasm.js'
   - '!node_modules/onnxruntime-web/dist/ort.wasm.mjs'
-  # 首发仅构建 Windows x64 CPU 版本，不携带其他平台、ARM64 或 DirectML/CUDA 运行库。
+  # First public release targets Windows x64 CPU only; exclude other OS/arch and GPU runtime binaries.
   - '!node_modules/onnxruntime-node/bin/napi-v6/darwin/**/*'
   - '!node_modules/onnxruntime-node/bin/napi-v6/linux/**/*'
   - '!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**/*'
@@ -65,7 +67,7 @@ win:
   executableName: Penpal
   # Metadata is written by scripts/after-pack.cjs with the vendored rcedit binary.
   # This avoids electron-builder's winCodeSign archive, which requires Windows symlink privileges.
-  signAndEditExecutable: false
+  signExecutable: false
   fileAssociations:
     - ext: md
       name: Markdown Document
