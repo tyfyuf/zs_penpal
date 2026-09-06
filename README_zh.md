@@ -6,12 +6,9 @@
 
 ## 下载与发布附件
 
-普通用户请从 GitHub Release 的附件中下载：
+普通用户只需要从 GitHub Release 的附件中下载并安装 `Penpal-0.1.0-win-x64-setup.exe`。Windows 安装包已经自带本地嵌入模型，安装后即可使用，普通用户不需要另外下载或手动配置模型。
 
-- `Penpal-0.1.0-win-x64-setup.exe`：Windows x64 安装包。
-- `bge-small-zh-onnx.zip`：可选的本地嵌入模型包，用于向量检索。
-
-模型包不是基础功能的必需项。如果需要使用本地向量检索，请将模型包中的 `bge-small-zh-onnx/` 目录解压到 `models/` 下，然后启动笔伴。安装包和模型包都作为 Release 附件分发，不会提交到源码仓库。
+单独提供的 `bge-small-zh-onnx.zip` 主要用于从源码构建软件的开发者，以及需要手动校验或重新打包模型的场景。使用 Windows 安装包时不需要下载这个模型附件。
 ## 功能特色
 
 - 基于本地工作区的项目与文档管理。
@@ -33,7 +30,7 @@
 
 ## 本地嵌入模型
 
-笔伴使用 BAAI `bge-small-zh-v1.5` ONNX 模型作为可选的本地向量检索模型。为了保持源码仓库轻量，模型文件不会提交到 Git。Windows 发布版本应将经过校验的模型包作为 GitHub Release 附件提供，并在打包前放置到 `models/bge-small-zh-onnx/` 目录。
+笔伴使用 BAAI `bge-small-zh-v1.5` ONNX 模型作为可选的本地向量检索模型。Windows 安装包已经内置该模型，安装后即可使用，普通用户不需要下载或手动放置模型文件。为了保持源码仓库轻量，模型文件不会提交到 Git。从源码构建软件时，开发者需要获取经过校验的模型包，并在打包前将其放置到 `models/bge-small-zh-onnx/` 目录。
 
 必需模型文件：
 

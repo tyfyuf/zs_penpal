@@ -8,12 +8,9 @@ Penpal is a Windows desktop writing assistant for authors. It helps you organize
 
 ## Download
 
-For end users, download the Windows installer from the GitHub Release attachments:
+For end users, download and install `Penpal-0.1.0-win-x64-setup.exe` from the GitHub Release attachments. The Windows installer already includes the local embedding model, so an end-user installation does **not** require a separate model download.
 
-- `Penpal-0.1.0-win-x64-setup.exe` — Windows x64 installer.
-- `bge-small-zh-onnx.zip` — optional local embedding model package for vector retrieval.
-
-The model package is optional. If you want to use local vector retrieval, extract its `bge-small-zh-onnx/` directory under `models/`, then launch Penpal. The installer and model package are distributed as Release attachments rather than committed to the source repository.
+The separate `bge-small-zh-onnx.zip` attachment is provided for source builds and developers who need to verify or package the model manually. It is not required when using the Windows installer.
 ## Features
 
 - Project and document management backed by a local workspace.
@@ -35,7 +32,7 @@ Models differ in their support for tools, structured output, reasoning fields, a
 
 ## Local embedding model
 
-Penpal uses the BAAI `bge-small-zh-v1.5` ONNX model for optional local vector retrieval. To keep the source repository lightweight, the model files are not committed to Git. Windows releases should provide the verified model package as a GitHub Release attachment and place it at `models/bge-small-zh-onnx/` before running packaged builds.
+Penpal uses the BAAI `bge-small-zh-v1.5` ONNX model for optional local vector retrieval. The Windows installer includes this model and is ready to use after installation; end users do not need to download or manually place model files. To keep the source repository lightweight, the model files are not committed to Git. Developers building from source must obtain the verified model package and place it at `models/bge-small-zh-onnx/` before creating a packaged build.
 
 Required model files:
 
